@@ -1,0 +1,35 @@
+# Xcode
+DerivedData/
+build/
+*.app
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+*.xcresult
+*.xctest
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+*.moved-aside
+*.xcsettings
+*.profraw
+*.profdata
+
+# macOS
+.DS_Store
+.Spotlight-V100
+.Trashes
+
+# SwiftPM (reserved for future use)
+.build/
+.swiftpm/
+
+# Editors and temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.log
+tmp/

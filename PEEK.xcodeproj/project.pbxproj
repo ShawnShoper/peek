@@ -1,0 +1,665 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B00000000000000000000001 /* PEEKApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000001 /* PEEKApp.swift */; };
+		B00000000000000000000005 /* ScreenshotService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000005 /* ScreenshotService.swift */; };
+		B00000000000000000000009 /* MenuBarMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000009 /* MenuBarMenuView.swift */; };
+		B0000000000000000000000E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000000E /* SettingsView.swift */; };
+		B0000000000000000000000F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000000F /* Assets.xcassets */; };
+		B00000000000000000000012 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000013 /* XCTest.framework */; };
+		B00000000000000000000020 /* ScreenshotCaptureModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000020 /* ScreenshotCaptureModels.swift */; };
+		B00000000000000000000021 /* ScreenshotCaptureCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000021 /* ScreenshotCaptureCoordinator.swift */; };
+		B00000000000000000000022 /* ScreenshotSelectionOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000022 /* ScreenshotSelectionOverlay.swift */; };
+		B00000000000000000000023 /* ScreenshotAnnotations.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000023 /* ScreenshotAnnotations.swift */; };
+		B00000000000000000000024 /* ScreenshotEditorCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000024 /* ScreenshotEditorCanvas.swift */; };
+		B00000000000000000000025 /* ScreenshotEditorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000025 /* ScreenshotEditorController.swift */; };
+		B00000000000000000000026 /* ScreenshotWorkflowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000026 /* ScreenshotWorkflowController.swift */; };
+		B00000000000000000000027 /* PEEKPinboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000027 /* PEEKPinboard.swift */; };
+		B00000000000000000000028 /* PEEKOCR.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000028 /* PEEKOCR.swift */; };
+		B00000000000000000000029 /* ScrollCaptureTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000029 /* ScrollCaptureTypes.swift */; };
+		B0000000000000000000002A /* ScrollPixelBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002A /* ScrollPixelBuffer.swift */; };
+		B0000000000000000000002B /* ScrollOverlapEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002B /* ScrollOverlapEstimator.swift */; };
+		B0000000000000000000002C /* VerticalImageStitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002C /* VerticalImageStitcher.swift */; };
+		B0000000000000000000002D /* ScrollFrameCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002D /* ScrollFrameCapturer.swift */; };
+		B0000000000000000000002E /* AutomaticScrollDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002E /* AutomaticScrollDriver.swift */; };
+		B0000000000000000000002F /* ScrollCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002F /* ScrollCaptureSession.swift */; };
+		B00000000000000000000030 /* ScrollCaptureHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000030 /* ScrollCaptureHUD.swift */; };
+		B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000031 /* ScreenshotKitTests.swift */; };
+		B00000000000000000000032 /* ScreenshotGlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */; };
+		B00000000000000000000033 /* HotKeyRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000033 /* HotKeyRecorderView.swift */; };
+		B00000000000000000000034 /* ScrollCaptureTargetResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000034 /* ScrollCaptureTargetResolver.swift */; };
+		B00000000000000000000035 /* ScrollMovingRegionDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000035 /* ScrollMovingRegionDetector.swift */; };
+		B00000000000000000000036 /* FileSearchModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000036 /* FileSearchModels.swift */; };
+		B00000000000000000000037 /* FileSearchMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000037 /* FileSearchMatcher.swift */; };
+		B00000000000000000000038 /* FileSearchService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000038 /* FileSearchService.swift */; };
+		B00000000000000000000039 /* FileSearchPanelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000039 /* FileSearchPanelProvider.swift */; };
+		B0000000000000000000003A /* SearchPanelModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003A /* SearchPanelModels.swift */; };
+		B0000000000000000000003B /* SearchPanelActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003B /* SearchPanelActions.swift */; };
+		B0000000000000000000003C /* SearchPanelViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003C /* SearchPanelViewModel.swift */; };
+		B0000000000000000000003D /* SearchPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003D /* SearchPanelView.swift */; };
+		B0000000000000000000003E /* SearchPanelKeyboardBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003E /* SearchPanelKeyboardBridge.swift */; };
+		B0000000000000000000003F /* SearchPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000003F /* SearchPanelController.swift */; };
+		B00000000000000000000040 /* FileSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000040 /* FileSearchTests.swift */; };
+		B00000000000000000000041 /* FileSearchIndexStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000041 /* FileSearchIndexStore.swift */; };
+		B00000000000000000000042 /* FileSearchAuthorizedRootStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000042 /* FileSearchAuthorizedRootStore.swift */; };
+		B00000000000000000000043 /* FileSearchBackgroundIndexTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000043 /* FileSearchBackgroundIndexTypes.swift */; };
+		B00000000000000000000044 /* FileSearchActivityGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000044 /* FileSearchActivityGate.swift */; };
+		B00000000000000000000045 /* FileSearchCPUBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000045 /* FileSearchCPUBudget.swift */; };
+		B00000000000000000000046 /* FileSearchBackgroundIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000046 /* FileSearchBackgroundIndexer.swift */; };
+		B00000000000000000000047 /* FileSearchIndexCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000047 /* FileSearchIndexCoordinator.swift */; };
+		B00000000000000000000048 /* FileSearchIndexRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000048 /* FileSearchIndexRuntime.swift */; };
+		B00000000000000000000049 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = F0000000000000000000004A /* libsqlite3.tbd */; };
+		B00000000000000000000050 /* PEEKPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000050 /* PEEKPreferences.swift */; };
+		B00000000000000000000051 /* PEEKQRCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000051 /* PEEKQRCode.swift */; };
+		B00000000000000000000052 /* ScreenshotServiceSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000052 /* ScreenshotServiceSupport.swift */; };
+		B00000000000000000000053 /* PEEKLocalization.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000053 /* PEEKLocalization.swift */; };
+		B00000000000000000000054 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000054 /* Localizable.xcstrings */; };
+		B00000000000000000000055 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000055 /* InfoPlist.xcstrings */; };
+		B00000000000000000000056 /* SearchApplicationUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000056 /* SearchApplicationUsageStore.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C10000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D00000000000000000000001;
+			remoteInfo = PEEK;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		F00000000000000000000001 /* PEEKApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKApp.swift; sourceTree = "<group>"; };
+		F00000000000000000000005 /* ScreenshotService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotService.swift; sourceTree = "<group>"; };
+		F00000000000000000000009 /* MenuBarMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarMenuView.swift; sourceTree = "<group>"; };
+		F0000000000000000000000E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F0000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F00000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F00000000000000000000013 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		F00000000000000000000020 /* ScreenshotCaptureModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotCaptureModels.swift; sourceTree = "<group>"; };
+		F00000000000000000000021 /* ScreenshotCaptureCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotCaptureCoordinator.swift; sourceTree = "<group>"; };
+		F00000000000000000000022 /* ScreenshotSelectionOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotSelectionOverlay.swift; sourceTree = "<group>"; };
+		F00000000000000000000023 /* ScreenshotAnnotations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotAnnotations.swift; sourceTree = "<group>"; };
+		F00000000000000000000024 /* ScreenshotEditorCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorCanvas.swift; sourceTree = "<group>"; };
+		F00000000000000000000025 /* ScreenshotEditorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorController.swift; sourceTree = "<group>"; };
+		F00000000000000000000026 /* ScreenshotWorkflowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotWorkflowController.swift; sourceTree = "<group>"; };
+		F00000000000000000000027 /* PEEKPinboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKPinboard.swift; sourceTree = "<group>"; };
+		F00000000000000000000028 /* PEEKOCR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKOCR.swift; sourceTree = "<group>"; };
+		F00000000000000000000029 /* ScrollCaptureTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureTypes.swift; sourceTree = "<group>"; };
+		F0000000000000000000002A /* ScrollPixelBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPixelBuffer.swift; sourceTree = "<group>"; };
+		F0000000000000000000002B /* ScrollOverlapEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollOverlapEstimator.swift; sourceTree = "<group>"; };
+		F0000000000000000000002C /* VerticalImageStitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerticalImageStitcher.swift; sourceTree = "<group>"; };
+		F0000000000000000000002D /* ScrollFrameCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollFrameCapturer.swift; sourceTree = "<group>"; };
+		F0000000000000000000002E /* AutomaticScrollDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticScrollDriver.swift; sourceTree = "<group>"; };
+		F0000000000000000000002F /* ScrollCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureSession.swift; sourceTree = "<group>"; };
+		F00000000000000000000030 /* ScrollCaptureHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureHUD.swift; sourceTree = "<group>"; };
+		F00000000000000000000031 /* ScreenshotKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotKitTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotGlobalHotKey.swift; sourceTree = "<group>"; };
+		F00000000000000000000033 /* HotKeyRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyRecorderView.swift; sourceTree = "<group>"; };
+		F00000000000000000000034 /* ScrollCaptureTargetResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureTargetResolver.swift; sourceTree = "<group>"; };
+		F00000000000000000000035 /* ScrollMovingRegionDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollMovingRegionDetector.swift; sourceTree = "<group>"; };
+		F00000000000000000000036 /* FileSearchModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchModels.swift; sourceTree = "<group>"; };
+		F00000000000000000000037 /* FileSearchMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchMatcher.swift; sourceTree = "<group>"; };
+		F00000000000000000000038 /* FileSearchService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchService.swift; sourceTree = "<group>"; };
+		F00000000000000000000039 /* FileSearchPanelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchPanelProvider.swift; sourceTree = "<group>"; };
+		F0000000000000000000003A /* SearchPanelModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelModels.swift; sourceTree = "<group>"; };
+		F0000000000000000000003B /* SearchPanelActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelActions.swift; sourceTree = "<group>"; };
+		F0000000000000000000003C /* SearchPanelViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelViewModel.swift; sourceTree = "<group>"; };
+		F0000000000000000000003D /* SearchPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelView.swift; sourceTree = "<group>"; };
+		F0000000000000000000003E /* SearchPanelKeyboardBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelKeyboardBridge.swift; sourceTree = "<group>"; };
+		F0000000000000000000003F /* SearchPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchPanelController.swift; sourceTree = "<group>"; };
+		F00000000000000000000040 /* FileSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000041 /* FileSearchIndexStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchIndexStore.swift; sourceTree = "<group>"; };
+		F00000000000000000000042 /* FileSearchAuthorizedRootStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchAuthorizedRootStore.swift; sourceTree = "<group>"; };
+		F00000000000000000000043 /* FileSearchBackgroundIndexTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchBackgroundIndexTypes.swift; sourceTree = "<group>"; };
+		F00000000000000000000044 /* FileSearchActivityGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchActivityGate.swift; sourceTree = "<group>"; };
+		F00000000000000000000045 /* FileSearchCPUBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchCPUBudget.swift; sourceTree = "<group>"; };
+		F00000000000000000000046 /* FileSearchBackgroundIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchBackgroundIndexer.swift; sourceTree = "<group>"; };
+		F00000000000000000000047 /* FileSearchIndexCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchIndexCoordinator.swift; sourceTree = "<group>"; };
+		F00000000000000000000048 /* FileSearchIndexRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSearchIndexRuntime.swift; sourceTree = "<group>"; };
+		F00000000000000000000049 /* PEEK.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PEEK.entitlements; sourceTree = "<group>"; };
+		F0000000000000000000004A /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		F00000000000000000000050 /* PEEKPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKPreferences.swift; sourceTree = "<group>"; };
+		F00000000000000000000051 /* PEEKQRCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKQRCode.swift; sourceTree = "<group>"; };
+		F00000000000000000000052 /* ScreenshotServiceSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotServiceSupport.swift; sourceTree = "<group>"; };
+		F00000000000000000000053 /* PEEKLocalization.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKLocalization.swift; sourceTree = "<group>"; };
+		F00000000000000000000054 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		F00000000000000000000055 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
+		F00000000000000000000056 /* SearchApplicationUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchApplicationUsageStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000001 /* PEEK.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PEEK.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000002 /* PEEKTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PEEKTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A50000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000049 /* libsqlite3.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A50000000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000012 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A00000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000001 /* PEEK */,
+				A20000000000000000000001 /* PEEKTests */,
+				A30000000000000000000001 /* Frameworks */,
+				A40000000000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000001 /* PEEK */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000049 /* PEEK.entitlements */,
+				A10000000000000000000002 /* App */,
+				A10000000000000000000004 /* Services */,
+				A10000000000000000000009 /* SearchKit */,
+				A1000000000000000000000A /* SearchUI */,
+				A10000000000000000000008 /* ScreenshotKit */,
+				A10000000000000000000006 /* Views */,
+				A10000000000000000000007 /* Resources */,
+			);
+			path = PEEK;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000002 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000001 /* PEEKApp.swift */,
+				F00000000000000000000050 /* PEEKPreferences.swift */,
+				F00000000000000000000053 /* PEEKLocalization.swift */,
+				F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000004 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000005 /* ScreenshotService.swift */,
+				F00000000000000000000052 /* ScreenshotServiceSupport.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000006 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000033 /* HotKeyRecorderView.swift */,
+				F00000000000000000000009 /* MenuBarMenuView.swift */,
+				F0000000000000000000000E /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000007 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F0000000000000000000000F /* Assets.xcassets */,
+				F00000000000000000000010 /* Info.plist */,
+				F00000000000000000000054 /* Localizable.xcstrings */,
+				F00000000000000000000055 /* InfoPlist.xcstrings */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000008 /* ScreenshotKit */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000028 /* PEEKOCR.swift */,
+				F00000000000000000000051 /* PEEKQRCode.swift */,
+				F00000000000000000000027 /* PEEKPinboard.swift */,
+				F0000000000000000000002E /* AutomaticScrollDriver.swift */,
+				F00000000000000000000023 /* ScreenshotAnnotations.swift */,
+				F00000000000000000000021 /* ScreenshotCaptureCoordinator.swift */,
+				F00000000000000000000020 /* ScreenshotCaptureModels.swift */,
+				F00000000000000000000024 /* ScreenshotEditorCanvas.swift */,
+				F00000000000000000000025 /* ScreenshotEditorController.swift */,
+				F00000000000000000000022 /* ScreenshotSelectionOverlay.swift */,
+				F00000000000000000000026 /* ScreenshotWorkflowController.swift */,
+				F00000000000000000000030 /* ScrollCaptureHUD.swift */,
+				F0000000000000000000002F /* ScrollCaptureSession.swift */,
+				F00000000000000000000034 /* ScrollCaptureTargetResolver.swift */,
+				F00000000000000000000029 /* ScrollCaptureTypes.swift */,
+				F0000000000000000000002D /* ScrollFrameCapturer.swift */,
+				F0000000000000000000002B /* ScrollOverlapEstimator.swift */,
+				F00000000000000000000035 /* ScrollMovingRegionDetector.swift */,
+				F0000000000000000000002A /* ScrollPixelBuffer.swift */,
+				F0000000000000000000002C /* VerticalImageStitcher.swift */,
+			);
+			path = ScreenshotKit;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000009 /* SearchKit */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000044 /* FileSearchActivityGate.swift */,
+				F00000000000000000000042 /* FileSearchAuthorizedRootStore.swift */,
+				F00000000000000000000046 /* FileSearchBackgroundIndexer.swift */,
+				F00000000000000000000043 /* FileSearchBackgroundIndexTypes.swift */,
+				F00000000000000000000045 /* FileSearchCPUBudget.swift */,
+				F00000000000000000000047 /* FileSearchIndexCoordinator.swift */,
+				F00000000000000000000048 /* FileSearchIndexRuntime.swift */,
+				F00000000000000000000041 /* FileSearchIndexStore.swift */,
+				F00000000000000000000037 /* FileSearchMatcher.swift */,
+				F00000000000000000000036 /* FileSearchModels.swift */,
+				F00000000000000000000039 /* FileSearchPanelProvider.swift */,
+				F00000000000000000000038 /* FileSearchService.swift */,
+				F00000000000000000000056 /* SearchApplicationUsageStore.swift */,
+			);
+			path = SearchKit;
+			sourceTree = "<group>";
+		};
+		A1000000000000000000000A /* SearchUI */ = {
+			isa = PBXGroup;
+			children = (
+				F0000000000000000000003B /* SearchPanelActions.swift */,
+				F0000000000000000000003F /* SearchPanelController.swift */,
+				F0000000000000000000003E /* SearchPanelKeyboardBridge.swift */,
+				F0000000000000000000003A /* SearchPanelModels.swift */,
+				F0000000000000000000003D /* SearchPanelView.swift */,
+				F0000000000000000000003C /* SearchPanelViewModel.swift */,
+			);
+			path = SearchUI;
+			sourceTree = "<group>";
+		};
+		A20000000000000000000001 /* PEEKTests */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000040 /* FileSearchTests.swift */,
+				F00000000000000000000031 /* ScreenshotKitTests.swift */,
+			);
+			path = PEEKTests;
+			sourceTree = "<group>";
+		};
+		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F0000000000000000000004A /* libsqlite3.tbd */,
+				F00000000000000000000013 /* XCTest.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A40000000000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F10000000000000000000001 /* PEEK.app */,
+				F10000000000000000000002 /* PEEKTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D00000000000000000000001 /* PEEK */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000000000000000000001 /* Build configuration list for PBXNativeTarget "PEEK" */;
+			buildPhases = (
+				A60000000000000000000001 /* Sources */,
+				A50000000000000000000001 /* Frameworks */,
+				A70000000000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PEEK;
+			productName = PEEK;
+			productReference = F10000000000000000000001 /* PEEK.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D00000000000000000000002 /* PEEKTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000000000000000000002 /* Build configuration list for PBXNativeTarget "PEEKTests" */;
+			buildPhases = (
+				A60000000000000000000002 /* Sources */,
+				A50000000000000000000002 /* Frameworks */,
+				A70000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D10000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = PEEKTests;
+			productName = PEEKTests;
+			productReference = F10000000000000000000002 /* PEEKTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C00000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					D00000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					D00000000000000000000002 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = D00000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = E00000000000000000000001 /* Build configuration list for PBXProject "PEEK" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = "zh-Hans";
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				"zh-Hans",
+				Base,
+			);
+			mainGroup = A00000000000000000000001;
+			productRefGroup = A40000000000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D00000000000000000000001 /* PEEK */,
+				D00000000000000000000002 /* PEEKTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A70000000000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B0000000000000000000000F /* Assets.xcassets in Resources */,
+				B00000000000000000000054 /* Localizable.xcstrings in Resources */,
+				B00000000000000000000055 /* InfoPlist.xcstrings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A70000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000001 /* PEEKApp.swift in Sources */,
+				B00000000000000000000050 /* PEEKPreferences.swift in Sources */,
+				B00000000000000000000053 /* PEEKLocalization.swift in Sources */,
+				B00000000000000000000032 /* ScreenshotGlobalHotKey.swift in Sources */,
+				B00000000000000000000005 /* ScreenshotService.swift in Sources */,
+				B00000000000000000000052 /* ScreenshotServiceSupport.swift in Sources */,
+				B00000000000000000000033 /* HotKeyRecorderView.swift in Sources */,
+				B00000000000000000000009 /* MenuBarMenuView.swift in Sources */,
+				B0000000000000000000000E /* SettingsView.swift in Sources */,
+				B00000000000000000000020 /* ScreenshotCaptureModels.swift in Sources */,
+				B00000000000000000000021 /* ScreenshotCaptureCoordinator.swift in Sources */,
+				B00000000000000000000022 /* ScreenshotSelectionOverlay.swift in Sources */,
+				B00000000000000000000023 /* ScreenshotAnnotations.swift in Sources */,
+				B00000000000000000000024 /* ScreenshotEditorCanvas.swift in Sources */,
+				B00000000000000000000025 /* ScreenshotEditorController.swift in Sources */,
+				B00000000000000000000026 /* ScreenshotWorkflowController.swift in Sources */,
+				B00000000000000000000027 /* PEEKPinboard.swift in Sources */,
+				B00000000000000000000028 /* PEEKOCR.swift in Sources */,
+				B00000000000000000000051 /* PEEKQRCode.swift in Sources */,
+				B00000000000000000000029 /* ScrollCaptureTypes.swift in Sources */,
+				B0000000000000000000002A /* ScrollPixelBuffer.swift in Sources */,
+				B0000000000000000000002B /* ScrollOverlapEstimator.swift in Sources */,
+				B00000000000000000000035 /* ScrollMovingRegionDetector.swift in Sources */,
+				B0000000000000000000002C /* VerticalImageStitcher.swift in Sources */,
+				B0000000000000000000002D /* ScrollFrameCapturer.swift in Sources */,
+				B0000000000000000000002E /* AutomaticScrollDriver.swift in Sources */,
+				B0000000000000000000002F /* ScrollCaptureSession.swift in Sources */,
+				B00000000000000000000034 /* ScrollCaptureTargetResolver.swift in Sources */,
+				B00000000000000000000030 /* ScrollCaptureHUD.swift in Sources */,
+				B00000000000000000000036 /* FileSearchModels.swift in Sources */,
+				B00000000000000000000037 /* FileSearchMatcher.swift in Sources */,
+				B00000000000000000000038 /* FileSearchService.swift in Sources */,
+				B00000000000000000000039 /* FileSearchPanelProvider.swift in Sources */,
+				B00000000000000000000056 /* SearchApplicationUsageStore.swift in Sources */,
+				B00000000000000000000041 /* FileSearchIndexStore.swift in Sources */,
+				B00000000000000000000042 /* FileSearchAuthorizedRootStore.swift in Sources */,
+				B00000000000000000000043 /* FileSearchBackgroundIndexTypes.swift in Sources */,
+				B00000000000000000000044 /* FileSearchActivityGate.swift in Sources */,
+				B00000000000000000000045 /* FileSearchCPUBudget.swift in Sources */,
+				B00000000000000000000046 /* FileSearchBackgroundIndexer.swift in Sources */,
+				B00000000000000000000047 /* FileSearchIndexCoordinator.swift in Sources */,
+				B00000000000000000000048 /* FileSearchIndexRuntime.swift in Sources */,
+				B0000000000000000000003A /* SearchPanelModels.swift in Sources */,
+				B0000000000000000000003B /* SearchPanelActions.swift in Sources */,
+				B0000000000000000000003C /* SearchPanelViewModel.swift in Sources */,
+				B0000000000000000000003D /* SearchPanelView.swift in Sources */,
+				B0000000000000000000003E /* SearchPanelKeyboardBridge.swift in Sources */,
+				B0000000000000000000003F /* SearchPanelController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A60000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000040 /* FileSearchTests.swift in Sources */,
+				B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D10000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D00000000000000000000001 /* PEEK */;
+			targetProxy = C10000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		E20000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		E20000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		E30000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PEEK/PEEK.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PEEK/Resources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shawnshoper.peek;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E30000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = PEEK/PEEK.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = PEEK/Resources/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shawnshoper.peek;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		E40000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shawnshoper.peekTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PEEK.app/Contents/MacOS/PEEK";
+			};
+			name = Debug;
+		};
+		E40000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3;
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.shawnshoper.peekTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/PEEK.app/Contents/MacOS/PEEK";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E00000000000000000000001 /* Build configuration list for PBXProject "PEEK" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E20000000000000000000001 /* Debug */,
+				E20000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E10000000000000000000001 /* Build configuration list for PBXNativeTarget "PEEK" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E30000000000000000000001 /* Debug */,
+				E30000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E10000000000000000000002 /* Build configuration list for PBXNativeTarget "PEEKTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E40000000000000000000001 /* Debug */,
+				E40000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = C00000000000000000000001 /* Project object */;
+}
