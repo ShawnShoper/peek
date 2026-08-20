@@ -121,6 +121,7 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         ownsInstanceLock = true
+        PEEKAppearanceController.applyCurrent()
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(applicationFinishedRestoringWindows(_:)),
@@ -133,6 +134,11 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
         guard ownsInstanceLock else { return }
         hideAutomaticallyRestoredWindows()
         FileSearchIndexRuntime.shared.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            SearchPanelController.shared.prepare(
+                provider: FileSearchPanelProvider.shared
+            )
+        }
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--show-screenshot-toolbar-for-ui-testing") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -191,10 +197,12 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             image: image,
             selectionRect: selectionRect,
             screenFrame: screen.frame,
+            renderSelection: { _ in image },
+            onSelectionChanged: { _ in },
             onAction: nil,
             initialTool: .pen,
             focusToolbarForUITesting: true
-        ) { _ in }
+        ) { _, _ in }
     }
 
     private func showOCRResultPreview() {
@@ -227,7 +235,7 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             object: NSApp
         )
         FileSearchIndexRuntime.shared.stop()
-        SearchPanelController.shared.close()
+        SearchPanelController.shared.destroy()
         ScreenshotGlobalHotKeyManager.shared.stop()
     }
 

@@ -77,12 +77,12 @@ final class ScreenshotService: ObservableObject {
         self.indexActivityController = indexActivityController
     }
 
-    /// HapiGo 风格流程：冻结桌面 → 选区内标注与横向工具栏 → 保存/复制。
+    /// 启动时冻结一次桌面；选区与编辑始终引用同一份不可变画面。
     func captureRegion(
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard beginCapture(message: L10n.tr("拖动选择区域；松开后可标注，双击或完成将复制")) else { return }
+        guard beginCapture(message: L10n.tr("拖动选择区域；可移动或缩放，双击或 Enter 后截图")) else { return }
         defer { endCapture() }
 
         do {

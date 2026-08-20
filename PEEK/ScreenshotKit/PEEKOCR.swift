@@ -428,8 +428,7 @@ private final class PEEKOCRResultWindowController: NSWindowController, NSWindowD
         window.title = title
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.appearance = NSAppearance(named: .darkAqua)
-        window.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1)
+        window.backgroundColor = .windowBackgroundColor
         window.minSize = NSSize(width: 860, height: 420)
         window.isReleasedWhenClosed = false
         window.center()
@@ -512,7 +511,7 @@ private struct PEEKOCRResultView: View {
                     }
                 }
                 .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color(nsColor: NSColor(calibratedWhite: 0.115, alpha: 1)))
+                .background(Color(nsColor: .underPageBackgroundColor))
 
                 TextEditor(text: $editableText)
                     .font(.system(size: 16, weight: .regular, design: .monospaced))
@@ -521,10 +520,10 @@ private struct PEEKOCRResultView: View {
                     .padding(.horizontal, 22)
                     .padding(.vertical, 20)
                     .frame(minWidth: 260, idealWidth: 282, maxWidth: 310, maxHeight: .infinity)
-                    .background(Color(nsColor: NSColor(calibratedWhite: 0.135, alpha: 1)))
+                    .background(Color(nsColor: .controlBackgroundColor))
             }
         }
-        .background(Color(nsColor: NSColor(calibratedWhite: 0.12, alpha: 1)))
+        .background(Color(nsColor: .windowBackgroundColor))
         .overlay(alignment: .bottomTrailing) {
             if !statusMessage.isEmpty {
                 Text(statusMessage)
@@ -644,10 +643,10 @@ private struct PEEKOCRResultView: View {
             .padding(.trailing, 8)
         }
         .frame(height: 40)
-        .background(Color(nsColor: NSColor(calibratedWhite: 0.23, alpha: 1)))
+        .background(Color(nsColor: .controlBackgroundColor))
         .overlay(alignment: .bottom) {
             Rectangle()
-                .fill(Color.white.opacity(0.055))
+                .fill(Color(nsColor: .separatorColor))
                 .frame(height: 1)
         }
     }
@@ -672,7 +671,7 @@ private struct PEEKOCRResultView: View {
 
     private var toolbarDivider: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.12))
+            .fill(Color(nsColor: .separatorColor))
             .frame(width: 1, height: 24)
             .padding(.horizontal, 7)
     }

@@ -252,10 +252,12 @@ private struct FileSearchIndexExecutionPolicy: Sendable {
     let ioBudget: FileSearchIOBudget
 
     var ignoredActivityBlockers: Set<FileSearchActivityBlocker> {
-        // Even an explicit fast pass must stop while the search panel is in
-        // use. Fast mode may ignore only general user activity; it must never
-        // compete with an interactive query, preview, screenshot or file op.
-        isFast ? [.userActive] : []
+        // Keyboard and pointer activity must not starve indexing on a machine
+        // that is used throughout the day. Both execution profiles may keep
+        // advancing under their own CPU and I/O budgets. Explicit PEEK work
+        // (search, capture, OCR and file operations) and system pressure remain
+        // hard blockers because they are not included in this allow-list.
+        [.userActive]
     }
 }
 
@@ -354,9 +356,9 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                 return .deferred
             }
             try checkSystemDeferral(policy: policy)
-            // Start CPU accounting before bookmark resolution/reconciliation,
-            // but only after the user has become idle. No security-scoped URL
-            // is retained while the activity gate is closed.
+            // Start CPU accounting before bookmark resolution/reconciliation.
+            // General keyboard and pointer activity is allowed, while explicit
+            // PEEK work and system pressure still keep the gate closed.
             await policy.cpuBudget.reset()
             await policy.ioBudget.reset()
         } catch {
@@ -819,6 +821,9 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             throw FileSearchBackgroundIndexControl.deferred
         }
         let indexedCount = batch.count
+        await initialIndexProgress.recordPaths(
+            batch.suffix(8).map { $0.url.path }
+        )
         try await sink.upsert(batch, in: token)
         await initialIndexProgress.recordIndexed(indexedCount)
         batch.removeAll(keepingCapacity: true)

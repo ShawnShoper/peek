@@ -20,6 +20,28 @@ enum SearchPanelNumericShortcut {
     }
 }
 
+/// Invalidates deferred modifier-state deliveries when the hosting view is
+/// dismantled or a newer monitor replaces the previous one.
+struct SearchPanelKeyboardMonitorLifecycle {
+    private(set) var generation: UInt64 = 0
+    private(set) var isMonitoring = false
+
+    mutating func beginMonitoring() -> UInt64 {
+        generation &+= 1
+        isMonitoring = true
+        return generation
+    }
+
+    mutating func endMonitoring() {
+        generation &+= 1
+        isMonitoring = false
+    }
+
+    func acceptsDelivery(for token: UInt64) -> Bool {
+        isMonitoring && token == generation
+    }
+}
+
 @MainActor
 final class SearchPanelKeyboardHostView: NSView {
     var windowDidChange: ((NSWindow?) -> Void)?
@@ -34,6 +56,7 @@ final class SearchPanelKeyboardHostView: NSView {
 /// this view, so file pickers and other application windows retain their normal
 /// keyboard behavior.
 struct SearchPanelKeyboardBridge: NSViewRepresentable {
+    let isActive: Bool
     let moveUp: () -> Void
     let moveDown: () -> Void
     let activate: () -> Void
@@ -61,7 +84,9 @@ struct SearchPanelKeyboardBridge: NSViewRepresentable {
         view.windowDidChange = { [weak coordinator = context.coordinator] window in
             coordinator?.monitoredWindow = window
         }
-        context.coordinator.startMonitoring()
+        if isActive {
+            context.coordinator.startMonitoring()
+        }
         return view
     }
 
@@ -74,6 +99,11 @@ struct SearchPanelKeyboardBridge: NSViewRepresentable {
         context.coordinator.cycleCategory = cycleCategory
         context.coordinator.dismiss = dismiss
         context.coordinator.isSearchFieldFocused = isSearchFieldFocused
+        if isActive {
+            context.coordinator.startMonitoring()
+        } else {
+            context.coordinator.stopMonitoring()
+        }
     }
 
     static func dismantleNSView(
@@ -97,6 +127,7 @@ struct SearchPanelKeyboardBridge: NSViewRepresentable {
         var dismiss: () -> Void
         var isSearchFieldFocused: () -> Bool
         private var eventMonitor: Any?
+        private var lifecycle = SearchPanelKeyboardMonitorLifecycle()
 
         init(
             moveUp: @escaping () -> Void,
@@ -120,7 +151,7 @@ struct SearchPanelKeyboardBridge: NSViewRepresentable {
 
         func startMonitoring() {
             guard eventMonitor == nil else { return }
-            optionStateChanged(NSEvent.modifierFlags.contains(.option))
+            let generation = lifecycle.beginMonitoring()
             eventMonitor = NSEvent.addLocalMonitorForEvents(
                 matching: [.keyDown, .flagsChanged]
             ) { [weak self] event in
@@ -181,10 +212,22 @@ struct SearchPanelKeyboardBridge: NSViewRepresentable {
                 }
                 return nil
             }
+
+            // `makeNSView` runs while SwiftUI is updating its graph. Publishing
+            // back into `@State` synchronously from here can violate Swift's
+            // exclusivity rules, so deliver the initial modifier state on the
+            // next main-loop turn and discard it if the view already closed.
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      lifecycle.acceptsDelivery(for: generation) else {
+                    return
+                }
+                optionStateChanged(NSEvent.modifierFlags.contains(.option))
+            }
         }
 
         func stopMonitoring() {
-            optionStateChanged(false)
+            lifecycle.endMonitoring()
             guard let eventMonitor else { return }
             NSEvent.removeMonitor(eventMonitor)
             self.eventMonitor = nil

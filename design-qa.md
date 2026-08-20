@@ -42,7 +42,7 @@ final compact ranked search result: blocked on live visual capture
 ## Build and runtime verification
 
 - Asset catalog compilation contains `AppIcon` plus both 1× and 2× `PEEKMenuBarIcon` renditions; all three inspected source PNGs report alpha.
-- The compiled app reports `CFBundleDisplayName = PEEK`, `CFBundleName = PEEK`, `CFBundleIconFile = AppIcon`, and `TeamIdentifier = 4DXU5FSLLY`.
+- The compiled app reports `CFBundleDisplayName = PEEK`, `CFBundleName = PEEK`, `CFBundleIconFile = AppIcon`, and a locally configured signing team.
 - `testPEEKBrandUsesExpectedDisplayNameAndTemplateMenuIcon` loads the compiled asset from the test-host app bundle and verifies its AppKit template flag.
 - Fresh Debug build-for-testing succeeded; direct XCTest passed 153/153 tests with one environment-dependent QR test skipped and zero failures.
 - Fresh Apple Development Debug build succeeded and the latest process was restarted from `.build/SignedDerivedData/Build/Products/Debug/PEEK.app`.
@@ -73,7 +73,7 @@ final result: passed
 - Real UI inspection confirmed the System Settings catalog exposes Privacy & Security, Displays, Keyboard, Sound, Network and General.
 - Debug build-for-testing and fresh unsigned Release build succeeded.
 - Direct XCTest passed 160 tests with zero failures; one environment-dependent QR rendering test was skipped by the XCTest host.
-- `/Applications/PEEK.app` is signed as `com.shawnshoper.peek` by Apple Development team `4DXU5FSLLY` and passes strict code-sign verification.
+- `/Applications/PEEK.app` is signed as `com.shawnshoper.peek` by a locally configured Apple Development identity and passes strict code-sign verification.
 
 final grouped search result: passed
 
@@ -83,7 +83,7 @@ final grouped search result: passed
 
 ## Visual truth
 
-- Selected design: `/Users/shawnshoper/.codex/generated_images/019ff0f4-7fd6-7ba3-8b26-0a76e013511f/exec-eff48af3-be84-40dd-95b3-e12d9d5488de.png` (1659 × 948).
+- Selected design: a local generated reference retained outside the repository (1659 × 948).
 - Source toolbar crop: `audit/screenshot-toolbar-compact-option1-2026-08-17/reference-toolbar.png` (1600 × 360).
 - Final native implementation: `audit/screenshot-toolbar-compact-option1-2026-08-17/implementation-toolbar-final-focused.png` (1600 × 278 normalized crop from a 5120 × 2880 Retina screenshot).
 - Same-input comparison: `audit/screenshot-toolbar-compact-option1-2026-08-17/comparison-final.png` (1600 × 708).
@@ -129,7 +129,7 @@ final result: passed
 
 ## Baseline
 
-- Reference: `/Users/shawnshoper/.codex/generated_images/019ff0f4-7fd6-7ba3-8b26-0a76e013511f/exec-2360e5d9-407d-4036-b14e-707e34b0cfdb.png`
+- Reference: a local generated image retained outside the repository.
 - Reference pixels: 1586 × 992
 - Implementation: `/private/tmp/PEEK-file-search-implementation.png`
 - Implementation pixels: 2344 × 1584 (Retina capture of a 1060 × 680 point window)
@@ -333,7 +333,7 @@ final settings trailing alignment result: passed
 
 ## Visual truth
 
-- Selected reference: `/Users/shawnshoper/.codex/generated_images/019ff0f4-7fd6-7ba3-8b26-0a76e013511f/exec-daba8af7-901c-4822-aa2c-e30eb5a4fd70.png` (1672 × 941).
+- Selected reference: a local generated image retained outside the repository (1672 × 941).
 - Final native implementation: `audit/screenshot-toolbar-redesign-2026-08-15/implementation-toolbar-exact-final.png` (806 × 125).
 - Final same-state comparison: `audit/screenshot-toolbar-redesign-2026-08-15/comparison-toolbar-exact-final.png` (1400 × 680).
 - State: dark appearance, pen selected, black color, line width 4, filled shape option, contextual rail open.

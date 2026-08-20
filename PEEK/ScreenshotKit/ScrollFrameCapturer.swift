@@ -27,6 +27,28 @@ enum ScreenImageCaptureError: LocalizedError {
     }
 }
 
+struct ScreenCapturePixelDimensions: Equatable, Sendable {
+    let width: Int
+    let height: Int
+}
+
+/// Converts ScreenCaptureKit's logical point dimensions into output pixels.
+/// `pointPixelScale` belongs to the content filter for the selected display,
+/// so Retina, non-Retina, scaled and mixed-display setups are handled without
+/// device-specific constants.
+func screenCapturePixelDimensions(
+    logicalSize: CGSize,
+    pointPixelScale: CGFloat
+) -> ScreenCapturePixelDimensions {
+    let scale = pointPixelScale.isFinite && pointPixelScale > 0
+        ? pointPixelScale
+        : 1
+    return ScreenCapturePixelDimensions(
+        width: max(1, Int(ceil(logicalSize.width * scale))),
+        height: max(1, Int(ceil(logicalSize.height * scale)))
+    )
+}
+
 /// Modern system screenshot backend. macOS 14+ uses ScreenCaptureKit; the
 /// legacy Core Graphics calls exist only inside the macOS 13 availability
 /// branch and can be removed when the deployment target advances.
@@ -46,6 +68,16 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
     }
 
     func capture(rect: CGRect) async throws -> CGImage {
+        try await capture(rect: rect, excludingCurrentApplication: false)
+    }
+
+    /// Captures a Quartz-global rectangle while optionally excluding PEEK's
+    /// own transparent selection windows. This is used by the live pixel
+    /// inspector; the final region capture hides the overlays before reading.
+    func capture(
+        rect: CGRect,
+        excludingCurrentApplication: Bool
+    ) async throws -> CGImage {
         let captureRect = rect.standardized.integral
         guard captureRect.width >= 1, captureRect.height >= 1 else {
             throw ScrollCaptureError.invalidCaptureRect
@@ -59,7 +91,9 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
             }
             return try await captureWithScreenCaptureKit(
                 display: display,
-                sourceRect: captureRect
+                sourceRect: captureRect,
+                excludingCurrentApplication: excludingCurrentApplication,
+                content: content
             )
         } else {
             return try await legacyCaptureRect(captureRect)
@@ -79,19 +113,37 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
         }
         return try await captureWithScreenCaptureKit(
             display: display,
-            sourceRect: sourceRect
+            sourceRect: sourceRect,
+            excludingCurrentApplication: false,
+            content: content
         )
     }
 
     @available(macOS 14.0, *)
     private func captureWithScreenCaptureKit(
         display: SCDisplay,
-        sourceRect: CGRect?
+        sourceRect: CGRect?,
+        excludingCurrentApplication: Bool,
+        content: SCShareableContent
     ) async throws -> CGImage {
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let excludedApplications: [SCRunningApplication]
+        if excludingCurrentApplication,
+           let bundleIdentifier = Bundle.main.bundleIdentifier {
+            excludedApplications = content.applications.filter {
+                $0.bundleIdentifier == bundleIdentifier
+            }
+        } else {
+            excludedApplications = []
+        }
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: excludedApplications,
+            exceptingWindows: []
+        )
         let configuration = SCStreamConfiguration()
         configuration.showsCursor = false
         configuration.queueDepth = 1
+        configuration.captureResolution = .best
 
         let displayFrame = display.frame.standardized
         let globalSourceRect = sourceRect?.standardized ?? displayFrame
@@ -103,12 +155,12 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
         ).integral
         configuration.sourceRect = localSourceRect
 
-        let pointWidth = max(CGFloat(display.width), 1)
-        let pointHeight = max(CGFloat(display.height), 1)
-        let scaleX = CGFloat(CGDisplayPixelsWide(display.displayID)) / pointWidth
-        let scaleY = CGFloat(CGDisplayPixelsHigh(display.displayID)) / pointHeight
-        configuration.width = max(1, Int((localSourceRect.width * scaleX).rounded()))
-        configuration.height = max(1, Int((localSourceRect.height * scaleY).rounded()))
+        let pixelDimensions = screenCapturePixelDimensions(
+            logicalSize: localSourceRect.size,
+            pointPixelScale: CGFloat(filter.pointPixelScale)
+        )
+        configuration.width = pixelDimensions.width
+        configuration.height = pixelDimensions.height
 
         return try await SCScreenshotManager.captureImage(
             contentFilter: filter,

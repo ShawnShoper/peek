@@ -16,6 +16,13 @@ xcuserdata/
 *.profraw
 *.profdata
 
+# Local signing and developer account files
+LocalSigning.xcconfig
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+
 # macOS
 .DS_Store
 .Spotlight-V100

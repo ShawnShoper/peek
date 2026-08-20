@@ -116,7 +116,7 @@ struct FileSearchBackgroundIndexerConfiguration: Sendable {
         incrementalMaximumEntriesPerSecond: Double = 160,
         initialMaximumEntriesPerSecond: Double = 2_500,
         initialUserIdleDuration: TimeInterval? = 0,
-        userIdleDuration: TimeInterval = 30,
+        userIdleDuration: TimeInterval = 0,
         maximumActivityPause: TimeInterval = 5 * 60,
         dirtyPathLimit: Int = 1_000
     ) {
@@ -171,6 +171,7 @@ struct FileSearchInitialIndexProgressSnapshot: Equatable, Sendable {
     let discoveredItems: Int
     let indexedItems: Int
     let currentRootName: String?
+    let recentPaths: [String]
 
     init(
         phase: FileSearchInitialIndexProgressPhase,
@@ -180,7 +181,8 @@ struct FileSearchInitialIndexProgressSnapshot: Equatable, Sendable {
         estimatedRemaining: TimeInterval?,
         discoveredItems: Int = 0,
         indexedItems: Int = 0,
-        currentRootName: String? = nil
+        currentRootName: String? = nil,
+        recentPaths: [String] = []
     ) {
         self.phase = phase
         self.completedRoots = completedRoots
@@ -190,6 +192,7 @@ struct FileSearchInitialIndexProgressSnapshot: Equatable, Sendable {
         self.discoveredItems = discoveredItems
         self.indexedItems = indexedItems
         self.currentRootName = currentRootName
+        self.recentPaths = recentPaths
     }
 
     /// A determinate value is available while the bounded application-root
@@ -288,8 +291,10 @@ actor FileSearchInitialIndexProgressTracker {
     }
 
     private var state: State = .inactive
+    private var recentPaths: [String] = []
 
     func schedule(applicationRootCount: Int, delay: TimeInterval) {
+        recentPaths.removeAll(keepingCapacity: true)
         let roots = max(1, applicationRootCount)
         state = .scheduled(
             startedAt: ProcessInfo.processInfo.systemUptime,
@@ -311,8 +316,10 @@ actor FileSearchInitialIndexProgressTracker {
     ) {
         guard rootCount > 0 else {
             state = .inactive
+            recentPaths.removeAll(keepingCapacity: true)
             return
         }
+        recentPaths.removeAll(keepingCapacity: true)
         state = .indexing(
             startedAt: ProcessInfo.processInfo.systemUptime,
             phase: phase,
@@ -358,6 +365,16 @@ actor FileSearchInitialIndexProgressTracker {
 
     func recordIndexed(_ count: Int) {
         updateCounts(discoveredDelta: 0, indexedDelta: max(0, count))
+    }
+
+    func recordPaths(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        for path in paths where recentPaths.last != path {
+            recentPaths.append(path)
+        }
+        if recentPaths.count > 12 {
+            recentPaths.removeFirst(recentPaths.count - 12)
+        }
     }
 
     private func updateCounts(discoveredDelta: Int, indexedDelta: Int) {
@@ -419,6 +436,7 @@ actor FileSearchInitialIndexProgressTracker {
 
     func clear() {
         state = .inactive
+        recentPaths.removeAll(keepingCapacity: true)
     }
 
     func snapshot() -> FileSearchInitialIndexProgressSnapshot? {
@@ -468,7 +486,8 @@ actor FileSearchInitialIndexProgressTracker {
                 estimatedRemaining: remaining,
                 discoveredItems: discovered,
                 indexedItems: indexed,
-                currentRootName: currentRoot
+                currentRootName: currentRoot,
+                recentPaths: recentPaths
             )
         case .waitingToRetry:
             return FileSearchInitialIndexProgressSnapshot(

@@ -81,6 +81,44 @@ struct ScreenshotFrozenDisplay: @unchecked Sendable {
     }
 }
 
+/// Geometry used by the selection model. Production sessions derive this from
+/// the same immutable desktop snapshot that is displayed by the overlays.
+/// Keeping this value-only type also makes selection gestures testable without
+/// requesting Screen Recording permission.
+struct ScreenshotDisplayGeometry: Equatable, Sendable {
+    let displayID: CGDirectDisplayID
+    let screenFrame: CGRect
+}
+
+/// Value-only desktop geometry shared by selection gestures and tests.
+final class ScreenshotDesktopGeometry: @unchecked Sendable {
+    let displays: [ScreenshotDisplayGeometry]
+    let desktopBounds: CGRect
+    let windowCandidates: [ScreenshotWindowCandidate]
+    let appKitReferenceTop: CGFloat
+
+    init(
+        displays: [ScreenshotDisplayGeometry],
+        desktopBounds: CGRect,
+        windowCandidates: [ScreenshotWindowCandidate],
+        appKitReferenceTop: CGFloat
+    ) {
+        self.displays = displays
+        self.desktopBounds = desktopBounds
+        self.windowCandidates = windowCandidates
+        self.appKitReferenceTop = appKitReferenceTop
+    }
+
+    func windowCandidate(at point: CGPoint) -> ScreenshotWindowCandidate? {
+        windowCandidates.first { $0.frame.contains(point) }
+    }
+
+    func frontmostWindowCandidate(ownerPID: pid_t) -> ScreenshotWindowCandidate? {
+        frontmostScreenshotWindowCandidate(ownerPID: ownerPID, in: windowCandidates)
+    }
+
+}
+
 /// Immutable desktop snapshot used by every overlay window in one capture
 /// session. Screens are captured before any overlay is displayed.
 /// The snapshot is immutable after construction. `CGImage` instances are
@@ -216,7 +254,7 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
         return ScreenshotFrozenDesktop(
             displays: frozenDisplays,
             desktopBounds: plan.desktopBounds,
-            windowCandidates: captureWindowCandidates(
+            windowCandidates: screenshotWindowCandidates(
                 desktopBounds: plan.desktopBounds,
                 appKitReferenceTop: plan.appKitReferenceTop
             ),
@@ -234,6 +272,20 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
         frontmostScreenshotWindowCandidate(
             ownerPID: ownerPID,
             in: windowCandidates
+        )
+    }
+
+    func selectionGeometry() -> ScreenshotDesktopGeometry {
+        ScreenshotDesktopGeometry(
+            displays: displays.map {
+                ScreenshotDisplayGeometry(
+                    displayID: $0.displayID,
+                    screenFrame: $0.screenFrame
+                )
+            },
+            desktopBounds: desktopBounds,
+            windowCandidates: windowCandidates,
+            appKitReferenceTop: appKitReferenceTop
         )
     }
 
@@ -337,50 +389,51 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
         return rect.integral
     }
 
-    private static func captureWindowCandidates(
-        desktopBounds: CGRect,
-        appKitReferenceTop: CGFloat
-    ) -> [ScreenshotWindowCandidate] {
-        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let rawWindows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
-            as? [[String: Any]] else {
-            return []
+}
+
+private func screenshotWindowCandidates(
+    desktopBounds: CGRect,
+    appKitReferenceTop: CGFloat
+) -> [ScreenshotWindowCandidate] {
+    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    guard let rawWindows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+        as? [[String: Any]] else {
+        return []
+    }
+
+    let currentPID = ProcessInfo.processInfo.processIdentifier
+    return rawWindows.compactMap { info in
+        guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+              let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+              ownerPID != currentPID,
+              (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0,
+              let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+              let quartzFrame = CGRect(
+                  dictionaryRepresentation: boundsDictionary as CFDictionary
+              ),
+              quartzFrame.width >= 24,
+              quartzFrame.height >= 24 else {
+            return nil
         }
 
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-        return rawWindows.compactMap { info in
-            guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-                  let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  ownerPID != currentPID,
-                  (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let quartzFrame = CGRect(
-                      dictionaryRepresentation: boundsDictionary as CFDictionary
-                  ),
-                  quartzFrame.width >= 24,
-                  quartzFrame.height >= 24 else {
-                return nil
-            }
-
-            let appKitFrame = CGRect(
-                x: quartzFrame.minX,
-                y: appKitReferenceTop - quartzFrame.maxY,
-                width: quartzFrame.width,
-                height: quartzFrame.height
-            ).intersection(desktopBounds)
-            guard !appKitFrame.isNull, appKitFrame.width >= 24, appKitFrame.height >= 24 else {
-                return nil
-            }
-
-            return ScreenshotWindowCandidate(
-                windowID: CGWindowID(
-                    (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
-                ),
-                ownerPID: ownerPID,
-                frame: appKitFrame,
-                ownerName: info[kCGWindowOwnerName as String] as? String ?? "",
-                title: info[kCGWindowName as String] as? String
-            )
+        let appKitFrame = CGRect(
+            x: quartzFrame.minX,
+            y: appKitReferenceTop - quartzFrame.maxY,
+            width: quartzFrame.width,
+            height: quartzFrame.height
+        ).intersection(desktopBounds)
+        guard !appKitFrame.isNull, appKitFrame.width >= 24, appKitFrame.height >= 24 else {
+            return nil
         }
+
+        return ScreenshotWindowCandidate(
+            windowID: CGWindowID(
+                (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
+            ),
+            ownerPID: ownerPID,
+            frame: appKitFrame,
+            ownerName: info[kCGWindowOwnerName as String] as? String ?? "",
+            title: info[kCGWindowName as String] as? String
+        )
     }
 }

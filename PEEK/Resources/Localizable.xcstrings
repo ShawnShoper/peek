@@ -1,6 +1,45 @@
 {
   "sourceLanguage" : "zh-Hans",
   "strings" : {
+    "上次完成：%@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Last completed: %@" } } }
+    },
+    "实时索引记录" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Live Index Activity" } } }
+    },
+    "当前没有正在运行的索引任务。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "No indexing task is currently running." } } }
+    },
+    "已提交：%lld 项" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Committed: %lld items" } } }
+    },
+    "正在处理：%@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Processing: %@" } } }
+    },
+    "正在更新" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Updating" } } }
+    },
+    "每秒刷新" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Refreshes every second" } } }
+    },
+    "目录：%@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Directory: %@" } } }
+    },
+    "移动选区或选择标注" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Move Selection or Select Annotation" } } }
+    },
+    "索引日志" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Index Log" } } }
+    },
+    "查询不会触发索引；这里只显示后台任务的实时状态。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Searching never starts indexing; this view only shows live background activity." } } }
+    },
+    "进度：已索引 %lld / 已发现 %lld 项" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Progress: indexed %lld / discovered %lld items" } } }
+    },
+    "马赛克（拖动涂抹）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Mosaic (drag to paint)" } } }
+    },
     "\n\n— 仅显示文件开头 —" : {
       "localizations" : {
         "en" : {
@@ -1639,13 +1678,13 @@
         }
       }
     },
-    "后台任务将在系统空闲时开始，查询不会触发扫描。" : {
+    "后台索引会持续低占用运行，查询不会触发扫描。" : {
       "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Background indexing starts while the system is idle. Searches never trigger a scan."
+            "value" : "Background indexing runs continuously at low resource usage. Searches never trigger a scan."
           }
         }
       }
@@ -3824,6 +3863,36 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Drag to select an area. Annotate after releasing; double-click or finish to copy."
+          }
+        }
+      }
+    },
+    "拖动选择区域；可移动或缩放，双击或 Enter 后截图" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag to select an area. Move or resize it, then double-click or press Enter to capture."
+          }
+        }
+      }
+    },
+    "拖动选区可移动，拖动边角可缩放；双击或 Enter 确认截图" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag to move, drag a handle to resize; double-click or press Enter to capture"
+          }
+        }
+      }
+    },
+    "拖动选区可移动，拖动边角可缩放" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag to move the selection or drag a handle to resize"
           }
         }
       }

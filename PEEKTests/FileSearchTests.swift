@@ -526,6 +526,19 @@ final class FileSearchTests: XCTestCase {
         )
     }
 
+    func testLiveIndexProgressKeepsRecentPathsForSettingsLog() async {
+        let tracker = FileSearchInitialIndexProgressTracker()
+        await tracker.begin(rootCount: 1, phase: .indexingFiles)
+        await tracker.beginRoot(named: "Documents", phase: .indexingFiles)
+        await tracker.recordPaths((0 ..< 16).map { "/Documents/item-\($0).txt" })
+
+        let snapshot = await tracker.snapshot()
+        XCTAssertEqual(snapshot?.currentRootName, "Documents")
+        XCTAssertEqual(snapshot?.recentPaths.count, 12)
+        XCTAssertEqual(snapshot?.recentPaths.first, "/Documents/item-4.txt")
+        XCTAssertEqual(snapshot?.recentPaths.last, "/Documents/item-15.txt")
+    }
+
     func testCommittedSQLiteIndexUsesApplicationGroupPriorityAndDocumentRelevance() async throws {
         let context = makeContext()
         defer { try? FileManager.default.removeItem(at: context.directory) }
@@ -941,6 +954,7 @@ final class FileSearchTests: XCTestCase {
 
         XCTAssertEqual(coordinator.firstRunDelay, 3)
         XCTAssertEqual(indexer.initialUserIdleDuration, 0)
+        XCTAssertEqual(indexer.userIdleDuration, 0)
         XCTAssertLessThan(indexer.targetCPUFraction, 0.01)
         XCTAssertLessThanOrEqual(indexer.initialTargetCPUFraction, 0.05)
         XCTAssertGreaterThanOrEqual(indexer.initialTargetCPUFraction, 0.01)
@@ -948,6 +962,63 @@ final class FileSearchTests: XCTestCase {
         XCTAssertGreaterThan(
             indexer.initialMaximumEntriesPerSecond,
             indexer.incrementalMaximumEntriesPerSecond
+        )
+    }
+
+    func testIncrementalIndexContinuesWhileUserIsActive() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        let root = context.directory.appendingPathComponent(
+            "AlwaysBackground",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+
+        let store = FileSearchIndexStore(databaseURL: context.databaseURL)
+        let previous = try await store.beginRootGeneration(rootURL: root)
+        try await store.commitRootGeneration(previous, statistics: .init())
+        try Data("background".utf8).write(
+            to: root.appendingPathComponent("continues-while-active.txt")
+        )
+
+        let gate = FileSearchActivityGate(requiredIdleDuration: 3_600)
+        await gate.setActivity(true, blocker: .userActive)
+        let indexer = FileSearchBackgroundIndexer(
+            sink: store,
+            rootProvider: { _ in
+                FileSearchBackgroundRootLease(roots: [
+                    FileSearchBackgroundRoot(url: root, scope: .files)
+                ])
+            },
+            activityGate: gate,
+            configuration: FileSearchBackgroundIndexerConfiguration(
+                maximumIndexedItems: 1_000,
+                microBatchSize: 16,
+                targetCPUFraction: 0.009,
+                incrementalMaximumEntriesPerSecond: 500,
+                userIdleDuration: 3_600,
+                maximumActivityPause: 1,
+                dirtyPathLimit: 10
+            )
+        )
+
+        let result = await indexer.run(mode: .incremental)
+        guard case let .completed(mode, roots, items) = result else {
+            return XCTFail("expected active-user indexing to complete, got \(result)")
+        }
+        XCTAssertEqual(mode, .incremental)
+        XCTAssertEqual(roots, 1)
+        XCTAssertEqual(items, 2)
+
+        let snapshot = await FileSearchService(store: store).currentSnapshot(
+            for: FileSearchRequest(query: "continues-while-active")
+        )
+        XCTAssertEqual(
+            snapshot.results.first?.item.displayName,
+            "continues-while-active.txt"
         )
     }
 
@@ -1990,7 +2061,321 @@ final class FileSearchTests: XCTestCase {
 }
 
 @MainActor
+final class SearchPanelLayoutTests: XCTestCase {
+    func testCollapsedLowerContentIsExcludedFromAccessibilityAndInteraction() {
+        let policy = SearchPanelLowerContentPolicy(expanded: false)
+
+        XCTAssertTrue(policy.accessibilityHidden)
+        XCTAssertFalse(policy.allowsHitTesting)
+        XCTAssertTrue(policy.isDisabled)
+    }
+
+    func testExpandedLowerContentRestoresAccessibilityAndInteraction() {
+        let policy = SearchPanelLowerContentPolicy(expanded: true)
+
+        XCTAssertFalse(policy.accessibilityHidden)
+        XCTAssertTrue(policy.allowsHitTesting)
+        XCTAssertFalse(policy.isDisabled)
+    }
+
+    func testNativeChromeUsesOneContinuousRoundedClip() {
+        let chrome = SearchPanelChromeView(
+            frame: CGRect(x: 0, y: 0, width: 920, height: 680)
+        )
+
+        XCTAssertEqual(chrome.material, .popover)
+        XCTAssertEqual(chrome.blendingMode, .behindWindow)
+        XCTAssertEqual(chrome.state, .active)
+        XCTAssertTrue(chrome.wantsLayer)
+        XCTAssertEqual(
+            chrome.layer?.cornerRadius,
+            SearchPanelLayout.cornerRadius
+        )
+        XCTAssertEqual(chrome.layer?.cornerCurve, .continuous)
+        XCTAssertEqual(chrome.layer?.masksToBounds, true)
+        XCTAssertEqual(chrome.layer?.borderWidth, 1)
+    }
+
+    func testExpandedCanvasRemainsTopAnchoredDuringNativeReveal() {
+        for visibleHeight in [58, 100, 300, 680] as [CGFloat] {
+            let bounds = CGRect(
+                x: 0,
+                y: 0,
+                width: SearchPanelLayout.width,
+                height: visibleHeight
+            )
+            let canvas = SearchPanelLayout.canvasFrame(
+                in: bounds,
+                expandedHeight: SearchPanelLayout.expandedHeight
+            )
+
+            XCTAssertEqual(canvas.height, SearchPanelLayout.expandedHeight)
+            XCTAssertEqual(canvas.maxY, bounds.maxY, accuracy: 0.001)
+            XCTAssertEqual(canvas.width, bounds.width)
+        }
+    }
+
+    func testNativeResizeHonorsReduceMotionAndVisibility() {
+        XCTAssertTrue(
+            SearchPanelLayout.shouldAnimate(
+                requested: true,
+                panelVisible: true,
+                reduceMotion: false
+            )
+        )
+        XCTAssertFalse(
+            SearchPanelLayout.shouldAnimate(
+                requested: true,
+                panelVisible: true,
+                reduceMotion: true
+            )
+        )
+        XCTAssertFalse(
+            SearchPanelLayout.shouldAnimate(
+                requested: true,
+                panelVisible: false,
+                reduceMotion: false
+            )
+        )
+    }
+
+    func testNativeAnimationUsesSlowerRevealAndFasterDismissal() {
+        XCTAssertEqual(
+            SearchPanelLayout.animationDuration(expanded: true),
+            0.20,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            SearchPanelLayout.animationDuration(expanded: false),
+            0.16,
+            accuracy: 0.001
+        )
+        XCTAssertGreaterThan(
+            SearchPanelLayout.animationDuration(expanded: true),
+            SearchPanelLayout.animationDuration(expanded: false)
+        )
+    }
+
+    func testRapidExpansionTargetsKeepHeaderTopEdgeStable() {
+        var frame = CGRect(
+            x: 120,
+            y: 722,
+            width: SearchPanelLayout.width,
+            height: SearchPanelLayout.collapsedHeight
+        )
+        let originalTopEdge = frame.maxY
+
+        for iteration in 0 ..< 20 {
+            frame = SearchPanelLayout.frame(
+                from: frame,
+                expanded: iteration.isMultiple(of: 2),
+                visibleFrame: nil
+            )
+            XCTAssertEqual(frame.maxY, originalTopEdge, accuracy: 0.001)
+        }
+
+        XCTAssertEqual(frame.height, SearchPanelLayout.collapsedHeight)
+    }
+
+    func testCenteredCompactFrameKeepsLegacyExpandedHeaderPosition() {
+        let visibleFrame = CGRect(x: 0, y: 24, width: 2560, height: 1386)
+
+        let expanded = SearchPanelLayout.centeredFrame(
+            expanded: true,
+            in: visibleFrame
+        )
+        let compact = SearchPanelLayout.centeredFrame(
+            expanded: false,
+            in: visibleFrame
+        )
+
+        XCTAssertEqual(compact.maxY, expanded.maxY)
+        XCTAssertEqual(compact.minX, expanded.minX)
+        XCTAssertEqual(compact.width, expanded.width)
+        XCTAssertEqual(compact.height, SearchPanelLayout.collapsedHeight)
+    }
+
+    func testCenteredFramesRecalculateForCurrentDisplay() {
+        let laptop = CGRect(x: 0, y: 24, width: 1440, height: 876)
+        let external = CGRect(x: 1440, y: -120, width: 2560, height: 1410)
+
+        let laptopFrame = SearchPanelLayout.centeredFrame(
+            expanded: true,
+            in: laptop
+        )
+        let externalFrame = SearchPanelLayout.centeredFrame(
+            expanded: true,
+            in: external
+        )
+
+        XCTAssertEqual(laptopFrame.midX, laptop.midX, accuracy: 0.5)
+        XCTAssertEqual(laptopFrame.midY, laptop.midY, accuracy: 0.5)
+        XCTAssertEqual(externalFrame.midX, external.midX, accuracy: 0.5)
+        XCTAssertEqual(externalFrame.midY, external.midY, accuracy: 0.5)
+        XCTAssertNotEqual(laptopFrame.origin, externalFrame.origin)
+    }
+
+    func testCenteredExpandedFrameFitsSmallVisibleArea() {
+        let visibleFrame = CGRect(x: -1024, y: 0, width: 1024, height: 700)
+
+        let expanded = SearchPanelLayout.centeredFrame(
+            expanded: true,
+            in: visibleFrame
+        )
+        let compact = SearchPanelLayout.centeredFrame(
+            expanded: false,
+            in: visibleFrame
+        )
+
+        XCTAssertGreaterThanOrEqual(expanded.minX, visibleFrame.minX)
+        XCTAssertLessThanOrEqual(expanded.maxX, visibleFrame.maxX)
+        XCTAssertGreaterThanOrEqual(expanded.minY, visibleFrame.minY)
+        XCTAssertLessThanOrEqual(expanded.maxY, visibleFrame.maxY)
+        XCTAssertEqual(compact.maxY, expanded.maxY)
+    }
+
+    func testCollapsePreservesTopEdge() {
+        let original = CGRect(x: 120, y: 100, width: 920, height: 680)
+
+        let collapsed = SearchPanelLayout.frame(
+            from: original,
+            expanded: false,
+            visibleFrame: nil
+        )
+
+        XCTAssertEqual(collapsed.height, SearchPanelLayout.collapsedHeight)
+        XCTAssertEqual(collapsed.maxY, original.maxY)
+        XCTAssertEqual(collapsed.minX, original.minX)
+    }
+
+    func testExpandPreservesCollapsedTopEdge() {
+        let collapsed = CGRect(
+            x: 120,
+            y: 722,
+            width: 920,
+            height: SearchPanelLayout.collapsedHeight
+        )
+
+        let expanded = SearchPanelLayout.frame(
+            from: collapsed,
+            expanded: true,
+            visibleFrame: nil
+        )
+
+        XCTAssertEqual(expanded.height, SearchPanelLayout.expandedHeight)
+        XCTAssertEqual(expanded.maxY, collapsed.maxY)
+    }
+
+    func testExpansionStaysInsideVisibleScreen() {
+        let visibleFrame = CGRect(x: 0, y: 24, width: 1440, height: 876)
+        let collapsed = CGRect(
+            x: 260,
+            y: 40,
+            width: 920,
+            height: SearchPanelLayout.collapsedHeight
+        )
+
+        let expanded = SearchPanelLayout.frame(
+            from: collapsed,
+            expanded: true,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertGreaterThanOrEqual(expanded.minY, visibleFrame.minY)
+        XCTAssertLessThanOrEqual(expanded.maxY, visibleFrame.maxY)
+    }
+}
+
+@MainActor
 final class SearchPanelViewModelTests: XCTestCase {
+    func testPausedPanelKeepsCachedResultsAndRefreshesWhenReactivated() async throws {
+        var searchCount = 0
+        let item = panelItem(
+            path: "/Applications/PEEK.app",
+            name: "PEEK",
+            category: .applications
+        )
+        let provider = AnySearchPanelProvider { _, _, _ in
+            searchCount += 1
+            return AsyncThrowingStream { continuation in
+                continuation.yield(SearchPanelSearchUpdate(items: [item]))
+                continuation.finish()
+            }
+        }
+        let viewModel = SearchPanelViewModel(provider: provider)
+        defer { viewModel.shutdown() }
+
+        viewModel.start()
+        try await waitUntil { !viewModel.isSearching && searchCount == 1 }
+        viewModel.pauseForPanel()
+
+        XCTAssertFalse(viewModel.isPanelActive)
+        XCTAssertEqual(viewModel.results.map(\.id), [item.id])
+
+        viewModel.activateForPanel()
+        try await waitUntil { !viewModel.isSearching && searchCount == 2 }
+        XCTAssertTrue(viewModel.isPanelActive)
+        XCTAssertEqual(viewModel.results.map(\.id), [item.id])
+    }
+
+    func testHiddenPanelDefersQueryUntilNextActivation() async throws {
+        var searchCount = 0
+        let provider = AnySearchPanelProvider { _, _, _ in
+            searchCount += 1
+            return AsyncThrowingStream { continuation in
+                continuation.yield(SearchPanelSearchUpdate(items: []))
+                continuation.finish()
+            }
+        }
+        let viewModel = SearchPanelViewModel(provider: provider)
+        defer { viewModel.shutdown() }
+
+        viewModel.start()
+        try await waitUntil { !viewModel.isSearching && searchCount == 1 }
+        viewModel.pauseForPanel()
+        viewModel.query = "hua.conf"
+        try await Task.sleep(nanoseconds: 220_000_000)
+        XCTAssertEqual(searchCount, 1)
+
+        viewModel.activateForPanel()
+        try await waitUntil { !viewModel.isSearching && searchCount == 2 }
+    }
+
+    func testKeyboardMonitorLifecycleRejectsDeliveriesAfterStopAndReplacement() {
+        var lifecycle = SearchPanelKeyboardMonitorLifecycle()
+        let firstGeneration = lifecycle.beginMonitoring()
+
+        XCTAssertTrue(lifecycle.acceptsDelivery(for: firstGeneration))
+
+        lifecycle.endMonitoring()
+        XCTAssertFalse(lifecycle.acceptsDelivery(for: firstGeneration))
+
+        let secondGeneration = lifecycle.beginMonitoring()
+        XCTAssertNotEqual(firstGeneration, secondGeneration)
+        XCTAssertFalse(lifecycle.acceptsDelivery(for: firstGeneration))
+        XCTAssertTrue(lifecycle.acceptsDelivery(for: secondGeneration))
+    }
+
+    func testStoppingKeyboardMonitorDoesNotPublishModifierStateDuringDismantle() async throws {
+        var publishedStates: [Bool] = []
+        let coordinator = SearchPanelKeyboardBridge.Coordinator(
+            moveUp: {},
+            moveDown: {},
+            activate: {},
+            activateResultAtIndex: { _ in },
+            optionStateChanged: { publishedStates.append($0) },
+            cycleCategory: { _ in },
+            dismiss: {},
+            isSearchFieldFocused: { true }
+        )
+
+        coordinator.startMonitoring()
+        coordinator.stopMonitoring()
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        XCTAssertTrue(publishedStates.isEmpty)
+    }
+
     func testOptionNumberShortcutMapsOneThroughNineAndZeroToFirstTenResults() {
         let keyCodes: [UInt16] = [18, 19, 20, 21, 23, 22, 26, 28, 25, 29]
         XCTAssertEqual(

@@ -68,6 +68,32 @@ func screenshotSelectionGestureIsDrag(
     hypot(current.x - start.x, current.y - start.y) >= threshold
 }
 
+func screenshotConstrainedSelectionMove(
+    original: CGRect,
+    translation: CGSize,
+    screenFrame: CGRect
+) -> CGRect {
+    let original = original.standardized
+    let screenFrame = screenFrame.standardized
+    var origin = CGPoint(
+        x: original.minX + translation.width,
+        y: original.minY + translation.height
+    )
+    if original.width <= screenFrame.width {
+        origin.x = min(
+            max(origin.x, screenFrame.minX),
+            screenFrame.maxX - original.width
+        )
+    }
+    if original.height <= screenFrame.height {
+        origin.y = min(
+            max(origin.y, screenFrame.minY),
+            screenFrame.maxY - original.height
+        )
+    }
+    return CGRect(origin: origin, size: original.size)
+}
+
 enum ScreenshotResizeHandle: CaseIterable {
     case northWest
     case north
@@ -140,10 +166,10 @@ final class ScreenshotSelectionModel {
         case resize(handle: ScreenshotResizeHandle, original: CGRect)
     }
 
-    let desktop: ScreenshotFrozenDesktop
+    let desktop: ScreenshotDesktopGeometry
     var onChange: (() -> Void)?
-    var onFinish: ((CGRect) -> Void)?
     var onSelectionReady: ((CGRect) -> Void)?
+    var onFinish: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
 
     private(set) var selectionRect: CGRect?
@@ -162,7 +188,7 @@ final class ScreenshotSelectionModel {
     private let handleHitRadius: CGFloat = 9
 
     init(
-        desktop: ScreenshotFrozenDesktop,
+        desktop: ScreenshotDesktopGeometry,
         initialSelectionRect: CGRect? = nil,
         initialSelectionHint: String? = nil,
         automaticHoverWindowRect: CGRect? = nil,
@@ -363,8 +389,13 @@ final class ScreenshotSelectionModel {
             || selectionRect.height < Self.minimumSelectionSize.height {
             self.selectionRect = nil
         }
+        if self.selectionRect != nil {
+            selectionHint = L10n.tr(
+                "拖动选区可移动，拖动边角可缩放"
+            )
+        }
         onChange?()
-        if let selectionRect {
+        if let selectionRect = self.selectionRect {
             onSelectionReady?(selectionRect)
         }
         return nil
@@ -374,7 +405,9 @@ final class ScreenshotSelectionModel {
         guard !isEditing else { return }
         guard let selectionRect else { return }
         disableAutomaticHoverSelection()
-        selectionHint = nil
+        selectionHint = L10n.tr(
+            "拖动选区可移动，拖动边角可缩放"
+        )
         if hadInitialSelection {
             didModifyInitialSelection = true
         }
@@ -403,6 +436,31 @@ final class ScreenshotSelectionModel {
         hoveredWindowRect = nil
         dragOperation = nil
         onChange?()
+    }
+
+    func updateSelectionDuringEditing(_ rect: CGRect) {
+        guard applySelectionDuringEditing(rect) else { return }
+        didModifyInitialSelection = true
+    }
+
+    /// Updates the frozen-desktop cutout while the inline editor is dragging.
+    /// This is deliberately not a commit: an unsuccessful final Retina render
+    /// can restore the original rectangle without reporting a completed edit.
+    func previewSelectionDuringEditing(_ rect: CGRect) {
+        _ = applySelectionDuringEditing(rect)
+    }
+
+    @discardableResult
+    private func applySelectionDuringEditing(_ rect: CGRect) -> Bool {
+        guard isEditing else { return false }
+        let normalized = rect.standardized.intersection(desktop.desktopBounds)
+        guard normalized.width >= Self.minimumSelectionSize.width,
+              normalized.height >= Self.minimumSelectionSize.height else {
+            return false
+        }
+        selectionRect = normalized
+        onChange?()
+        return true
     }
 
     func resizeHandle(at point: CGPoint, in rect: CGRect) -> ScreenshotResizeHandle? {

@@ -41,6 +41,20 @@ struct ScreenshotAnnotationStyle {
     var shapeFill: ShapeFill = .outline
 }
 
+func screenshotAnnotationTextSize(
+    _ value: String,
+    style: ScreenshotAnnotationStyle
+) -> CGSize {
+    let attributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: style.fontSize, weight: .semibold)
+    ]
+    return (value as NSString).boundingRect(
+        with: CGSize(width: 10_000, height: 10_000),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        attributes: attributes
+    ).integral.size
+}
+
 enum ScreenshotAnnotation {
     case rectangle(CGRect, ScreenshotAnnotationStyle)
     case ellipse(CGRect, ScreenshotAnnotationStyle)
@@ -76,10 +90,7 @@ enum ScreenshotAnnotation {
             }
             return rawBounds.insetBy(dx: -max(5, style.lineWidth), dy: -max(5, style.lineWidth))
         case let .text(origin, value, style):
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: style.fontSize, weight: .medium)
-            ]
-            let size = value.size(withAttributes: attributes)
+            let size = screenshotAnnotationTextSize(value, style: style)
             return CGRect(origin: origin, size: size).insetBy(dx: -4, dy: -4)
         case let .counter(center, _, style):
             let radius = max(11, style.fontSize * 0.62)
@@ -119,7 +130,11 @@ enum ScreenshotAnnotation {
         }
     }
 
-    func draw(effectSource: NSImage? = nil, imageBounds: CGRect = .zero) {
+    func draw(
+        effectSource: NSImage? = nil,
+        imageBounds: CGRect = .zero,
+        effectDrawer: ((CGRect) -> Void)? = nil
+    ) {
         switch self {
         case let .rectangle(rect, style):
             applyStroke(style)
@@ -162,7 +177,7 @@ enum ScreenshotAnnotation {
             drawStroke(points, width: max(10, style.lineWidth * 4))
 
         case let .mosaic(points, style):
-            guard let effectSource,
+            guard (effectSource != nil || effectDrawer != nil),
                   let context = NSGraphicsContext.current?.cgContext,
                   let first = points.first else {
                 return
@@ -181,20 +196,26 @@ enum ScreenshotAnnotation {
             context.setLineJoin(.round)
             context.replacePathWithStrokedPath()
             context.clip()
-            effectSource.draw(
-                in: imageBounds,
-                from: .zero,
-                operation: .copy,
-                fraction: 1,
-                respectFlipped: true,
-                hints: [.interpolation: NSImageInterpolation.none]
-            )
+            if let effectDrawer {
+                effectDrawer(imageBounds)
+            } else {
+                effectSource?.draw(
+                    in: imageBounds,
+                    from: .zero,
+                    operation: .copy,
+                    fraction: 1,
+                    respectFlipped: true,
+                    hints: [.interpolation: NSImageInterpolation.none]
+                )
+            }
             context.restoreGState()
 
         case let .text(origin, value, style):
-            value.draw(
-                at: origin,
-                withAttributes: [
+            let size = screenshotAnnotationTextSize(value, style: style)
+            (value as NSString).draw(
+                with: CGRect(origin: origin, size: size),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: [
                     .font: NSFont.systemFont(ofSize: style.fontSize, weight: .semibold),
                     .foregroundColor: style.color
                 ]
@@ -289,7 +310,7 @@ enum ScreenshotAnnotation {
 
 @MainActor
 final class ScreenshotAnnotationDocument {
-    let baseImage: NSImage
+    private(set) var baseImage: NSImage
     private(set) var annotations: [ScreenshotAnnotation] = []
     private var undoStack: [[ScreenshotAnnotation]] = []
     private var redoStack: [[ScreenshotAnnotation]] = []
@@ -356,6 +377,20 @@ final class ScreenshotAnnotationDocument {
         )
     }
 
+    /// Renders the current annotation stack over a caller-supplied base image.
+    /// Inline capture uses this at completion so moving the transparent
+    /// selection never reuses pixels from its original rectangle.
+    func renderedImage(over image: NSImage) -> NSImage? {
+        let effectImage = containsMosaic
+            ? ScreenshotAnnotationRenderer.pixelatedImage(from: image, blockSize: 12)
+            : nil
+        return ScreenshotAnnotationRenderer.render(
+            baseImage: image,
+            pixelatedBaseImage: effectImage,
+            annotations: annotations
+        )
+    }
+
     /// Creates the full-resolution mosaic source only when a mosaic annotation
     /// is present or the canvas is actively previewing one.
     func pixelatedBaseImageIfNeeded() -> NSImage {
@@ -373,6 +408,12 @@ final class ScreenshotAnnotationDocument {
     func discardPixelatedBaseImageIfUnused() {
         guard !containsMosaic else { return }
         cachedPixelatedBaseImage = nil
+    }
+
+    func replaceBaseImage(_ image: NSImage) {
+        baseImage = image
+        cachedPixelatedBaseImage = nil
+        onChange?()
     }
 
     private func registerUndoState() {

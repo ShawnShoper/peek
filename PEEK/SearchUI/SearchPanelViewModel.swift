@@ -41,6 +41,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var feedbackMessage: String?
     @Published private(set) var indexStatusMessage: String?
+    @Published private(set) var isPanelActive = false
 
     var onRequestClose: (() -> Void)?
 
@@ -93,6 +94,10 @@ final class SearchPanelViewModel: ObservableObject {
     var selectedItem: SearchPanelItem? {
         guard let selectedItemID else { return nil }
         return results.first { $0.id == selectedItemID }
+    }
+
+    var hasVisibleQuery: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var resultGroups: [SearchPanelResultGroup] {
@@ -172,26 +177,37 @@ final class SearchPanelViewModel: ObservableObject {
     }
 
     func start() {
-        scheduleSearch(immediately: true)
+        activateForPanel()
     }
 
-    func shutdown() {
-        let preferences = SearchPanelPreferences.current()
-        if preferences.retainsLastQuery {
-            UserDefaults.standard.set(
-                query,
-                forKey: PEEKPreferenceKey.searchLastQuery
-            )
-        } else {
-            UserDefaults.standard.removeObject(
-                forKey: PEEKPreferenceKey.searchLastQuery
-            )
+    func prewarm() {
+        guard !isPanelActive, results.isEmpty, searchTask == nil else { return }
+        scheduleSearch(immediately: true, allowWhileInactive: true)
+    }
+
+    func activateForPanel(initialQuery: String? = nil) {
+        if let initialQuery, query != initialQuery {
+            query = initialQuery
         }
+        let wasActive = isPanelActive
+        isPanelActive = true
+        if selectedItemID == nil {
+            selectedItemID = orderedResults.first?.id
+        }
+        loadPreview()
+        refreshActionCapabilities()
+        if !wasActive || searchTask == nil {
+            scheduleSearch(immediately: true)
+        }
+    }
+
+    func pauseForPanel() {
+        guard isPanelActive else { return }
+        isPanelActive = false
+        persistQueryPreference()
         searchGeneration &+= 1
         searchTask?.cancel()
         searchTask = nil
-        actionTask?.cancel()
-        actionTask = nil
         capabilityTask?.cancel()
         capabilityTask = nil
         previewTask?.cancel()
@@ -207,7 +223,46 @@ final class SearchPanelViewModel: ObservableObject {
         previewGeneration &+= 1
         isLoadingMoreTextPreview = false
         isSearching = false
+    }
+
+    func shutdown() {
+        isPanelActive = false
+        persistQueryPreference()
+        searchGeneration &+= 1
+        searchTask?.cancel()
+        searchTask = nil
+        capabilityTask?.cancel()
+        capabilityTask = nil
+        previewTask?.cancel()
+        previewTask = nil
+        previewTimeoutTask?.cancel()
+        previewTimeoutTask = nil
+        if let previewRequest {
+            QLThumbnailGenerator.shared.cancel(previewRequest)
+        }
+        previewRequest = nil
+        previewAccess?.stop()
+        previewAccess = nil
+        previewGeneration &+= 1
+        isLoadingMoreTextPreview = false
+        isSearching = false
+        actionTask?.cancel()
+        actionTask = nil
         isPerformingAction = false
+    }
+
+    private func persistQueryPreference() {
+        let preferences = SearchPanelPreferences.current()
+        if preferences.retainsLastQuery {
+            UserDefaults.standard.set(
+                query,
+                forKey: PEEKPreferenceKey.searchLastQuery
+            )
+        } else {
+            UserDefaults.standard.removeObject(
+                forKey: PEEKPreferenceKey.searchLastQuery
+            )
+        }
     }
 
     func moveSelection(by delta: Int) {
@@ -395,7 +450,11 @@ final class SearchPanelViewModel: ObservableObject {
         errorMessage = error.localizedDescription
     }
 
-    private func scheduleSearch(immediately: Bool = false) {
+    private func scheduleSearch(
+        immediately: Bool = false,
+        allowWhileInactive: Bool = false
+    ) {
+        guard isPanelActive || allowWhileInactive else { return }
         searchTask?.cancel()
         searchGeneration &+= 1
         let generation = searchGeneration
@@ -497,7 +556,8 @@ final class SearchPanelViewModel: ObservableObject {
         isLoadingMoreTextPreview = false
         previewGeneration &+= 1
 
-        guard SearchPanelPreferences.current().showsPreview,
+        guard isPanelActive,
+              SearchPanelPreferences.current().showsPreview,
               let item = selectedItem else { return }
         let generation = previewGeneration
         let selectedID = item.id
@@ -654,7 +714,7 @@ final class SearchPanelViewModel: ObservableObject {
     private func refreshActionCapabilities() {
         capabilityTask?.cancel()
         capabilityTask = nil
-        guard let item = selectedItem else {
+        guard isPanelActive, let item = selectedItem else {
             actionCapabilities.removeAll()
             return
         }

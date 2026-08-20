@@ -62,10 +62,9 @@ final class ScreenshotCaptureCoordinator {
         )
     }
 
-    /// Region capture with a HapiGo-style inline editor. Releasing the mouse
-    /// turns the frozen selection into the annotation canvas and shows one
-    /// horizontal toolbar at its lower edge. Done and double-click both copy
-    /// the rendered result before returning it.
+    /// Region capture with a frozen-desktop inline editor. The desktop is read
+    /// exactly once before overlays appear; selection and editing always use
+    /// that immutable source.
     func captureRegionWithInlineEditor(
         requestPermissionIfNeeded: Bool = true,
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
@@ -160,7 +159,7 @@ final class ScreenshotCaptureCoordinator {
         continuation: CheckedContinuation<ScreenshotCaptureResult?, Error>
     ) {
         let model = ScreenshotSelectionModel(
-            desktop: desktop,
+            desktop: desktop.selectionGeometry(),
             initialSelectionRect: initialSelectionRect,
             initialSelectionHint: initialSelectionHint,
             automaticHoverWindowRect: automaticHoverWindowRect,
@@ -182,6 +181,7 @@ final class ScreenshotCaptureCoordinator {
             panel.level = .screenSaver
             panel.backgroundColor = .clear
             panel.isOpaque = true
+            panel.ignoresMouseEvents = false
             panel.hasShadow = false
             panel.hidesOnDeactivate = false
             panel.acceptsMouseMovedEvents = true
@@ -332,8 +332,18 @@ final class ScreenshotCaptureCoordinator {
                 image: image,
                 selectionRect: selection,
                 screenFrame: screenFrame,
+                previewDisplay: owningDisplay,
+                renderSelection: { rect in
+                    try desktop.render(selection: rect)
+                },
+                onSelectionPreviewChanged: { rect in
+                    model.previewSelectionDuringEditing(rect)
+                },
+                onSelectionChanged: { rect in
+                    model.updateSelectionDuringEditing(rect)
+                },
                 onAction: onAction
-            ) { [weak self] editedImage in
+            ) { [weak self] editedImage, finalSelectionRect in
                 guard let self,
                       self.activeSession?.id == sessionID else {
                     return
@@ -347,7 +357,7 @@ final class ScreenshotCaptureCoordinator {
                     with: .success(
                         ScreenshotCaptureResult(
                             image: editedImage,
-                            selectionRect: selection,
+                            selectionRect: finalSelectionRect,
                             capturedAt: Date(),
                             wasInitialSelectionModified: model.didModifyInitialSelection
                         )
@@ -370,8 +380,8 @@ final class ScreenshotCaptureCoordinator {
         session.watchdog?.cancel()
         session.model.onChange = nil
         session.model.onCancel = nil
-        session.model.onFinish = nil
         session.model.onSelectionReady = nil
+        session.model.onFinish = nil
         inlineEditorController.closeAll()
         session.panels.forEach {
             $0.orderOut(nil)

@@ -2,8 +2,21 @@ import AppKit
 @preconcurrency import QuickLookThumbnailing
 import SwiftUI
 
+struct SearchPanelLowerContentPolicy: Equatable, Sendable {
+    let accessibilityHidden: Bool
+    let allowsHitTesting: Bool
+    let isDisabled: Bool
+
+    init(expanded: Bool) {
+        accessibilityHidden = !expanded
+        allowsHitTesting = expanded
+        isDisabled = !expanded
+    }
+}
+
 struct SearchPanelView: View {
     @ObservedObject var viewModel: SearchPanelViewModel
+    var onExpansionChanged: (Bool) -> Void = { _ in }
     @FocusState private var searchFieldFocused: Bool
     @State private var hoveredAction: SearchPanelFileAction?
     @State private var showsNumericShortcuts = false
@@ -11,36 +24,32 @@ struct SearchPanelView: View {
     private var showsPreview = true
     @AppStorage(PEEKPreferenceKey.searchResultDensity)
     private var resultDensityRaw = SearchResultDensity.standard.rawValue
-    @AppStorage(PEEKPreferenceKey.appearanceMode)
-    private var appearanceModeRaw = PEEKAppearanceMode.system.rawValue
     @AppStorage(PEEKPreferenceKey.searchWindowOpacity)
     private var searchWindowOpacity = 0.92
 
     var body: some View {
         VStack(spacing: 0) {
             searchHeader
-            Divider().opacity(0.55)
-
-            searchContent
-
-            actionBar
-            statusLine
+                .transaction { transaction in
+                    // AppKit reveals the fixed canvas by resizing the panel.
+                    // Keep the field free from SwiftUI layout animation.
+                    transaction.animation = nil
+                }
+            lowerContent
         }
-        .frame(minWidth: 840, idealWidth: 920, minHeight: 590, idealHeight: 680)
-        .background(.ultraThinMaterial)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.86))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        .frame(
+            minWidth: SearchPanelLayout.minimumWidth,
+            idealWidth: SearchPanelLayout.width,
+            minHeight: 590,
+            idealHeight: SearchPanelLayout.expandedHeight
         )
         .background(
             SearchPanelWindowOpacityBridge(opacity: searchWindowOpacity)
                 .frame(width: 0, height: 0)
         )
-        .preferredColorScheme(appearanceMode.colorScheme)
         .background(
             SearchPanelKeyboardBridge(
+                isActive: viewModel.isPanelActive,
                 moveUp: { viewModel.moveSelection(by: -1) },
                 moveDown: { viewModel.moveSelection(by: 1) },
                 activate: viewModel.openSelection,
@@ -53,12 +62,40 @@ struct SearchPanelView: View {
             .frame(width: 0, height: 0)
         )
         .onAppear {
-            viewModel.start()
+            onExpansionChanged(isExpanded)
+            guard viewModel.isPanelActive else { return }
             DispatchQueue.main.async { searchFieldFocused = true }
         }
-        .onDisappear {
-            showsNumericShortcuts = false
+        .onChange(of: isExpanded) { expanded in
+            onExpansionChanged(expanded)
+            guard !expanded, viewModel.isPanelActive else { return }
+            DispatchQueue.main.async { searchFieldFocused = true }
         }
+        .onChange(of: viewModel.isPanelActive) { isActive in
+            showsNumericShortcuts = false
+            guard isActive else {
+                searchFieldFocused = false
+                return
+            }
+            DispatchQueue.main.async { searchFieldFocused = true }
+        }
+    }
+
+    private var isExpanded: Bool {
+        viewModel.hasVisibleQuery
+    }
+
+    private var lowerContent: some View {
+        let policy = SearchPanelLowerContentPolicy(expanded: isExpanded)
+        return VStack(spacing: 0) {
+            Divider().opacity(0.55)
+            searchContent
+            actionBar
+            statusLine
+        }
+        .accessibilityHidden(policy.accessibilityHidden)
+        .allowsHitTesting(policy.allowsHitTesting)
+        .disabled(policy.isDisabled)
     }
 
     @ViewBuilder
@@ -76,10 +113,6 @@ struct SearchPanelView: View {
         } else {
             resultList
         }
-    }
-
-    private var appearanceMode: PEEKAppearanceMode {
-        PEEKAppearanceMode(rawValue: appearanceModeRaw) ?? .system
     }
 
     private var resultDensity: SearchResultDensity {
@@ -130,7 +163,7 @@ struct SearchPanelView: View {
         }
         .padding(.horizontal, 15)
         .frame(height: 58)
-        .background(Color.black.opacity(0.08))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.26))
     }
 
     private var searchOptionsMenu: some View {
@@ -248,7 +281,7 @@ struct SearchPanelView: View {
                 }
             }
         }
-        .background(Color.black.opacity(0.13))
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.72))
     }
 
     private var emptyResults: some View {
@@ -787,12 +820,6 @@ struct SearchPanelView: View {
                     .foregroundStyle(.green)
                 Text(feedbackMessage)
                     .foregroundStyle(.secondary)
-            } else if let indexStatusMessage = viewModel.indexStatusMessage {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 7, height: 7)
-                Text(indexStatusMessage)
-                    .foregroundStyle(.secondary)
             } else if let unavailableActionMessage = viewModel.unavailableActionMessage {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
@@ -808,7 +835,7 @@ struct SearchPanelView: View {
         .lineLimit(1)
         .frame(height: 29)
         .padding(.horizontal, 14)
-        .background(Color.black.opacity(0.12))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
     }
 
     private var emptyResultMessage: String {

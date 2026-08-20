@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -64,12 +65,36 @@ enum PEEKAppearanceMode: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var colorScheme: ColorScheme? {
+    var appKitAppearanceName: NSAppearance.Name? {
         switch self {
         case .system: return nil
-        case .light: return .light
-        case .dark: return .dark
+        case .light: return .aqua
+        case .dark: return .darkAqua
         }
+    }
+
+    static func current(defaults: UserDefaults = .standard) -> PEEKAppearanceMode {
+        PEEKAppearanceMode(
+            rawValue: defaults.string(forKey: PEEKPreferenceKey.appearanceMode) ?? ""
+        ) ?? .system
+    }
+}
+
+@MainActor
+enum PEEKAppearanceController {
+    static func applyCurrent(defaults: UserDefaults = .standard) {
+        apply(PEEKAppearanceMode.current(defaults: defaults))
+    }
+
+    static func apply(_ mode: PEEKAppearanceMode) {
+        let application = NSApplication.shared
+        application.appearance = mode.appKitAppearanceName.flatMap(NSAppearance.init(named:))
+
+        // SwiftUI may leave an explicit appearance on an already-created
+        // NSWindow when a forced scheme changes back to `nil`. Clear window
+        // overrides so cached settings/search/result windows inherit the
+        // application appearance and system mode changes reach the full view.
+        application.windows.forEach { $0.appearance = nil }
     }
 }
 

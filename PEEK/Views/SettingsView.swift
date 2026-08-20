@@ -40,6 +40,7 @@ struct SettingsView: View {
         case documents
         case applications
         case exclusions
+        case indexing
 
         var id: String { rawValue }
 
@@ -48,6 +49,7 @@ struct SettingsView: View {
             case .documents: return L10n.tr("文档搜索")
             case .applications: return L10n.tr("应用搜索")
             case .exclusions: return L10n.tr("搜索排除")
+            case .indexing: return L10n.tr("索引日志")
             }
         }
 
@@ -56,6 +58,7 @@ struct SettingsView: View {
             case .documents: return "folder.fill"
             case .applications: return "app.fill"
             case .exclusions: return "shield.fill"
+            case .indexing: return "list.bullet.rectangle.fill"
             }
         }
     }
@@ -263,7 +266,11 @@ struct SettingsView: View {
                 .tabItem { Label(Pane.about.title, systemImage: Pane.about.systemImage) }
                 .tag(Pane.about)
         }
-        .preferredColorScheme(appearanceMode.colorScheme)
+        .onChange(of: appearanceModeRaw) { rawValue in
+            PEEKAppearanceController.apply(
+                PEEKAppearanceMode(rawValue: rawValue) ?? .system
+            )
+        }
         .task {
             applyPendingSettingsRoute()
             refreshPermissionState()
@@ -386,6 +393,7 @@ struct SettingsView: View {
                     Section(L10n.tr("搜索设置")) {
                         searchSidebarRow(.documents)
                         searchSidebarRow(.applications)
+                        searchSidebarRow(.indexing)
                     }
                     Section(L10n.tr("隐私设置")) {
                         searchSidebarRow(.exclusions)
@@ -405,6 +413,7 @@ struct SettingsView: View {
                 case .documents: documentSearchPane
                 case .applications: applicationSearchPane
                 case .exclusions: exclusionSearchPane
+                case .indexing: indexLogSearchPane
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -621,6 +630,81 @@ struct SettingsView: View {
                     ? L10n.tr("初始为空；PEEK 不替你添加排除目录。")
                     : L10n.tr("排除项将在下一次后台索引维护时生效。")
             )
+        }
+    }
+
+    private var indexLogSearchPane: some View {
+        VStack(spacing: 0) {
+            searchPaneHeader(title: L10n.tr("索引日志")) {
+                if isIndexUpdating {
+                    Label(L10n.tr("正在更新"), systemImage: "arrow.triangle.2.circlepath")
+                        .foregroundStyle(.blue)
+                } else {
+                    Label(indexConnectionText, systemImage: indexPhaseIcon)
+                        .foregroundStyle(indexConnectionColor)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Circle()
+                        .fill(indexConnectionColor)
+                        .frame(width: 9, height: 9)
+                    Text(indexProgressStatusText)
+                        .font(.callout.weight(.medium))
+                    Spacer(minLength: 12)
+                    if let percentage = indexProgressPercentageText {
+                        Text(percentage)
+                            .font(.callout.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if isIndexUpdating {
+                    indexProgressBar
+                }
+
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Label(L10n.tr("实时索引记录"), systemImage: "terminal")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(L10n.tr("每秒刷新"))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .frame(height: 34)
+
+                    Divider()
+
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 7) {
+                            ForEach(Array(indexLogLines.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                    }
+                }
+                .frame(maxHeight: .infinity)
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.62))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.primary.opacity(0.16), lineWidth: 1)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+            .frame(maxHeight: .infinity)
+
+            searchPaneFooter(L10n.tr("查询不会触发索引；这里只显示后台任务的实时状态。"))
         }
     }
 
@@ -982,10 +1066,6 @@ struct SettingsView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
-    }
-
-    private var appearanceMode: PEEKAppearanceMode {
-        PEEKAppearanceMode(rawValue: appearanceModeRaw) ?? .system
     }
 
     private var versionLabel: String {
@@ -1704,6 +1784,34 @@ struct SettingsView: View {
         return "\(Int((fraction * 100).rounded()))%"
     }
 
+    private var indexLogLines: [String] {
+        if let progress = initialIndexProgress {
+            var lines: [String] = []
+            if let root = progress.currentRootName, !root.isEmpty {
+                lines.append(L10n.tr("目录：%@", root))
+            }
+            lines.append(
+                L10n.tr(
+                    "进度：已索引 %lld / 已发现 %lld 项",
+                    Int64(progress.indexedItems),
+                    Int64(progress.discoveredItems)
+                )
+            )
+            lines.append(contentsOf: progress.recentPaths.reversed().map {
+                L10n.tr("正在处理：%@", $0)
+            })
+            return lines
+        }
+        if let metadata = indexMetadata {
+            return [
+                L10n.tr("当前没有正在运行的索引任务。"),
+                L10n.tr("已提交：%lld 项", Int64(metadata.statistics.indexedItems)),
+                L10n.tr("上次完成：%@", formattedLastIndexDate)
+            ]
+        }
+        return [L10n.tr("正在读取索引状态")]
+    }
+
     @ViewBuilder
     private var indexProgressBar: some View {
         if let fraction = initialIndexProgress?.fractionCompleted {
@@ -1729,7 +1837,7 @@ struct SettingsView: View {
     private var indexPhaseDetail: String {
         guard let metadata = indexMetadata else { return L10n.tr("请稍候…") }
         switch metadata.phase {
-        case .idle: return L10n.tr("后台任务将在系统空闲时开始，查询不会触发扫描。")
+        case .idle: return L10n.tr("后台索引会持续低占用运行，查询不会触发扫描。")
         case .indexingApplications: return L10n.tr("应用目录完成一个即提交一个，可立即用于查询。")
         case .indexingFiles:
             if let progress = initialIndexProgress,

@@ -6,6 +6,33 @@ import XCTest
 @testable import PEEK
 
 final class ScreenshotKitTests: XCTestCase {
+    @MainActor
+    func testAppearanceModesApplyAndClearApplicationOverride() {
+        let application = NSApplication.shared
+        let previousAppearance = application.appearance
+        defer { application.appearance = previousAppearance }
+
+        let inheritedWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 120, height: 80),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        inheritedWindow.appearance = NSAppearance(named: .darkAqua)
+
+        XCTAssertNil(PEEKAppearanceMode.system.appKitAppearanceName)
+        XCTAssertEqual(PEEKAppearanceMode.light.appKitAppearanceName, .aqua)
+        XCTAssertEqual(PEEKAppearanceMode.dark.appKitAppearanceName, .darkAqua)
+
+        PEEKAppearanceController.apply(.dark)
+        XCTAssertEqual(application.appearance?.name, .darkAqua)
+        XCTAssertNil(inheritedWindow.appearance)
+        PEEKAppearanceController.apply(.light)
+        XCTAssertEqual(application.appearance?.name, .aqua)
+        PEEKAppearanceController.apply(.system)
+        XCTAssertNil(application.appearance)
+    }
+
     func testScreenshotHotkeyDoesNotAddPresentationDelay() {
         XCTAssertEqual(
             ScreenshotCapturePresentationDelay.hotKeyNanoseconds,
@@ -209,6 +236,48 @@ final class ScreenshotKitTests: XCTestCase {
             ScreenshotCaptureError.selectionTimedOut
                 .errorDescription?
                 .contains("60 秒") == true
+        )
+    }
+
+    func testScreenCapturePixelDimensionsAdaptToEveryDisplayScale() {
+        XCTAssertEqual(
+            screenCapturePixelDimensions(
+                logicalSize: CGSize(width: 2_560, height: 1_440),
+                pointPixelScale: 2
+            ),
+            ScreenCapturePixelDimensions(width: 5_120, height: 2_880)
+        )
+        XCTAssertEqual(
+            screenCapturePixelDimensions(
+                logicalSize: CGSize(width: 3_440, height: 1_440),
+                pointPixelScale: 1
+            ),
+            ScreenCapturePixelDimensions(width: 3_440, height: 1_440)
+        )
+        XCTAssertEqual(
+            screenCapturePixelDimensions(
+                logicalSize: CGSize(width: 801, height: 601),
+                pointPixelScale: 1.5
+            ),
+            ScreenCapturePixelDimensions(width: 1_202, height: 902)
+        )
+    }
+
+    func testScreenCapturePixelDimensionsSafelyHandleInvalidScale() {
+        let logicalSize = CGSize(width: 640, height: 480)
+        XCTAssertEqual(
+            screenCapturePixelDimensions(
+                logicalSize: logicalSize,
+                pointPixelScale: .nan
+            ),
+            ScreenCapturePixelDimensions(width: 640, height: 480)
+        )
+        XCTAssertEqual(
+            screenCapturePixelDimensions(
+                logicalSize: logicalSize,
+                pointPixelScale: 0
+            ),
+            ScreenCapturePixelDimensions(width: 640, height: 480)
         )
     }
 
@@ -816,6 +885,323 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertLessThanOrEqual(frame.maxY, 472)
     }
 
+    func testCompletedSelectionCanMoveAsAWholeAndStaysOnItsDisplay() {
+        let original = CGRect(x: 300, y: 240, width: 420, height: 260)
+        let screen = CGRect(x: 0, y: 0, width: 1_200, height: 800)
+
+        XCTAssertEqual(
+            screenshotConstrainedSelectionMove(
+                original: original,
+                translation: CGSize(width: 80, height: -40),
+                screenFrame: screen
+            ),
+            CGRect(x: 380, y: 200, width: 420, height: 260)
+        )
+        XCTAssertEqual(
+            screenshotConstrainedSelectionMove(
+                original: original,
+                translation: CGSize(width: -900, height: 900),
+                screenFrame: screen
+            ),
+            CGRect(x: 0, y: 540, width: 420, height: 260)
+        )
+    }
+
+    @MainActor
+    func testSelectionMoveUpdatesGeometryUntilExplicitConfirmation() throws {
+        let screen = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+        let desktop = ScreenshotDesktopGeometry(
+            displays: [ScreenshotDisplayGeometry(displayID: 1, screenFrame: screen)],
+            desktopBounds: screen,
+            windowCandidates: [],
+            appKitReferenceTop: screen.maxY
+        )
+        let model = ScreenshotSelectionModel(desktop: desktop)
+        var confirmedRects: [CGRect] = []
+        var toolbarRects: [CGRect] = []
+        model.onFinish = { confirmedRects.append($0) }
+        model.onSelectionReady = { toolbarRects.append($0) }
+
+        model.mouseDown(at: CGPoint(x: 100, y: 120), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 500, y: 420))
+        _ = model.mouseUp(at: CGPoint(x: 500, y: 420))
+        XCTAssertEqual(model.selectionRect, CGRect(x: 100, y: 120, width: 400, height: 300))
+        XCTAssertTrue(confirmedRects.isEmpty, "mouse-up must not finalize the result")
+        XCTAssertEqual(
+            toolbarRects,
+            [CGRect(x: 100, y: 120, width: 400, height: 300)],
+            "mouse-up should present the toolbar over the frozen snapshot"
+        )
+
+        model.mouseDown(at: CGPoint(x: 300, y: 260), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 360, y: 300))
+        _ = model.mouseUp(at: CGPoint(x: 360, y: 300))
+        XCTAssertEqual(model.selectionRect, CGRect(x: 160, y: 160, width: 400, height: 300))
+        XCTAssertTrue(confirmedRects.isEmpty, "moving remains a geometry-only operation")
+        XCTAssertEqual(toolbarRects.last, CGRect(x: 160, y: 160, width: 400, height: 300))
+
+        model.finishCurrentSelection()
+        XCTAssertEqual(confirmedRects, [CGRect(x: 160, y: 160, width: 400, height: 300)])
+    }
+
+    func testInlineToolbarDefaultsToMoveAndImageToolsRequireFrozenPixels() {
+        XCTAssertFalse(screenshotInlineToolRequiresCapture(.select))
+        XCTAssertTrue(screenshotInlineToolRequiresCapture(.rectangle))
+        XCTAssertTrue(screenshotInlineToolRequiresCapture(.arrow))
+        XCTAssertTrue(screenshotInlineToolRequiresCapture(.mosaic))
+        XCTAssertTrue(screenshotInlineToolRequiresCapture(.text))
+    }
+
+    func testInlineEditorCursorFollowsSelectedToolAndDefaultsToMove() {
+        XCTAssertEqual(screenshotEditorCursorKind(for: .select), .move)
+        XCTAssertEqual(screenshotEditorCursorKind(for: .rectangle), .drawing)
+        XCTAssertEqual(screenshotEditorCursorKind(for: .pen), .drawing)
+        XCTAssertEqual(screenshotEditorCursorKind(for: .mosaic), .mosaic)
+        XCTAssertEqual(screenshotEditorCursorKind(for: .text), .text)
+    }
+
+    func testMosaicCursorTracksBrushWidthAndDisplayScale() {
+        XCTAssertEqual(
+            screenshotMosaicCursorDiameter(lineWidth: 3, displayedImageScale: 1),
+            18,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            screenshotMosaicCursorDiameter(lineWidth: 6, displayedImageScale: 1.5),
+            54,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            screenshotMosaicCursorDiameter(lineWidth: 20, displayedImageScale: 2),
+            64,
+            accuracy: 0.001
+        )
+    }
+
+    func testMultilineScreenshotTextBoundsIncludeEveryLine() {
+        let style = ScreenshotAnnotationStyle(color: .systemRed, lineWidth: 3, fontSize: 22)
+        let oneLine = screenshotAnnotationTextSize("第一行", style: style)
+        let twoLines = screenshotAnnotationTextSize("第一行\n第二行", style: style)
+
+        XCTAssertGreaterThan(twoLines.height, oneLine.height * 1.7)
+        XCTAssertGreaterThan(twoLines.width, 0)
+    }
+
+    @MainActor
+    func testMoveCursorUsesBlackCoreAndWhiteOutlineForEveryBackground() throws {
+        let image = makeScreenshotFourWayMoveCursorImage()
+        XCTAssertFalse(image.isTemplate)
+        let bitmap = try XCTUnwrap(
+            NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation))
+        )
+        var hasDarkPixel = false
+        var hasLightPixel = false
+        for y in 0 ..< bitmap.pixelsHigh {
+            for x in 0 ..< bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                      color.alphaComponent > 0.8 else {
+                    continue
+                }
+                let brightness = (
+                    color.redComponent + color.greenComponent + color.blueComponent
+                ) / 3
+                hasDarkPixel = hasDarkPixel || brightness < 0.15
+                hasLightPixel = hasLightPixel || brightness > 0.85
+            }
+        }
+        XCTAssertTrue(hasDarkPixel)
+        XCTAssertTrue(hasLightPixel)
+    }
+
+    func testInlineEditorDefaultsAnnotationColorToSystemRed() throws {
+        let actual = try XCTUnwrap(
+            screenshotEditorDefaultAnnotationColor.usingColorSpace(.deviceRGB)
+        )
+        let expected = try XCTUnwrap(NSColor.systemRed.usingColorSpace(.deviceRGB))
+        XCTAssertTrue(actual.isEqual(expected))
+    }
+
+    @MainActor
+    func testMovedInlineSelectionRendersLatestFrozenRectangleInsteadOfOriginalBase() throws {
+        let originalBase = try makeSolidScreenshotImage(
+            NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1),
+            size: CGSize(width: 8, height: 6)
+        )
+        let movedBase = try makeSolidScreenshotImage(
+            NSColor(deviceRed: 0, green: 0, blue: 1, alpha: 1),
+            size: CGSize(width: 8, height: 6)
+        )
+        let document = ScreenshotAnnotationDocument(baseImage: originalBase)
+        let movedRect = CGRect(x: 320, y: 180, width: 8, height: 6)
+        var requestedRects: [CGRect] = []
+
+        let rendered = try screenshotRenderedInlineSelection(
+            selectionRect: movedRect,
+            renderSelection: { rect in
+                requestedRects.append(rect)
+                return movedBase
+            },
+            document: document
+        )
+
+        XCTAssertEqual(requestedRects, [movedRect])
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(
+            rendered.tiffRepresentation
+        )))
+        let center = try XCTUnwrap(
+            bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?
+                .usingColorSpace(.deviceRGB)
+        )
+        XCTAssertLessThan(center.redComponent, 0.15)
+        XCTAssertGreaterThan(center.blueComponent, 0.85)
+    }
+
+    @MainActor
+    func testInlineSelectionCanvasIsTransparentAtOneXAndOnlyDrawsFrozenPixelsForZoom() throws {
+        let base = try makeSolidScreenshotImage(
+            NSColor(deviceRed: 1, green: 0, blue: 0, alpha: 1),
+            size: CGSize(width: 12, height: 10)
+        )
+        let document = ScreenshotAnnotationDocument(baseImage: base)
+        let canvas = ScreenshotEditorCanvas(document: document)
+        canvas.frame = CGRect(x: 0, y: 0, width: 12, height: 10)
+        canvas.imageContentInset = 0
+        canvas.drawsImageShadow = false
+        canvas.canvasBackgroundColor = .clear
+        canvas.drawsBaseImage = false
+        var drawCount = 0
+        canvas.liveBaseImageDrawer = { destination in
+            drawCount += 1
+            base.draw(in: destination)
+        }
+        canvas.onZoomChanged = { scale in
+            canvas.showsLiveBaseImage = scale > 1.001
+        }
+
+        let transparent = try renderedViewCenterColor(canvas, outputScale: 1)
+        XCTAssertEqual(drawCount, 0)
+        XCTAssertLessThan(transparent.alphaComponent, 0.01)
+
+        canvas.zoomIn()
+        let zoomed = try renderedViewCenterColor(canvas, outputScale: 1)
+        XCTAssertEqual(drawCount, 1)
+        XCTAssertGreaterThan(zoomed.redComponent, 0.85)
+        XCTAssertGreaterThan(zoomed.alphaComponent, 0.99)
+    }
+
+    func testLiveSelectionPreviewSourceRectUsesLogicalCoordinatesAtOneAndTwoX() {
+        let screen = CGRect(x: 100, y: 40, width: 800, height: 600)
+        let selection = CGRect(x: 260, y: 190, width: 320, height: 180)
+
+        // The preview wraps the native 1x/2x CGImage at the display's logical
+        // size, so the sampled source stays in points and does not double Retina
+        // coordinates a second time.
+        XCTAssertEqual(
+            screenshotSelectionPreviewSourceRect(
+                selectionRect: selection,
+                screenFrame: screen
+            ),
+            CGRect(x: 160, y: 150, width: 320, height: 180)
+        )
+    }
+
+    func testLiveSelectionPreviewSourceRectHandlesNegativeDisplayOrigin() {
+        XCTAssertEqual(
+            screenshotSelectionPreviewSourceRect(
+                selectionRect: CGRect(x: -1_120, y: 180, width: 420, height: 260),
+                screenFrame: CGRect(x: -1_280, y: -80, width: 1_280, height: 800)
+            ),
+            CGRect(x: 160, y: 260, width: 420, height: 260)
+        )
+    }
+
+    @MainActor
+    func testLiveSelectionPreviewUpdatesVisibleContentBeforeFinalRenderAtOneAndTwoX() throws {
+        for scale in [1, 2] {
+            let display = try makeStripedPreviewDisplay(
+                scale: scale,
+                screenFrame: CGRect(x: -4, y: -2, width: 4, height: 2)
+            )
+            let preview = ScreenshotFrozenSelectionPreviewView(
+                display: display,
+                selectionRect: CGRect(x: -4, y: -2, width: 1, height: 2)
+            )
+            preview.frame = CGRect(x: 0, y: 0, width: 1, height: 2)
+
+            let first = try renderedViewCenterColor(preview, outputScale: scale)
+            XCTAssertGreaterThan(first.redComponent, 0.9, "\(scale)x initial crop")
+            XCTAssertLessThan(first.blueComponent, 0.1, "\(scale)x initial crop")
+
+            // No commit or document base-image replacement occurs here. The
+            // view must sample the new frozen-screen region immediately.
+            preview.updateSelection(CGRect(x: -1, y: -2, width: 1, height: 2))
+            let moved = try renderedViewCenterColor(preview, outputScale: scale)
+            XCTAssertLessThan(moved.redComponent, 0.1, "\(scale)x moved crop")
+            XCTAssertGreaterThan(moved.blueComponent, 0.9, "\(scale)x moved crop")
+        }
+    }
+
+    @MainActor
+    func testLiveSelectionCanvasSharesZoomAndPanGeometryWithAnnotations() throws {
+        let display = try makeStripedPreviewDisplay(
+            scale: 2,
+            screenFrame: CGRect(x: -4, y: -2, width: 4, height: 2)
+        )
+        let preview = ScreenshotFrozenSelectionPreviewView(
+            display: display,
+            selectionRect: display.screenFrame
+        )
+        let baseImage = NSImage(size: display.screenFrame.size)
+        let document = ScreenshotAnnotationDocument(baseImage: baseImage)
+        let canvas = ScreenshotEditorCanvas(document: document)
+        canvas.frame = CGRect(x: 0, y: 0, width: 2, height: 2)
+        canvas.imageContentInset = 0
+        canvas.drawsImageShadow = false
+        canvas.canvasBackgroundColor = .clear
+        canvas.drawsBaseImage = false
+        var drawnDestinations: [CGRect] = []
+        canvas.liveBaseImageDrawer = { destination in
+            drawnDestinations.append(destination)
+            preview.drawSelection(in: destination)
+        }
+        canvas.onZoomChanged = { scale in
+            canvas.showsLiveBaseImage = scale > 1.001
+        }
+        for _ in 0 ..< 4 {
+            canvas.zoomIn()
+        }
+
+        canvas.pan(by: CGSize(width: -100, height: 0))
+        let leftPanColor = try renderedViewCenterColor(canvas, outputScale: 2)
+        let leftPanDestination = try XCTUnwrap(drawnDestinations.last)
+        XCTAssertEqual(
+            leftPanDestination,
+            screenshotEditorDisplayedImageRect(
+                imageSize: baseImage.size,
+                viewportBounds: canvas.bounds,
+                contentInset: 0,
+                zoomScale: canvas.zoomScale,
+                panOffset: CGSize(width: -100, height: 0)
+            )
+        )
+        XCTAssertGreaterThan(leftPanColor.blueComponent, 0.9)
+
+        canvas.pan(by: CGSize(width: 200, height: 0))
+        let rightPanColor = try renderedViewCenterColor(canvas, outputScale: 2)
+        let rightPanDestination = try XCTUnwrap(drawnDestinations.last)
+        XCTAssertEqual(
+            rightPanDestination,
+            screenshotEditorDisplayedImageRect(
+                imageSize: baseImage.size,
+                viewportBounds: canvas.bounds,
+                contentInset: 0,
+                zoomScale: canvas.zoomScale,
+                panOffset: CGSize(width: 100, height: 0)
+            )
+        )
+        XCTAssertGreaterThan(rightPanColor.redComponent, 0.9)
+    }
+
     func testQRCodeHintCentersBelowButtonAndClampsInsideToolbar() {
         XCTAssertEqual(
             screenshotQRCodeHintLeadingOffset(
@@ -840,6 +1226,25 @@ final class ScreenshotKitTests: XCTestCase {
                 toolbarWidth: 640
             ),
             416
+        )
+    }
+
+    func testToolbarTooltipPrefersAboveAndClampsInsideScreen() {
+        XCTAssertEqual(
+            screenshotToolbarTooltipFrame(
+                anchorFrame: CGRect(x: 100, y: 100, width: 34, height: 34),
+                tooltipSize: CGSize(width: 100, height: 28),
+                screenFrame: CGRect(x: 0, y: 0, width: 500, height: 300)
+            ),
+            CGRect(x: 67, y: 141, width: 100, height: 28)
+        )
+        XCTAssertEqual(
+            screenshotToolbarTooltipFrame(
+                anchorFrame: CGRect(x: 470, y: 270, width: 34, height: 24),
+                tooltipSize: CGSize(width: 120, height: 28),
+                screenFrame: CGRect(x: 0, y: 0, width: 500, height: 300)
+            ),
+            CGRect(x: 380, y: 235, width: 120, height: 28)
         )
     }
 
@@ -934,6 +1339,67 @@ final class ScreenshotKitTests: XCTestCase {
 
         XCTAssertLessThan(filledCenter.greenComponent, 0.95)
         XCTAssertGreaterThan(outlineCenter.greenComponent, 0.99)
+    }
+
+    @MainActor
+    func testMosaicAnnotationPixelatesSelectedStrokeArea() throws {
+        let baseBitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: 48,
+            pixelsHigh: 48,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        baseBitmap.size = CGSize(width: 48, height: 48)
+        for y in 0 ..< 48 {
+            for x in 0 ..< 48 {
+                baseBitmap.setColor(NSColor(
+                    deviceRed: CGFloat(x) / 47,
+                    green: CGFloat(y) / 47,
+                    blue: (x + y).isMultiple(of: 2) ? 0.1 : 0.9,
+                    alpha: 1
+                ), atX: x, y: y)
+            }
+        }
+        let base = NSImage(size: baseBitmap.size)
+        base.addRepresentation(baseBitmap)
+        let style = ScreenshotAnnotationStyle(
+            color: .black,
+            // Mosaic expands the configured width by 6x. Keep the synthetic
+            // stroke narrow enough that (4, 4) is genuinely outside its clip.
+            lineWidth: 2,
+            fontSize: 18,
+            shapeFill: .outline
+        )
+        let rendered = try XCTUnwrap(ScreenshotAnnotationRenderer.render(
+            baseImage: base,
+            annotations: [.mosaic(
+                [CGPoint(x: 12, y: 24), CGPoint(x: 36, y: 24)],
+                style
+            )]
+        ))
+        let originalBitmap = baseBitmap
+        let renderedBitmap = try XCTUnwrap(
+            rendered.representations.compactMap { $0 as? NSBitmapImageRep }.max {
+                $0.pixelsWide * $0.pixelsHigh < $1.pixelsWide * $1.pixelsHigh
+            }
+        )
+
+        XCTAssertNotEqual(
+            originalBitmap.colorAt(x: 24, y: 24),
+            renderedBitmap.colorAt(x: 24, y: 24)
+        )
+        let originalOutside = try XCTUnwrap(originalBitmap.colorAt(x: 4, y: 4)?.usingColorSpace(.deviceRGB))
+        let renderedOutside = try XCTUnwrap(renderedBitmap.colorAt(x: 4, y: 4)?.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(originalOutside.redComponent, renderedOutside.redComponent, accuracy: 0.03)
+        XCTAssertEqual(originalOutside.greenComponent, renderedOutside.greenComponent, accuracy: 0.03)
+        XCTAssertEqual(originalOutside.blueComponent, renderedOutside.blueComponent, accuracy: 0.03)
+        XCTAssertEqual(originalOutside.alphaComponent, renderedOutside.alphaComponent, accuracy: 0.01)
     }
 
     func testVerifiedAXRegionUsesAppKitCaptureRectAndQuartzScrollPoint() throws {
@@ -3017,6 +3483,112 @@ final class ScreenshotKitTests: XCTestCase {
         let userDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         userDefaults.removePersistentDomain(forName: suiteName)
         return (userDefaults, suiteName)
+    }
+
+    @MainActor
+    private func makeStripedPreviewDisplay(
+        scale: Int,
+        screenFrame: CGRect
+    ) throws -> ScreenshotFrozenDisplay {
+        let pixelsWide = Int(screenFrame.width) * scale
+        let pixelsHigh = Int(screenFrame.height) * scale
+        var bytes = [UInt8](repeating: 0, count: pixelsWide * pixelsHigh * 4)
+        for y in 0 ..< pixelsHigh {
+            for x in 0 ..< pixelsWide {
+                let logicalColumn = x / scale
+                let offset = (y * pixelsWide + x) * 4
+                bytes[offset] = logicalColumn < 2 ? 255 : 0
+                bytes[offset + 1] = 0
+                bytes[offset + 2] = logicalColumn < 2 ? 0 : 255
+                bytes[offset + 3] = 255
+            }
+        }
+        let data = Data(bytes)
+        let provider = try XCTUnwrap(CGDataProvider(data: data as CFData))
+        let image = try XCTUnwrap(CGImage(
+            width: pixelsWide,
+            height: pixelsHigh,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: pixelsWide * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(
+                rawValue: CGImageAlphaInfo.premultipliedLast.rawValue
+            ),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ))
+        return ScreenshotFrozenDisplay(
+            displayID: 99,
+            screenFrame: screenFrame,
+            image: image
+        )
+    }
+
+    @MainActor
+    private func makeSolidScreenshotImage(
+        _ color: NSColor,
+        size: CGSize
+    ) throws -> NSImage {
+        let resolvedColor = color.usingColorSpace(.deviceRGB)
+            ?? NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 1)
+        let pixelsWide = max(1, Int(size.width))
+        let pixelsHigh = max(1, Int(size.height))
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        bitmap.size = size
+        for y in 0 ..< pixelsHigh {
+            for x in 0 ..< pixelsWide {
+                bitmap.setColor(resolvedColor, atX: x, y: y)
+            }
+        }
+        let image = NSImage(size: size)
+        image.addRepresentation(bitmap)
+        return image
+    }
+
+    @MainActor
+    private func renderedViewCenterColor(
+        _ view: NSView,
+        outputScale: Int
+    ) throws -> NSColor {
+        let pixelsWide = max(1, Int(view.bounds.width) * outputScale)
+        let pixelsHigh = max(1, Int(view.bounds.height) * outputScale)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelsWide,
+            pixelsHigh: pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        bitmap.size = view.bounds.size
+        let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: bitmap))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        view.draw(view.bounds)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return try XCTUnwrap(
+            bitmap.colorAt(x: pixelsWide / 2, y: pixelsHigh / 2)?
+                .usingColorSpace(.deviceRGB)
+        )
     }
 
     @MainActor
