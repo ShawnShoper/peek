@@ -24,7 +24,7 @@ PEEK 常驻在 Mac 菜单栏，需要时一键出现，用完即走。它可以�
 
 输入关键词后，PEEK 会展开应用结果、预览信息和常用操作：
 
-![PEEK 文件查找界面](docs/images/peek-file-search.jpeg)
+![PEEK 文件查找界面](docs/images/peek-file-search.png)
 
 ### 截图与标注
 
