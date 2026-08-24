@@ -14,6 +14,12 @@ struct MenuBarMenuView: View {
         }
 
         Button {
+            TranslationPanelController.shared.toggle()
+        } label: {
+            translationLabel
+        }
+
+        Button {
             Task { await screenshotService.captureRegion() }
         } label: {
             screenshotLabel(
@@ -74,7 +80,6 @@ struct MenuBarMenuView: View {
         Button(L10n.tr("退出 PEEK")) {
             NSApp.terminate(nil)
         }
-        .keyboardShortcut("q", modifiers: [.command])
     }
 
     private func screenshotLabel(
@@ -102,6 +107,19 @@ struct MenuBarMenuView: View {
         return Label(
             shortcut.map { "\(title)    \($0)" } ?? title,
             systemImage: "magnifyingglass"
+        )
+    }
+
+    private var translationLabel: some View {
+        let action = ScreenshotGlobalHotKeyAction.translation
+        let shortcut = hotKeyManager.shortcut(for: action)?.displayString
+        let state = hotKeyManager.registrationStates[action]
+        let title = state == .systemConflict
+            ? L10n.tr("翻译（快捷键冲突，可在设置中修改）")
+            : L10n.tr("翻译")
+        return Label(
+            shortcut.map { "\(title)    \($0)" } ?? title,
+            systemImage: "character.book.closed"
         )
     }
 

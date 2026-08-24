@@ -4,6 +4,47 @@ import XCTest
 @testable import PEEK
 
 final class FileSearchTests: XCTestCase {
+    @MainActor
+    func testTranslationSubAppMatchesChinesePinyinAndEnglishQueries() {
+        for query in ["翻译", "fanyi", "fy", "translate", "PEEK Translate"] {
+            let item = PEEKTranslateSearchRegistration.item(
+                matching: query,
+                category: .all
+            )
+            XCTAssertEqual(item?.id, PEEKTranslateSearchRegistration.itemIdentifier)
+            XCTAssertEqual(item?.launchBehavior, .peekTranslation)
+            XCTAssertEqual(item?.category, .applications)
+        }
+        XCTAssertNil(
+            PEEKTranslateSearchRegistration.item(
+                matching: "",
+                category: .all
+            )
+        )
+        XCTAssertNil(
+            PEEKTranslateSearchRegistration.item(
+                matching: "翻译",
+                category: .files
+            )
+        )
+    }
+
+    @MainActor
+    func testTranslationSubAppOnlyEnablesOpenAction() async throws {
+        let item = try XCTUnwrap(
+            PEEKTranslateSearchRegistration.item(
+                matching: "翻译",
+                category: .applications
+            )
+        )
+        let capabilities = await DefaultSearchPanelActionHandler()
+            .capabilities(for: item)
+        XCTAssertEqual(capabilities[.open], .enabled)
+        for action in SearchPanelFileAction.allCases where action != .open {
+            XCTAssertEqual(capabilities[action]?.isEnabled, false)
+        }
+    }
+
     func testPinyinFullAndInitialQueriesMatchChineseApplication() {
         let notes = prepared(name: "备忘录", kind: .application)
 
@@ -329,6 +370,10 @@ final class FileSearchTests: XCTestCase {
             from: Data(legacy.utf8)
         )
         XCTAssertEqual(decoded.search, defaultShortcut)
+        XCTAssertEqual(
+            decoded.translation,
+            ScreenshotGlobalHotKeyAction.translation.defaultShortcut
+        )
     }
 
     func testInitialApplicationIndexProgressProvidesReadableETAAndFraction() {
@@ -823,6 +868,20 @@ final class FileSearchTests: XCTestCase {
             let inactive = await gate.snapshot()
             XCTAssertFalse(inactive.blockers.contains(blocker))
         }
+    }
+
+    func testIndexerChecksInteractiveActivityEverySixteenVisits() {
+        let policy = FileSearchActivityCheckpointPolicy.standard
+
+        XCTAssertEqual(policy.entryInterval, 16)
+        XCTAssertFalse(policy.shouldCheck(afterVisitedEntries: 1))
+        XCTAssertFalse(policy.shouldCheck(afterVisitedEntries: 15))
+        XCTAssertTrue(policy.shouldCheck(afterVisitedEntries: 16))
+        XCTAssertFalse(policy.shouldCheck(afterVisitedEntries: 17))
+        XCTAssertTrue(policy.shouldCheck(afterVisitedEntries: 32))
+
+        let clamped = FileSearchActivityCheckpointPolicy(entryInterval: 1_000)
+        XCTAssertEqual(clamped.entryInterval, 64)
     }
 
     func testFastIndexPolicyStillStopsWhileSearchPanelIsVisible() async {

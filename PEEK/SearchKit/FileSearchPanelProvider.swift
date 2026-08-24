@@ -48,10 +48,23 @@ final class FileSearchPanelProvider: SearchPanelProviding {
                             query: query,
                             category: request.category
                         )
+                        var items = rankedResults
+                            .prefix(preferences.resultLimit)
+                            .map(Self.panelItem)
+                        let builtInItems = [
+                            PEEKTranslateSearchRegistration.item(
+                                matching: query,
+                                category: category
+                            )
+                        ].compactMap { $0 }
+                        if !builtInItems.isEmpty {
+                            let identifiers = Set(builtInItems.map(\.id))
+                            items.removeAll { identifiers.contains($0.id) }
+                            items.insert(contentsOf: builtInItems, at: 0)
+                            items = Array(items.prefix(preferences.resultLimit))
+                        }
                         continuation.yield(SearchPanelSearchUpdate(
-                            items: rankedResults
-                                .prefix(preferences.resultLimit)
-                                .map(Self.panelItem),
+                            items: items,
                             statusMessage: Self.statusMessage(
                                 snapshot,
                                 initialProgress: initialProgress

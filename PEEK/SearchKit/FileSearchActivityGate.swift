@@ -18,6 +18,23 @@ struct FileSearchActivityGateSnapshot: Equatable, Sendable {
     var canIndex: Bool { blockers.isEmpty }
 }
 
+/// Keeps filesystem traversal responsive to capture/OCR without shrinking the
+/// larger SQLite commit batch used by the fast first index. With the standard
+/// interval, at most roughly 16 metadata visits occur between blocker checks.
+struct FileSearchActivityCheckpointPolicy: Equatable, Sendable {
+    static let standard = FileSearchActivityCheckpointPolicy()
+
+    let entryInterval: Int
+
+    init(entryInterval: Int = 16) {
+        self.entryInterval = min(max(entryInterval, 1), 64)
+    }
+
+    func shouldCheck(afterVisitedEntries count: Int) -> Bool {
+        count > 0 && count.isMultiple(of: entryInterval)
+    }
+}
+
 /// Central pause switch for user-facing work. Callers only set explicit app
 /// activities; power, thermal and keyboard/mouse idleness are sampled here.
 actor FileSearchActivityGate {

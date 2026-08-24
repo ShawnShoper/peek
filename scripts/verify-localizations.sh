@@ -6,7 +6,9 @@ project_root="${0:A:h:h}"
 
 ruby -rjson - "$project_root" <<'RUBY'
 root = ARGV.fetch(0)
-sources = Dir.glob(File.join(root, "PEEK/**/*.swift"))
+sources = %w[PEEK PEEKTranslate].flat_map do |directory|
+  Dir.glob(File.join(root, directory, "**/*.swift"))
+end
 catalog_path = File.join(root, "PEEK/Resources/Localizable.xcstrings")
 info_catalog_path = File.join(root, "PEEK/Resources/InfoPlist.xcstrings")
 catalog = JSON.parse(File.read(catalog_path))
@@ -22,6 +24,9 @@ sources.reject { |path| path.end_with?("PEEKLocalization.swift") }.each do |path
     match = Regexp.last_match
     literal = match[0]
     next unless literal.match?(/\p{Han}/)
+    line_start = source.rindex("\n", match.begin(0)) || -1
+    line_end = source.index("\n", match.end(0)) || source.length
+    next if source[(line_start + 1)...line_end].include?("localization:ignore")
     prefix = source[[match.begin(0) - 40, 0].max...match.begin(0)]
     next if prefix.match?(/L10n\.tr\(\s*$/)
     line = source[0...match.begin(0)].count("\n") + 1

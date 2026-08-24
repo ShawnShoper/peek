@@ -1,6 +1,140 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import OSLog
+
+/// One monotonic, privacy-safe trace shared by the Carbon callback, capture
+/// coordinator and the first overlay frame. The UUID is the only correlation
+/// value written to unified logging; no window title or captured content is
+/// recorded.
+final class ScreenshotCaptureDiagnosticSession: @unchecked Sendable {
+    let id: UUID
+    let source: String
+    let action: String
+    let startedAtNanoseconds: UInt64
+
+    private let lock = NSLock()
+    private var didRecordFirstFrame = false
+
+    init(
+        id: UUID = UUID(),
+        source: String,
+        action: String,
+        startedAtNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) {
+        self.id = id
+        self.source = source
+        self.action = action
+        self.startedAtNanoseconds = startedAtNanoseconds
+    }
+
+    func elapsedMilliseconds(
+        at nowNanoseconds: UInt64 = DispatchTime.now().uptimeNanoseconds
+    ) -> Double {
+        guard nowNanoseconds >= startedAtNanoseconds else { return 0 }
+        return Double(nowNanoseconds - startedAtNanoseconds) / 1_000_000
+    }
+
+    /// Multi-display overlays may draw concurrently in the same display
+    /// cycle. Only the first completed draw represents user-perceived latency.
+    func claimFirstFrame() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didRecordFirstFrame else { return false }
+        didRecordFirstFrame = true
+        return true
+    }
+}
+
+enum ScreenshotCaptureDiagnostics {
+    @TaskLocal static var currentSession: ScreenshotCaptureDiagnosticSession?
+
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.shawnshoper.peek",
+        category: "ScreenshotLatency"
+    )
+
+    static func makeUISession(action: String) -> ScreenshotCaptureDiagnosticSession {
+        ScreenshotCaptureDiagnosticSession(source: "ui", action: action)
+    }
+
+    nonisolated static func nowNanoseconds() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+
+    nonisolated static func milliseconds(
+        from startNanoseconds: UInt64,
+        to endNanoseconds: UInt64
+    ) -> Double {
+        guard endNanoseconds >= startNanoseconds else { return 0 }
+        return Double(endNanoseconds - startNanoseconds) / 1_000_000
+    }
+
+    nonisolated static func carbonEventAgeMilliseconds(
+        eventTime: TimeInterval,
+        systemUptime: TimeInterval
+    ) -> Double {
+        guard eventTime.isFinite, systemUptime.isFinite, systemUptime >= eventTime else {
+            return 0
+        }
+        return (systemUptime - eventTime) * 1_000
+    }
+
+    nonisolated static func recordCarbonCallback(
+        sessionID: UUID,
+        eventID: UInt32,
+        eventAgeMilliseconds: Double
+    ) {
+        let age = formattedMilliseconds(eventAgeMilliseconds)
+        logger.notice(
+            "session=\(sessionID.uuidString, privacy: .public) stage=carbon_callback event_id=\(eventID) event_age_ms=\(age, privacy: .public)"
+        )
+    }
+
+    nonisolated static func record(
+        _ stage: String,
+        session: ScreenshotCaptureDiagnosticSession,
+        phaseStartedAtNanoseconds: UInt64? = nil,
+        detail: String = ""
+    ) {
+        let now = nowNanoseconds()
+        let total = formattedMilliseconds(session.elapsedMilliseconds(at: now))
+        let phase = phaseStartedAtNanoseconds.map {
+            formattedMilliseconds(milliseconds(from: $0, to: now))
+        } ?? "-"
+        logger.notice(
+            "session=\(session.id.uuidString, privacy: .public) source=\(session.source, privacy: .public) action=\(session.action, privacy: .public) stage=\(stage, privacy: .public) total_ms=\(total, privacy: .public) phase_ms=\(phase, privacy: .public) detail=\(detail, privacy: .public)"
+        )
+    }
+
+    private nonisolated static func formattedMilliseconds(_ value: Double) -> String {
+        String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+}
+
+/// Cancellation belongs to one capture request, including the preparation
+/// work that happens before an overlay session exists. A fresh token is used
+/// for every request so a delayed cancellation can never close the next one.
+@MainActor
+final class ScreenshotCaptureRequestToken {
+    let id: UUID
+    private(set) var isCancelled = false
+
+    init(id: UUID = UUID()) {
+        self.id = id
+    }
+
+    func cancel() {
+        isCancelled = true
+    }
+
+    func checkCancellation() throws {
+        try Task.checkCancellation()
+        if isCancelled {
+            throw CancellationError()
+        }
+    }
+}
 
 enum ScreenshotCapturePresentationDelay {
     /// A Carbon hotkey is delivered only after the key event has completed;
@@ -21,6 +155,13 @@ final class ScreenshotCaptureCoordinator {
     private enum Presentation {
         case selectionOnly
         case inlineEditor(onAction: ((ScreenshotEditorAction) -> Void)?)
+
+        var diagnosticActionName: String {
+            switch self {
+            case .selectionOnly: return "selection"
+            case .inlineEditor: return "region"
+            }
+        }
     }
 
     private struct ActiveSession {
@@ -36,10 +177,11 @@ final class ScreenshotCaptureCoordinator {
     private static let sessionTimeoutNanoseconds: UInt64 = 60_000_000_000
 
     private var activeSession: ActiveSession?
+    private var activeRequestToken: ScreenshotCaptureRequestToken?
     private let inlineEditorController = ScreenshotEditorController()
 
     var isCapturing: Bool {
-        activeSession != nil
+        activeRequestToken != nil || activeSession != nil
     }
 
     func captureRegion(
@@ -49,7 +191,8 @@ final class ScreenshotCaptureCoordinator {
         initialSelectionRect: CGRect? = nil,
         initialSelectionHint: String? = nil,
         automaticHoverWindowRect: CGRect? = nil,
-        automaticHoverSelectionRects: [CGRect] = []
+        automaticHoverSelectionRects: [CGRect] = [],
+        requestToken: ScreenshotCaptureRequestToken? = nil
     ) async throws -> ScreenshotCaptureResult? {
         try await captureRegion(
             requestPermissionIfNeeded: requestPermissionIfNeeded,
@@ -58,6 +201,7 @@ final class ScreenshotCaptureCoordinator {
             initialSelectionHint: initialSelectionHint,
             automaticHoverWindowRect: automaticHoverWindowRect,
             automaticHoverSelectionRects: automaticHoverSelectionRects,
+            requestToken: requestToken,
             presentation: .selectionOnly
         )
     }
@@ -69,6 +213,7 @@ final class ScreenshotCaptureCoordinator {
         requestPermissionIfNeeded: Bool = true,
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds,
+        requestToken: ScreenshotCaptureRequestToken? = nil,
         onAction: ((ScreenshotEditorAction) -> Void)? = nil
     ) async throws -> ScreenshotCaptureResult? {
         try await captureRegion(
@@ -78,6 +223,7 @@ final class ScreenshotCaptureCoordinator {
             initialSelectionHint: nil,
             automaticHoverWindowRect: nil,
             automaticHoverSelectionRects: [],
+            requestToken: requestToken,
             presentation: .inlineEditor(onAction: onAction)
         )
     }
@@ -89,61 +235,144 @@ final class ScreenshotCaptureCoordinator {
         initialSelectionHint: String?,
         automaticHoverWindowRect: CGRect?,
         automaticHoverSelectionRects: [CGRect],
+        requestToken suppliedRequestToken: ScreenshotCaptureRequestToken?,
         presentation: Presentation
     ) async throws -> ScreenshotCaptureResult? {
-        guard activeSession == nil else {
+        let diagnosticSession = ScreenshotCaptureDiagnostics.currentSession
+            ?? ScreenshotCaptureDiagnostics.makeUISession(
+                action: presentation.diagnosticActionName
+            )
+        ScreenshotCaptureDiagnostics.record(
+            "capture_requested",
+            session: diagnosticSession
+        )
+
+        guard activeSession == nil, activeRequestToken == nil else {
+            ScreenshotCaptureDiagnostics.record(
+                "capture_rejected_already_running",
+                session: diagnosticSession
+            )
             throw ScreenshotCaptureError.alreadyRunning
         }
 
-        guard CGPreflightScreenCaptureAccess() else {
-            if requestPermissionIfNeeded {
-                if CGRequestScreenCaptureAccess() {
-                    // TCC permission changes are not reliable for a process that
-                    // is already running. Never continue into desktop capture
-                    // with stale authorization state.
-                    throw ScreenshotCaptureError.screenRecordingPermissionRequiresRestart
-                }
+        let requestToken = suppliedRequestToken ?? ScreenshotCaptureRequestToken()
+        activeRequestToken = requestToken
+        defer {
+            if activeRequestToken === requestToken {
+                activeRequestToken = nil
             }
-            throw ScreenshotCaptureError.screenRecordingPermissionDenied
         }
 
-        if presentationDelayNanoseconds > 0 {
-            try await Task.sleep(nanoseconds: presentationDelayNanoseconds)
-        }
+        do {
+            try requestToken.checkCancellation()
 
-        let desktop = try await ScreenshotFrozenDesktop.capture()
-        let sessionID = UUID()
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                beginSession(
-                    id: sessionID,
-                    desktop: desktop,
-                    initialSelectionRect: initialSelectionRect,
-                    initialSelectionHint: initialSelectionHint,
-                    automaticHoverWindowRect: automaticHoverWindowRect,
-                    automaticHoverSelectionRects: automaticHoverSelectionRects,
-                    presentation: presentation,
-                    continuation: continuation
+            let permissionStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
+            let hasPermission = CGPreflightScreenCaptureAccess()
+            ScreenshotCaptureDiagnostics.record(
+                hasPermission ? "permission_granted" : "permission_missing",
+                session: diagnosticSession,
+                phaseStartedAtNanoseconds: permissionStartedAt
+            )
+            try requestToken.checkCancellation()
+            guard hasPermission else {
+                if requestPermissionIfNeeded {
+                    let permissionWasGranted = CGRequestScreenCaptureAccess()
+                    try requestToken.checkCancellation()
+                    if permissionWasGranted {
+                        // TCC permission changes are not reliable for a process that
+                        // is already running. Never continue into desktop capture
+                        // with stale authorization state.
+                        throw ScreenshotCaptureError.screenRecordingPermissionRequiresRestart
+                    }
+                }
+                throw ScreenshotCaptureError.screenRecordingPermissionDenied
+            }
+
+            if presentationDelayNanoseconds > 0 {
+                let delayStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
+                try await Task.sleep(nanoseconds: presentationDelayNanoseconds)
+                try requestToken.checkCancellation()
+                ScreenshotCaptureDiagnostics.record(
+                    "presentation_delay_finished",
+                    session: diagnosticSession,
+                    phaseStartedAtNanoseconds: delayStartedAt
                 )
-                // The cancellation handler may run before `beginSession` has
-                // installed `activeSession`. Re-check after installation so a
-                // pre-cancelled task cannot leave the overlay alive until the
-                // watchdog fires.
-                if Task.isCancelled {
-                    complete(sessionID: sessionID, with: .success(nil))
+            }
+
+            let freezeStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
+            ScreenshotCaptureDiagnostics.record(
+                "desktop_freeze_started",
+                session: diagnosticSession
+            )
+            let desktop: ScreenshotFrozenDesktop
+            do {
+                desktop = try await ScreenshotFrozenDesktop.capture()
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                ScreenshotCaptureDiagnostics.record(
+                    "desktop_freeze_failed",
+                    session: diagnosticSession,
+                    phaseStartedAtNanoseconds: freezeStartedAt,
+                    detail: String(describing: type(of: error))
+                )
+                throw error
+            }
+            try requestToken.checkCancellation()
+            ScreenshotCaptureDiagnostics.record(
+                "desktop_freeze_finished",
+                session: diagnosticSession,
+                phaseStartedAtNanoseconds: freezeStartedAt,
+                detail: "displays=\(desktop.displays.count)"
+            )
+            let sessionID = requestToken.id
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    do {
+                        try requestToken.checkCancellation()
+                    } catch {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    beginSession(
+                        id: sessionID,
+                        desktop: desktop,
+                        initialSelectionRect: initialSelectionRect,
+                        initialSelectionHint: initialSelectionHint,
+                        automaticHoverWindowRect: automaticHoverWindowRect,
+                        automaticHoverSelectionRects: automaticHoverSelectionRects,
+                        presentation: presentation,
+                        diagnosticSession: diagnosticSession,
+                        continuation: continuation
+                    )
+                    // The cancellation handler may run before `beginSession` has
+                    // installed `activeSession`. Re-check after installation so a
+                    // pre-cancelled task cannot leave the overlay alive until the
+                    // watchdog fires.
+                    if Task.isCancelled || requestToken.isCancelled {
+                        complete(sessionID: sessionID, with: .success(nil))
+                    }
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    requestToken.cancel()
+                    self?.complete(
+                        sessionID: sessionID,
+                        with: .success(nil)
+                    )
                 }
             }
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.complete(
-                    sessionID: sessionID,
-                    with: .success(nil)
-                )
-            }
+        } catch is CancellationError {
+            ScreenshotCaptureDiagnostics.record(
+                "capture_cancelled_before_overlay",
+                session: diagnosticSession
+            )
+            return nil
         }
     }
 
     func cancelCapture() {
+        activeRequestToken?.cancel()
         guard let sessionID = activeSession?.id else { return }
         complete(sessionID: sessionID, with: .success(nil))
     }
@@ -156,8 +385,10 @@ final class ScreenshotCaptureCoordinator {
         automaticHoverWindowRect: CGRect?,
         automaticHoverSelectionRects: [CGRect],
         presentation: Presentation,
+        diagnosticSession: ScreenshotCaptureDiagnosticSession,
         continuation: CheckedContinuation<ScreenshotCaptureResult?, Error>
     ) {
+        let overlayPreparationStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
         let model = ScreenshotSelectionModel(
             desktop: desktop.selectionGeometry(),
             initialSelectionRect: initialSelectionRect,
@@ -173,7 +404,11 @@ final class ScreenshotCaptureCoordinator {
                 backing: .buffered,
                 defer: false
             )
-            let view = ScreenshotSelectionOverlayView(display: display, model: model)
+            let view = ScreenshotSelectionOverlayView(
+                display: display,
+                model: model,
+                diagnosticSession: diagnosticSession
+            )
             views.append(view)
 
             panel.contentView = view
@@ -234,6 +469,13 @@ final class ScreenshotCaptureCoordinator {
             inlineEditorStarted: false
         )
 
+        ScreenshotCaptureDiagnostics.record(
+            "overlay_prepared",
+            session: diagnosticSession,
+            phaseStartedAtNanoseconds: overlayPreparationStartedAt,
+            detail: "panels=\(panels.count)"
+        )
+        let orderFrontStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
         NSRunningApplication.current.activate(options: [.activateIgnoringOtherApps])
         panels.forEach { $0.orderFrontRegardless() }
         if let firstPanel = panels.first,
@@ -241,6 +483,12 @@ final class ScreenshotCaptureCoordinator {
             firstPanel.makeKeyAndOrderFront(nil)
             firstPanel.makeFirstResponder(firstView)
         }
+        ScreenshotCaptureDiagnostics.record(
+            "overlay_ordered_front",
+            session: diagnosticSession,
+            phaseStartedAtNanoseconds: orderFrontStartedAt,
+            detail: "panels=\(panels.count)"
+        )
 
         guard !panels.isEmpty,
               panels.allSatisfy({ $0.contentView != nil && $0.isVisible }) else {

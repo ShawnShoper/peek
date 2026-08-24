@@ -282,6 +282,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
     private let initialIndexProgress: FileSearchInitialIndexProgressTracker
     private let defaultsStore: FileSearchIndexDefaultsStore?
     private let rootScanHistoryDefaultsKey: String
+    private let activityCheckpointPolicy: FileSearchActivityCheckpointPolicy
     private var successfulRootScanDates: [String: TimeInterval]
 
     init(
@@ -292,6 +293,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         defaultsStore: FileSearchIndexDefaultsStore? = nil,
         rootScanHistoryDefaultsKey: String = "fileSearch.rootLastSuccessfulScan.v1",
         initialIndexProgress: FileSearchInitialIndexProgressTracker = .shared,
+        activityCheckpointPolicy: FileSearchActivityCheckpointPolicy = .standard,
         systemShouldDefer: @escaping @Sendable () -> Bool = { false }
     ) {
         self.sink = sink
@@ -302,6 +304,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         self.initialIndexProgress = initialIndexProgress
         self.defaultsStore = defaultsStore
         self.rootScanHistoryDefaultsKey = rootScanHistoryDefaultsKey
+        self.activityCheckpointPolicy = activityCheckpointPolicy
         successfulRootScanDates = defaultsStore?.rootScanDates(
             forKey: rootScanHistoryDefaultsKey
         ) ?? [:]
@@ -673,6 +676,10 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                 break
             }
             visitedSinceThrottle += 1
+            try await checkActivityAfterVisitIfNeeded(
+                visitedSinceThrottle,
+                policy: policy
+            )
 
             let path = url.standardizedFileURL.path
             if excludedSubtrees.contains(where: {
@@ -808,6 +815,21 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             )
         }
         visitedCount = 0
+    }
+
+    /// The commit batch can be large during the first index, but explicit PEEK
+    /// work must preempt traversal much sooner. This checkpoint only observes
+    /// the activity gate; it does not flush SQLite or change index throughput.
+    private func checkActivityAfterVisitIfNeeded(
+        _ visitedCount: Int,
+        policy: FileSearchIndexExecutionPolicy
+    ) async throws {
+        guard activityCheckpointPolicy.shouldCheck(
+            afterVisitedEntries: visitedCount
+        ) else { return }
+        guard try await waitForActivityGate(policy: policy) else {
+            throw FileSearchBackgroundIndexControl.deferred
+        }
     }
 
     private func flush(

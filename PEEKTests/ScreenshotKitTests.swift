@@ -2,7 +2,9 @@ import AppKit
 import Carbon.HIToolbox
 import CoreImage
 import Foundation
+import SwiftUI
 import XCTest
+@preconcurrency import Translation
 @testable import PEEK
 
 final class ScreenshotKitTests: XCTestCase {
@@ -45,16 +47,297 @@ final class ScreenshotKitTests: XCTestCase {
     }
 
     @MainActor
-    func testSettingsWindowPresenterRecognizesOnlySwiftUISettingsWindow() {
-        let settingsWindow = NSWindow()
-        settingsWindow.identifier = NSUserInterfaceItemIdentifier(
-            "com_apple_SwiftUI_Settings_window"
+    func testScreenshotCaptureRequestCancellationIsScopedToOneRequest() {
+        let cancelledRequest = ScreenshotCaptureRequestToken()
+        let nextRequest = ScreenshotCaptureRequestToken()
+
+        cancelledRequest.cancel()
+
+        XCTAssertTrue(cancelledRequest.isCancelled)
+        XCTAssertThrowsError(try cancelledRequest.checkCancellation()) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertFalse(nextRequest.isCancelled)
+        XCTAssertNoThrow(try nextRequest.checkCancellation())
+        XCTAssertNotEqual(cancelledRequest.id, nextRequest.id)
+    }
+
+    @MainActor
+    func testScreenshotCoordinatorRejectsPreCancelledRequestBeforeOverlayPreparation() async throws {
+        let coordinator = ScreenshotCaptureCoordinator()
+        let request = ScreenshotCaptureRequestToken()
+        request.cancel()
+
+        let capture = try await coordinator.captureRegion(
+            requestPermissionIfNeeded: false,
+            presentationDelayNanoseconds: 0,
+            requestToken: request
         )
+
+        XCTAssertNil(capture)
+        XCTAssertFalse(coordinator.isCapturing)
+    }
+
+    @MainActor
+    func testScreenshotServiceCancellationWhileAwaitingIndexGateEndsRequest() async {
+        let indexActivity = SuspendedCaptureIndexActivityController()
+        let service = ScreenshotService(indexActivityController: indexActivity)
+        let captureTask = Task { @MainActor in
+            await service.captureRegion(presentationDelayNanoseconds: 0)
+        }
+
+        while !indexActivity.isBeginCaptureSuspended {
+            await Task.yield()
+        }
+        XCTAssertTrue(service.isCapturing)
+
+        service.cancelActiveCapture()
+        indexActivity.resumeBeginCaptureActivity()
+        await captureTask.value
+
+        XCTAssertFalse(service.isCapturing)
+        XCTAssertEqual(indexActivity.beginCaptureCount, 1)
+        XCTAssertEqual(indexActivity.endCaptureCount, 1)
+    }
+
+    func testScreenshotDiagnosticSessionUsesMonotonicElapsedTime() {
+        let session = ScreenshotCaptureDiagnosticSession(
+            source: "test",
+            action: "region",
+            startedAtNanoseconds: 1_000_000_000
+        )
+
+        XCTAssertEqual(
+            session.elapsedMilliseconds(at: 1_025_500_000),
+            25.5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(session.elapsedMilliseconds(at: 999_000_000), 0)
+        XCTAssertEqual(
+            ScreenshotCaptureDiagnostics.milliseconds(
+                from: 2_000_000,
+                to: 3_250_000
+            ),
+            1.25,
+            accuracy: 0.001
+        )
+    }
+
+    func testScreenshotDiagnosticSessionRecordsOnlyOneFirstFrame() {
+        let session = ScreenshotCaptureDiagnosticSession(
+            source: "test",
+            action: "region"
+        )
+
+        XCTAssertTrue(session.claimFirstFrame())
+        XCTAssertFalse(session.claimFirstFrame())
+    }
+
+    func testScreenshotDiagnosticCarbonEventAgeClampsInvalidClocks() {
+        XCTAssertEqual(
+            ScreenshotCaptureDiagnostics.carbonEventAgeMilliseconds(
+                eventTime: 100,
+                systemUptime: 100.125
+            ),
+            125,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            ScreenshotCaptureDiagnostics.carbonEventAgeMilliseconds(
+                eventTime: 101,
+                systemUptime: 100
+            ),
+            0
+        )
+    }
+
+    @MainActor
+    func testSettingsWindowPresenterRecognizesOnlyOwnedSettingsWindow() {
+        let settingsWindow = NSWindow()
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
         let unrelatedWindow = NSWindow()
         unrelatedWindow.identifier = NSUserInterfaceItemIdentifier("PEEK.search")
 
         XCTAssertTrue(PEEKSettingsWindowPresenter.isSettingsWindow(settingsWindow))
         XCTAssertFalse(PEEKSettingsWindowPresenter.isSettingsWindow(unrelatedWindow))
+    }
+
+    @MainActor
+    func testSettingsWindowControllerUsesOwnedPublicWindowConfiguration() throws {
+        let controller = PEEKSettingsWindowPresenter.makeWindowController(
+            rootView: AnyView(EmptyView())
+        )
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close() }
+
+        XCTAssertEqual(window.identifier, PEEKSettingsWindowPresenter.windowIdentifier)
+        XCTAssertEqual(window.title, AppBrand.displayName)
+        XCTAssertFalse(window.isReleasedWhenClosed)
+        XCTAssertFalse(window.isRestorable)
+        XCTAssertTrue(window.styleMask.contains(.titled))
+        XCTAssertTrue(window.styleMask.contains(.closable))
+        XCTAssertTrue(window.styleMask.contains(.miniaturizable))
+        XCTAssertTrue(window.styleMask.contains(.resizable))
+        XCTAssertEqual(window.minSize, NSSize(width: 980, height: 640))
+    }
+
+    @MainActor
+    func testSettingsWindowPresenterClosesOnlyVisibleSettingsWindow() {
+        let settingsWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
+        let unrelatedWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        unrelatedWindow.isReleasedWhenClosed = false
+        unrelatedWindow.identifier = NSUserInterfaceItemIdentifier("PEEK.search")
+        settingsWindow.orderFront(nil)
+        unrelatedWindow.orderFront(nil)
+        defer { unrelatedWindow.close() }
+
+        XCTAssertTrue(
+            PEEKSettingsWindowPresenter.closeIfVisible(
+                in: [settingsWindow, unrelatedWindow]
+            )
+        )
+        XCTAssertFalse(settingsWindow.isVisible)
+        XCTAssertTrue(unrelatedWindow.isVisible)
+        XCTAssertFalse(
+            PEEKSettingsWindowPresenter.closeIfVisible(
+                in: [settingsWindow, unrelatedWindow]
+            )
+        )
+    }
+
+    @MainActor
+    func testClosingSettingsInvalidatesPendingFocusRetry() {
+        let settingsWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
+        settingsWindow.orderFront(nil)
+
+        let pendingGeneration = PEEKSettingsWindowPresenter.beginPresentationAttempt()
+        XCTAssertTrue(
+            PEEKSettingsWindowPresenter.isCurrentPresentationAttempt(pendingGeneration)
+        )
+
+        XCTAssertTrue(
+            PEEKSettingsWindowPresenter.closeIfVisible(in: [settingsWindow])
+        )
+        XCTAssertFalse(
+            PEEKSettingsWindowPresenter.isCurrentPresentationAttempt(pendingGeneration)
+        )
+        XCTAssertFalse(settingsWindow.isVisible)
+    }
+
+    @MainActor
+    func testCurrentPresentationAttemptReopensHiddenSettingsWindow() {
+        let settingsWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
+        settingsWindow.orderOut(nil)
+        defer { settingsWindow.close() }
+
+        let currentGeneration = PEEKSettingsWindowPresenter.beginPresentationAttempt()
+        XCTAssertTrue(
+            PEEKSettingsWindowPresenter.focusSettingsWindowIfCurrent(
+                currentGeneration,
+                in: [settingsWindow],
+                activateApplication: false
+            )
+        )
+        XCTAssertTrue(settingsWindow.isVisible)
+    }
+
+    @MainActor
+    func testStalePresentationAttemptCannotReopenHiddenSettingsWindow() {
+        let settingsWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
+        let unrelatedWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        unrelatedWindow.isReleasedWhenClosed = false
+        unrelatedWindow.identifier = NSUserInterfaceItemIdentifier("PEEK.search")
+        defer {
+            settingsWindow.close()
+            unrelatedWindow.close()
+        }
+
+        let staleGeneration = PEEKSettingsWindowPresenter.beginPresentationAttempt()
+        _ = PEEKSettingsWindowPresenter.beginPresentationAttempt()
+        XCTAssertFalse(
+            PEEKSettingsWindowPresenter.focusSettingsWindowIfCurrent(
+                staleGeneration,
+                in: [settingsWindow, unrelatedWindow],
+                activateApplication: false
+            )
+        )
+        XCTAssertFalse(settingsWindow.isVisible)
+        XCTAssertFalse(unrelatedWindow.isVisible)
+
+        let currentGeneration = PEEKSettingsWindowPresenter.beginPresentationAttempt()
+        XCTAssertFalse(
+            PEEKSettingsWindowPresenter.focusSettingsWindowIfCurrent(
+                currentGeneration,
+                in: [unrelatedWindow],
+                activateApplication: false
+            )
+        )
+        XCTAssertFalse(unrelatedWindow.isVisible)
+    }
+
+    func testSettingsQuitShortcutMatchesOnlyPlainCommandQ() {
+        XCTAssertTrue(
+            PEEKSettingsQuitShortcutPolicy.matches(
+                charactersIgnoringModifiers: "q",
+                modifierFlags: [.command]
+            )
+        )
+        XCTAssertTrue(
+            PEEKSettingsQuitShortcutPolicy.matches(
+                charactersIgnoringModifiers: "Q",
+                modifierFlags: [.command, .capsLock]
+            )
+        )
+        XCTAssertFalse(
+            PEEKSettingsQuitShortcutPolicy.matches(
+                charactersIgnoringModifiers: "q",
+                modifierFlags: [.command, .option]
+            )
+        )
+        XCTAssertFalse(
+            PEEKSettingsQuitShortcutPolicy.matches(
+                charactersIgnoringModifiers: "w",
+                modifierFlags: [.command]
+            )
+        )
     }
 
     func testPEEKBrandUsesExpectedDisplayNameAndTemplateMenuIcon() throws {
@@ -281,6 +564,367 @@ final class ScreenshotKitTests: XCTestCase {
         )
     }
 
+    func testScreenCapturePointPixelScalePrefersDisplayModeBackingPixels() {
+        // On the built-in Retina display CGDisplayPixelsWide/High can report
+        // the same 2560x1440 logical framebuffer as CGDisplayBounds. The
+        // current display mode still exposes the real 5120x2880 backing size.
+        XCTAssertEqual(
+            screenCapturePointPixelScale(
+                logicalSize: CGSize(width: 2_560, height: 1_440),
+                modePixelSize: CGSize(width: 5_120, height: 2_880),
+                fallbackPixelSize: CGSize(width: 2_560, height: 1_440)
+            ),
+            2
+        )
+
+        // A neighboring non-Retina display continues to resolve to 1x.
+        XCTAssertEqual(
+            screenCapturePointPixelScale(
+                logicalSize: CGSize(width: 3_440, height: 1_440),
+                modePixelSize: CGSize(width: 3_440, height: 1_440),
+                fallbackPixelSize: CGSize(width: 3_440, height: 1_440)
+            ),
+            1
+        )
+
+        // Quartz bounds are orientation-aware, while a 90/270-degree display
+        // mode can retain its native pixel orientation.
+        XCTAssertEqual(
+            screenCapturePointPixelScale(
+                logicalSize: CGSize(width: 1_440, height: 2_560),
+                modePixelSize: CGSize(width: 5_120, height: 2_880),
+                fallbackPixelSize: CGSize(width: 1_440, height: 2_560)
+            ),
+            2
+        )
+
+        // Keep the legacy source as a bounded fallback if the display mode is
+        // temporarily unavailable or does not yield a uniform scale.
+        XCTAssertEqual(
+            screenCapturePointPixelScale(
+                logicalSize: CGSize(width: 1_920, height: 1_080),
+                modePixelSize: CGSize(width: 3_840, height: 1_000),
+                fallbackPixelSize: CGSize(width: 1_920, height: 1_080)
+            ),
+            1
+        )
+        XCTAssertNil(
+            screenCapturePointPixelScale(
+                logicalSize: .zero,
+                modePixelSize: CGSize(width: 5_120, height: 2_880),
+                fallbackPixelSize: nil
+            )
+        )
+    }
+
+    func testScreenCaptureDisplayGeometryAcceptsMixedRetinaMultiDisplayCoordinates() {
+        let retina = ScreenCaptureDisplayGeometry(
+            displayID: 7,
+            frame: CGRect(x: 0, y: 0, width: 2_560, height: 1_440),
+            logicalSize: CGSize(width: 2_560, height: 1_440),
+            pointPixelScale: 2
+        )
+        let external = ScreenCaptureDisplayGeometry(
+            displayID: 1,
+            frame: CGRect(x: 2_560, y: -180, width: 3_440, height: 1_440),
+            logicalSize: CGSize(width: 3_440, height: 1_440),
+            pointPixelScale: 1
+        )
+
+        XCTAssertTrue(
+            screenCaptureDisplayGeometryMatches(
+                cached: retina,
+                current: retina,
+                expectedLogicalFrame: CGRect(x: 0, y: 900, width: 2_560, height: 1_440)
+            )
+        )
+        XCTAssertTrue(
+            screenCaptureDisplayGeometryMatches(
+                cached: external,
+                current: external,
+                // AppKit's global Y origin is intentionally different from
+                // Quartz/ScreenCaptureKit; only the logical size is comparable.
+                expectedLogicalFrame: CGRect(x: 2_560, y: 180, width: 3_440, height: 1_440)
+            )
+        )
+    }
+
+    func testScreenCaptureDisplayGeometryRejectsSameIDLayoutScaleAndSizeChanges() {
+        let cached = ScreenCaptureDisplayGeometry(
+            displayID: 7,
+            frame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+            logicalSize: CGSize(width: 1_920, height: 1_080),
+            pointPixelScale: 2
+        )
+
+        XCTAssertTrue(
+            screenCaptureDisplayGeometryMatches(
+                cached: cached,
+                current: cached,
+                expectedLogicalFrame: CGRect(x: 0, y: 900, width: 1_920, height: 1_080)
+            )
+        )
+        XCTAssertFalse(
+            screenCaptureDisplayGeometryMatches(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: CGRect(x: 1_920, y: 0, width: 1_920, height: 1_080),
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: 2
+                )
+            )
+        )
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: CGRect(x: 1_920, y: 0, width: 1_920, height: 1_080),
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: 2
+                )
+            ),
+            .frameOrigin
+        )
+        XCTAssertFalse(
+            screenCaptureDisplayGeometryMatches(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: cached.frame,
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: 1
+                )
+            )
+        )
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: cached.frame,
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: 1
+                )
+            ),
+            .pointPixelScale
+        )
+        XCTAssertFalse(
+            screenCaptureDisplayGeometryMatches(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: cached.frame,
+                    logicalSize: CGSize(width: 1_680, height: 1_050),
+                    pointPixelScale: 2
+                )
+            )
+        )
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 7,
+                    frame: cached.frame,
+                    logicalSize: CGSize(width: 1_680, height: 1_050),
+                    pointPixelScale: 2
+                )
+            ),
+            .logicalSize
+        )
+        XCTAssertFalse(
+            screenCaptureDisplayGeometryMatches(
+                cached: cached,
+                current: cached,
+                expectedLogicalFrame: CGRect(x: 0, y: 0, width: 1_680, height: 1_050)
+            )
+        )
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: cached,
+                expectedLogicalFrame: CGRect(x: 0, y: 0, width: 1_680, height: 1_050)
+            ),
+            .expectedLogicalSize
+        )
+    }
+
+    func testScreenCaptureDisplayGeometryMismatchRetainsStrictLayoutChecks() {
+        let cached = ScreenCaptureDisplayGeometry(
+            displayID: 7,
+            frame: CGRect(x: -2_560, y: 120, width: 2_560, height: 1_440),
+            logicalSize: CGSize(width: 2_560, height: 1_440),
+            pointPixelScale: 2
+        )
+
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: 8,
+                    frame: cached.frame,
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: cached.pointPixelScale
+                )
+            ),
+            .displayID
+        )
+        XCTAssertEqual(
+            screenCaptureDisplayGeometryMismatch(
+                cached: cached,
+                current: ScreenCaptureDisplayGeometry(
+                    displayID: cached.displayID,
+                    frame: CGRect(x: -2_560, y: 120, width: 3_008, height: 1_692),
+                    logicalSize: cached.logicalSize,
+                    pointPixelScale: cached.pointPixelScale
+                )
+            ),
+            .frameSize
+        )
+    }
+
+    func testScreenCaptureMetadataCacheSingleFlightsConcurrentLoads() async throws {
+        let counter = ScreenCaptureMetadataLoadCounter()
+        let cache = ScreenCaptureMetadataCache<Int>(maximumAge: 60) {
+            let value = await counter.increment()
+            try await Task.sleep(nanoseconds: 40_000_000)
+            return value
+        }
+
+        async let first = cache.snapshot()
+        async let second = cache.snapshot()
+        async let third = cache.snapshot()
+        let snapshots = try await (first, second, third)
+
+        XCTAssertEqual(snapshots.0.value, 1)
+        XCTAssertEqual(snapshots.1.value, 1)
+        XCTAssertEqual(snapshots.2.value, 1)
+        XCTAssertEqual(snapshots.0.generation, snapshots.1.generation)
+        XCTAssertEqual(snapshots.1.generation, snapshots.2.generation)
+        let loadCount = await counter.value
+        XCTAssertEqual(loadCount, 1)
+    }
+
+    func testScreenCaptureMetadataRefreshIsSingleFlightForStaleGeneration() async throws {
+        let counter = ScreenCaptureMetadataLoadCounter()
+        let cache = ScreenCaptureMetadataCache<Int>(maximumAge: 60) {
+            let value = await counter.increment()
+            try await Task.sleep(nanoseconds: 30_000_000)
+            return value
+        }
+        let stale = try await cache.snapshot()
+
+        async let first = cache.refreshed(after: stale.generation)
+        async let second = cache.refreshed(after: stale.generation)
+        let refreshed = try await (first, second)
+
+        XCTAssertEqual(refreshed.0.value, 2)
+        XCTAssertEqual(refreshed.1.value, 2)
+        XCTAssertNotEqual(refreshed.0.generation, stale.generation)
+        XCTAssertEqual(refreshed.0.generation, refreshed.1.generation)
+        let loadCount = await counter.value
+        XCTAssertEqual(loadCount, 2)
+    }
+
+    func testOlderLifecycleTaskCannotInvalidateNewerPrewarm() async throws {
+        let counter = ScreenCaptureMetadataLoadCounter()
+        let cache = ScreenCaptureMetadataCache<Int>(maximumAge: .infinity) {
+            await counter.increment()
+        }
+
+        let newerTransitionAccepted = await cache.applyLifecycleTransition(
+            generation: 2,
+            invalidateCachedValue: true
+        )
+        XCTAssertTrue(newerTransitionAccepted)
+        let newerPrewarm = try await cache.snapshot()
+
+        let olderTransitionAccepted = await cache.applyLifecycleTransition(
+            generation: 1,
+            invalidateCachedValue: true
+        )
+        XCTAssertFalse(olderTransitionAccepted)
+        let retained = try await cache.snapshot()
+
+        XCTAssertEqual(retained.value, newerPrewarm.value)
+        XCTAssertEqual(retained.generation, newerPrewarm.generation)
+        let loadCount = await counter.value
+        XCTAssertEqual(loadCount, 1)
+    }
+
+    func testWindowCandidateFetchTimesOutWithoutWaitingForBlockedWindowServerWork() async {
+        let singleFlight = ScreenshotWindowCandidateSingleFlight()
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let result = await fetchScreenshotWindowCandidates(
+            singleFlight: singleFlight,
+            timeoutNanoseconds: 20_000_000
+        ) {
+            Thread.sleep(forTimeInterval: 0.4)
+            return [
+                ScreenshotWindowCandidate(
+                    windowID: 91,
+                    ownerPID: 42,
+                    frame: CGRect(x: 10, y: 10, width: 320, height: 240),
+                    ownerName: "Late Window",
+                    title: nil
+                )
+            ]
+        }
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+
+        XCTAssertTrue(result.timedOut)
+        XCTAssertTrue(result.candidates.isEmpty)
+        XCTAssertLessThan(elapsed, 0.2)
+    }
+
+    func testWindowCandidateFetchReturnsFastProviderResult() async {
+        let singleFlight = ScreenshotWindowCandidateSingleFlight()
+        let candidate = ScreenshotWindowCandidate(
+            windowID: 92,
+            ownerPID: 43,
+            frame: CGRect(x: 20, y: 20, width: 640, height: 480),
+            ownerName: "Ready Window",
+            title: "Document"
+        )
+        let result = await fetchScreenshotWindowCandidates(
+            singleFlight: singleFlight,
+            timeoutNanoseconds: 200_000_000
+        ) {
+            [candidate]
+        }
+
+        XCTAssertFalse(result.timedOut)
+        XCTAssertEqual(result.candidates, [candidate])
+    }
+
+    func testWindowCandidateFetchDoesNotAccumulateBlockedProvidersAfterTimeout() async {
+        let singleFlight = ScreenshotWindowCandidateSingleFlight()
+        let counter = SynchronousInvocationCounter()
+
+        async let first = fetchScreenshotWindowCandidates(
+            singleFlight: singleFlight,
+            timeoutNanoseconds: 25_000_000
+        ) {
+            counter.increment()
+            Thread.sleep(forTimeInterval: 0.3)
+            return []
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        async let second = fetchScreenshotWindowCandidates(
+            singleFlight: singleFlight,
+            timeoutNanoseconds: 25_000_000
+        ) {
+            counter.increment()
+            return []
+        }
+
+        let results = await (first, second)
+        XCTAssertTrue(results.0.timedOut)
+        XCTAssertTrue(results.1.timedOut)
+        XCTAssertEqual(counter.value, 1)
+    }
+
     func testScrollFrameCapturerUsesInjectedModernBackend() async throws {
         let expectedRect = CGRect(x: 120, y: 80, width: 64, height: 48)
         let expectedImage = try makeSolidPixelBuffer(
@@ -430,10 +1074,446 @@ final class ScreenshotKitTests: XCTestCase {
             ScreenshotHotKeyConfiguration.defaults.ocr,
             ScreenshotHotKey(keyCode: UInt32(kVK_ANSI_4), modifiers: defaultModifiers)
         )
+        XCTAssertEqual(
+            ScreenshotHotKeyConfiguration.defaults.translation,
+            ScreenshotHotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: defaultModifiers)
+        )
         XCTAssertEqual(ScreenshotGlobalHotKeyAction.region.defaultShortcut.displayString, "⌥⌘2")
         XCTAssertEqual(ScreenshotGlobalHotKeyAction.scrolling.defaultShortcut.displayString, "⌥⌘3")
         XCTAssertEqual(ScreenshotGlobalHotKeyAction.ocr.defaultShortcut.displayString, "⌥⌘4")
+        XCTAssertEqual(
+            ScreenshotGlobalHotKeyAction.translation.defaultShortcut.displayString,
+            "⌥⌘T"
+        )
         XCTAssertTrue(ScreenshotHotKeyConfiguration.defaults.isValid)
+    }
+
+    func testTranslationPanelLayoutCentersAndFitsSmallDisplays() {
+        let large = TranslationPanelLayout.centeredFrame(
+            in: CGRect(x: -1_440, y: 0, width: 1_440, height: 900)
+        )
+        XCTAssertEqual(large.width, TranslationPanelLayout.width)
+        XCTAssertEqual(large.height, TranslationPanelLayout.height)
+        XCTAssertEqual(large.midX, -720, accuracy: 0.5)
+        XCTAssertEqual(large.midY, 450, accuracy: 0.5)
+
+        let compact = TranslationPanelLayout.centeredFrame(
+            in: CGRect(x: 0, y: 0, width: 900, height: 620)
+        )
+        XCTAssertEqual(compact.width, 852)
+        XCTAssertEqual(compact.height, 572)
+        XCTAssertTrue(CGRect(x: 0, y: 0, width: 900, height: 620).contains(compact))
+    }
+
+    func testTranslationPanelDismissesOnlyAfterVisiblePanelLosesKeyStatus() {
+        XCTAssertFalse(
+            TranslationPanelDismissalPolicy.shouldDismissAfterKeyChange(
+                isVisible: true,
+                isKeyWindow: true
+            )
+        )
+        XCTAssertFalse(
+            TranslationPanelDismissalPolicy.shouldDismissAfterKeyChange(
+                isVisible: false,
+                isKeyWindow: false
+            )
+        )
+        XCTAssertTrue(
+            TranslationPanelDismissalPolicy.shouldDismissAfterKeyChange(
+                isVisible: true,
+                isKeyWindow: false
+            )
+        )
+    }
+
+    func testTranslationRequestPolicyTrimsAndRejectsWhitespace() {
+        XCTAssertFalse(TranslationRequestPolicy.shouldTranslate(" \n\t "))
+        XCTAssertTrue(TranslationRequestPolicy.shouldTranslate("Hello"))
+
+        let oversized = String(repeating: "A", count: 5_200)
+        XCTAssertEqual(
+            TranslationRequestPolicy.normalizedText(oversized).count,
+            TranslationRequestPolicy.maximumCharacterCount
+        )
+        XCTAssertEqual(TranslationRequestPolicy.availabilityTimeoutNanoseconds, 5_000_000_000)
+        XCTAssertEqual(TranslationRequestPolicy.sessionActivationTimeoutNanoseconds, 2_500_000_000)
+        XCTAssertEqual(TranslationRequestPolicy.translationTimeoutNanoseconds, 10_000_000_000)
+        XCTAssertTrue(
+            TranslationRequestPolicy.shouldSubmit(
+                text: "Hello",
+                pendingText: nil,
+                isTranslating: false
+            )
+        )
+        XCTAssertFalse(
+            TranslationRequestPolicy.shouldSubmit(
+                text: "Hello",
+                pendingText: "Hello",
+                isTranslating: true
+            )
+        )
+        XCTAssertTrue(
+            TranslationRequestPolicy.shouldSubmit(
+                text: "Hello again",
+                pendingText: "Hello",
+                isTranslating: true
+            )
+        )
+    }
+
+    func testTranslationRequestPolicyRejectsStaleGenerationAndChangedText() {
+        XCTAssertTrue(
+            TranslationRequestPolicy.isCurrent(
+                requestGeneration: 7,
+                requestText: "Hello",
+                currentGeneration: 7,
+                currentText: "Hello"
+            )
+        )
+        XCTAssertFalse(
+            TranslationRequestPolicy.isCurrent(
+                requestGeneration: 7,
+                requestText: "Hello",
+                currentGeneration: 8,
+                currentText: "Hello"
+            )
+        )
+        XCTAssertFalse(
+            TranslationRequestPolicy.isCurrent(
+                requestGeneration: 7,
+                requestText: "Hello",
+                currentGeneration: 7,
+                currentText: "Hello world"
+            )
+        )
+        XCTAssertTrue(TranslationPanelPhase.failed("timeout").isRetryableFailure)
+        XCTAssertFalse(TranslationPanelPhase.translating.isRetryableFailure)
+        XCTAssertFalse(TranslationPanelPhase.stale.isRetryableFailure)
+        XCTAssertFalse(TranslationPanelPhase.unchanged.isRetryableFailure)
+    }
+
+    func testTranslationLanguageDescriptorsDeduplicateAndSort() {
+        let descriptors = TranslationLanguagePresentation.descriptors(
+            for: ["zh-Hans", "en", "en"],
+            locale: Locale(identifier: "en")
+        )
+        XCTAssertEqual(Set(descriptors.map(\.identifier)), Set(["zh-Hans", "en"]))
+        XCTAssertEqual(
+            descriptors.map(\.displayName),
+            descriptors.map(\.displayName).sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
+            }
+        )
+    }
+
+    func testTranslationRoutingKeepsConfiguredTargetLanguage() {
+        XCTAssertEqual(
+            TranslationLanguagePresentation.preferredSystemTargetIdentifier(
+                from: ["zh-Hans-CN", "en-CN"]
+            ),
+            "zh-Hans-CN"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticTargetIdentifier(
+                sourceIdentifier: "zh-Hans",
+                preferredTargetIdentifier: "zh-Hans-CN"
+            ),
+            "zh-Hans-CN"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticTargetIdentifier(
+                sourceIdentifier: "en-US",
+                preferredTargetIdentifier: "en-CN"
+            ),
+            "en-CN"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticTargetIdentifier(
+                sourceIdentifier: "en",
+                preferredTargetIdentifier: "zh-Hans-CN"
+            ),
+            "zh-Hans-CN"
+        )
+    }
+
+    func testTranslationRoutingDetectsShortEnglishAndChineseText() {
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "Hello world"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "tesla"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "Tesla"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "OpenAI"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "iPhone"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "bonjour"),
+            "fr"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "goedemorgen"),
+            "nl"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "你好世界"),
+            "zh-Hans"
+        )
+        XCTAssertNil(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "12345")
+        )
+    }
+
+    func testTranslationRoutingDistinguishesChineseScriptsWithoutSharedCharacterFalsePositives() {
+        // Characters shared by Simplified and Traditional Chinese are ambiguous;
+        // they must retain the stable Simplified Chinese default while typing.
+        for text in ["搜", "搜答", "搜答案", "答案", "文件", "今天", "你好世界"] {
+            XCTAssertEqual(
+                TranslationLanguagePresentation.automaticSourceIdentifier(for: text),
+                "zh-Hans",
+                "Shared-character input unexpectedly changed script for: \(text)"
+            )
+        }
+
+        for text in ["显示", "输入", "语言", "档案", "资料", "繁体中文", "开启网页", "台湾"] {
+            XCTAssertEqual(
+                TranslationLanguagePresentation.automaticSourceIdentifier(for: text),
+                "zh-Hans",
+                "Simplified Chinese input was misclassified: \(text)"
+            )
+        }
+
+        for text in ["顯示", "輸入", "語言", "檔案", "資料", "繁體中文", "開啟網頁", "台灣"] {
+            XCTAssertEqual(
+                TranslationLanguagePresentation.automaticSourceIdentifier(for: text),
+                "zh-Hant",
+                "Traditional Chinese input was misclassified: \(text)"
+            )
+        }
+
+        let progressiveInput = [
+            ("搜", "zh-Hans"),
+            ("搜答", "zh-Hans"),
+            ("搜答案", "zh-Hans"),
+            ("搜答案显", "zh-Hans"),
+            ("搜答案显示", "zh-Hans"),
+            ("搜答案顯", "zh-Hant"),
+            ("搜答案顯示", "zh-Hant")
+        ]
+        for (text, expectedIdentifier) in progressiveInput {
+            XCTAssertEqual(
+                TranslationLanguagePresentation.automaticSourceIdentifier(for: text),
+                expectedIdentifier,
+                "Progressive input produced an unstable script for: \(text)"
+            )
+        }
+    }
+
+    func testTranslationResponseCannotOverrideSubmittedLanguageSnapshot() {
+        XCTAssertEqual(
+            TranslationResponseLanguagePolicy.sourceIdentifier(
+                submittedIdentifier: "en",
+                responseIdentifier: "nl"
+            ),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationResponseLanguagePolicy.sourceIdentifier(
+                submittedIdentifier: nil,
+                responseIdentifier: "nl"
+            ),
+            "nl"
+        )
+        XCTAssertEqual(
+            TranslationResponseLanguagePolicy.targetIdentifier(
+                submittedIdentifier: "zh-Hans",
+                responseIdentifier: "zh-Hant"
+            ),
+            "zh-Hans"
+        )
+    }
+
+    func testTranslationLanguageEquivalencePreservesOnlyMatchingLanguageAndScript() {
+        XCTAssertTrue(
+            TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: "en-US",
+                targetIdentifier: "en-CN"
+            )
+        )
+        XCTAssertTrue(
+            TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: "zh-Hans",
+                targetIdentifier: "zh-Hans-CN"
+            )
+        )
+        XCTAssertFalse(
+            TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: "zh-Hant",
+                targetIdentifier: "zh-Hans-CN"
+            )
+        )
+        XCTAssertFalse(
+            TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: "en",
+                targetIdentifier: "zh-Hans"
+            )
+        )
+        XCTAssertFalse(
+            TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: nil,
+                targetIdentifier: "zh-Hans"
+            )
+        )
+    }
+
+    func testTranslationRoutingUsesDominantScriptForMixedLanguageText() {
+        XCTAssertTrue(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "你好啊 GPT")?
+                .hasPrefix("zh") == true
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "Привет GPT"),
+            "ru"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "Hello мир"),
+            "en"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "今日は OpenAI"),
+            "ja"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "안녕하세요 GPT"),
+            "ko"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "مرحبا GPT"),
+            "ar"
+        )
+        XCTAssertEqual(
+            TranslationLanguagePresentation.automaticSourceIdentifier(for: "GPT"),
+            "en"
+        )
+    }
+
+    func testTranslationCloudConfigurationRequiresOnlyProviderSpecificFields() {
+        XCTAssertFalse(
+            TranslationCloudConfigurationPolicy.isComplete(
+                provider: .baidu,
+                appID: "",
+                hasSecret: true
+            )
+        )
+        XCTAssertTrue(
+            TranslationCloudConfigurationPolicy.isComplete(
+                provider: .baidu,
+                appID: "app-id",
+                hasSecret: true
+            )
+        )
+        XCTAssertTrue(
+            TranslationCloudConfigurationPolicy.isComplete(
+                provider: .google,
+                appID: nil,
+                hasSecret: true
+            )
+        )
+        XCTAssertFalse(
+            TranslationCloudConfigurationPolicy.isComplete(
+                provider: .google,
+                appID: nil,
+                hasSecret: false
+            )
+        )
+    }
+
+    func testTranslationCloudLanguageMappingUsesOfficialProviderCodes() {
+        XCTAssertEqual(
+            TranslationCloudLanguageMapper.code(
+                for: "zh-Hans",
+                provider: .baidu,
+                isSource: false
+            ),
+            "zh"
+        )
+        XCTAssertEqual(
+            TranslationCloudLanguageMapper.code(
+                for: "ja",
+                provider: .baidu,
+                isSource: false
+            ),
+            "jp"
+        )
+        XCTAssertEqual(
+            TranslationCloudLanguageMapper.code(
+                for: "zh-Hant-TW",
+                provider: .google,
+                isSource: false
+            ),
+            "zh-TW"
+        )
+        XCTAssertNil(
+            TranslationCloudLanguageMapper.code(
+                for: nil,
+                provider: .google,
+                isSource: true
+            )
+        )
+    }
+
+    func testBaiduSignatureUsesExpectedMD5Digest() {
+        XCTAssertEqual(
+            TranslationCloudClient.md5("2015063000000001apple143566028812345678"),
+            "f89f9594663708c1605f3d736d01d2d4"
+        )
+    }
+
+    @available(macOS 15.0, *)
+    func testTranslationAvailabilityPolicyDoesNotCreateSessionBeforeLanguagePackIsInstalled() {
+        XCTAssertEqual(
+            TranslationAvailabilityPolicy.outcome(for: .installed),
+            .ready
+        )
+        XCTAssertEqual(
+            TranslationAvailabilityPolicy.outcome(for: .supported),
+            .requiresDownload
+        )
+        XCTAssertEqual(
+            TranslationAvailabilityPolicy.outcome(for: .unsupported),
+            .unsupported
+        )
+    }
+
+    @available(macOS 15.0, *)
+    func testTranslationConfigurationInvalidationChangesSameLanguagePairVersion() {
+        let source = Locale.Language(identifier: "en")
+        let target = Locale.Language(identifier: "zh-Hans")
+        var configuration = TranslationSession.Configuration(source: source, target: target)
+        let originalVersion = configuration.version
+
+        configuration.invalidate()
+
+        XCTAssertEqual(configuration.source, source)
+        XCTAssertEqual(configuration.target, target)
+        XCTAssertNotEqual(configuration.version, originalVersion)
+    }
+
+    func testTranslationLanguageSettingsLinkTargetsTranslationPreferences() {
+        XCTAssertEqual(
+            TranslationLanguageSettings.url.absoluteString,
+            "x-apple.systempreferences:com.apple.Localization-Settings.extension?translation"
+        )
     }
 
     func testHotkeyAcceptsSupportedKeysWithRequiredModifiers() {
@@ -3615,6 +4695,67 @@ final class ScreenshotKitTests: XCTestCase {
             }
         }
         return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+    }
+}
+
+@MainActor
+private final class SuspendedCaptureIndexActivityController:
+    FileSearchIndexActivityControlling {
+    private(set) var beginCaptureCount = 0
+    private(set) var endCaptureCount = 0
+    private var beginCaptureContinuation: CheckedContinuation<Void, Never>?
+
+    var isBeginCaptureSuspended: Bool {
+        beginCaptureContinuation != nil
+    }
+
+    func setSearchPanelActive(_ isActive: Bool) {}
+
+    func beginCaptureActivity() async {
+        beginCaptureCount += 1
+        await withCheckedContinuation { continuation in
+            beginCaptureContinuation = continuation
+        }
+    }
+
+    func resumeBeginCaptureActivity() {
+        let continuation = beginCaptureContinuation
+        beginCaptureContinuation = nil
+        continuation?.resume()
+    }
+
+    func endCaptureActivity() {
+        endCaptureCount += 1
+    }
+
+    func setOCRActive(_ isActive: Bool) {}
+
+    func setFileOperationActive(_ isActive: Bool) {}
+}
+
+private actor ScreenCaptureMetadataLoadCounter {
+    private(set) var value = 0
+
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+}
+
+private final class SynchronousInvocationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func increment() {
+        lock.lock()
+        storedValue += 1
+        lock.unlock()
     }
 }
 

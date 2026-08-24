@@ -1,6 +1,354 @@
 {
   "sourceLanguage" : "zh-Hans",
   "strings" : {
+    "%@ 配置已保存" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ configuration saved" } } }
+    },
+    "PEEK 帮助你查找、截取并理解 Mac 上的内容。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK helps you find, capture, and understand what is on your Mac." } } }
+    },
+    "API Key" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "API Key" } } }
+    },
+    "保存在 macOS 钥匙串；调用时会发送给 Google 验证" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stored in macOS Keychain and sent to Google for request authentication" } } }
+    },
+    "APP ID" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "APP ID" } } }
+    },
+    "Apple 本地翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Apple On-Device Translation" } } }
+    },
+    "Apple 本地翻译由 macOS 在本机处理；如果同时启用云翻译，同一次提交的正文仍会发送给所有已启用且配置完整的云服务商。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Apple on-device translation is processed by macOS on this Mac. If cloud translation is also enabled, the same submitted text is sent to every enabled and fully configured cloud provider." } } }
+    },
+    "Google 翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Google Translate" } } }
+    },
+    "Google 翻译（可选）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Google Translate (Optional)" } } }
+    },
+    "云端" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cloud" } } }
+    },
+    "云端翻译失败" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cloud translation failed" } } }
+    },
+    "云端翻译完成" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cloud translation complete" } } }
+    },
+    "仅在你点击“翻译”或按 Command + Enter 后，云服务商才会收到正文、语言信息和所需认证数据。请求不经过 PEEK 自有服务器；PEEK 不建立云端翻译历史，也不在应用日志中记录正文或凭据。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Only after you click Translate or press Command + Enter do cloud providers receive the text, language information, and required authentication data. Requests do not pass through a PEEK-operated server. PEEK does not create a cloud translation history or write text or credentials to its application logs." } } }
+    },
+    "云翻译凭据保存在 macOS 钥匙串；服务商可能依据其条款处理数据，使用前请查看对应隐私政策。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cloud translation credentials are stored in macOS Keychain. Providers may process data under their own terms, so review the applicable privacy policy before use." } } }
+    },
+    "了解 PEEK 如何处理数据、权限和第三方服务" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Learn how PEEK handles data, permissions, and third-party services" } } }
+    },
+    "报告问题或获取使用帮助" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Report a problem or get help" } } }
+    },
+    "支持与反馈" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Support & Feedback" } } }
+    },
+    "隐私与支持" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Privacy & Support" } } }
+    },
+    "隐私政策" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Privacy Policy" } } }
+    },
+    "使用 Google Cloud Translation Basic 官方接口" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Uses the official Google Cloud Translation Basic API" } } }
+    },
+    "使用百度翻译开放平台官方接口" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Uses the official Baidu Translate Open Platform API" } } }
+    },
+    "保存的密钥格式无效" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The saved credential is invalid" } } }
+    },
+    "保存配置" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Save Configuration" } } }
+    },
+    "启用 Google 翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enable Google Translate" } } }
+    },
+    "启用百度翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enable Baidu Translate" } } }
+    },
+    "密钥" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Secret Key" } } }
+    },
+    "密钥只保存在 macOS 钥匙串" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The secret key is stored only in macOS Keychain" } } }
+    },
+    "已安全保存在 macOS 钥匙串；留空不会覆盖" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Securely stored in macOS Keychain; leave blank to keep it" } } }
+    },
+    "已保存在 macOS 钥匙串；调用时会发送给 Google 验证，留空不会覆盖" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stored in macOS Keychain and sent to Google for request authentication; leave blank to keep it" } } }
+    },
+    "启用并配置后，点击“翻译”或按 Command + Enter 时，正文、语言、APP ID、salt 与签名会发送给百度" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "When enabled and configured, clicking Translate or pressing Command + Enter sends the text, language codes, APP ID, salt, and signature to Baidu" } } }
+    },
+    "启用并配置后，点击“翻译”或按 Command + Enter 时，正文、语言和 API Key 会发送给 Google" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "When enabled and configured, clicking Translate or pressing Command + Enter sends the text, language codes, and API key to Google" } } }
+    },
+    "密钥保存在 macOS 钥匙串，仅在本机生成请求签名；不会以明文发送给百度" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The secret key is stored in macOS Keychain and used locally to generate request signatures; it is not sent to Baidu in plaintext" } } }
+    },
+    "已保存在 macOS 钥匙串；仅用于本机生成签名，留空不会覆盖" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stored in macOS Keychain and used only for local request signing; leave blank to keep it" } } }
+    },
+    "已移除 %@ 密钥" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ credential removed" } } }
+    },
+    "无法访问钥匙串（错误 %d）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Unable to access Keychain (error %d)" } } }
+    },
+    "本机" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On Device" } } }
+    },
+    "正在通过云端翻译…" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translating in the cloud…" } } }
+    },
+    "百度翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Baidu Translate" } } }
+    },
+    "百度翻译（可选）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Baidu Translate (Optional)" } } }
+    },
+    "移除密钥" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove Credential" } } }
+    },
+    "翻译服务请求失败（HTTP %d）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation service request failed (HTTP %d)" } } }
+    },
+    "翻译服务返回了无效结果" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The translation service returned an invalid result" } } }
+    },
+    "翻译服务配置不完整" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation service configuration is incomplete" } } }
+    },
+    "该翻译服务暂不支持目标语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "This translation service does not support the target language" } } }
+    },
+    "输入 Google Cloud Translation API Key" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter Google Cloud Translation API key" } } }
+    },
+    "输入百度翻译 APP ID" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter Baidu Translate APP ID" } } }
+    },
+    "输入百度翻译密钥" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter Baidu Translate secret key" } } }
+    },
+    "配置完整后，译文会显示在 Apple 本地翻译下方" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Once configured, its result appears below Apple on-device translation" } } }
+    },
+    "PEEK 翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK Translate" } } }
+    },
+    "本地语言策略、启动入口与快捷键" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device language behavior, launch entry points, and shortcut" } } }
+    },
+    "使用方式" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "How It Works" } } }
+    },
+    "原文语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Source Language" } } }
+    },
+    "每次翻译时自动识别，也可以在翻译窗口中手动选择" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Detected automatically for each translation, with a manual override in the translation window" } } }
+    },
+    "默认目标语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Default Target Language" } } }
+    },
+    "默认使用当前 macOS 系统语言，可在翻译窗口中临时切换" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Uses the current macOS language by default, with a temporary override in the translation window" } } }
+    },
+    "翻译使用独立浮窗，不会占用文件查找或截图界面。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation opens in its own floating window without taking over search or capture." } } }
+    },
+    "打开翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Translate" } } }
+    },
+    "当前组合与系统或其他应用冲突，请在右侧直接录入新的组合。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "This shortcut conflicts with macOS or another app. Record a new shortcut on the right." } } }
+    },
+    "隐私与兼容性" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Privacy and Compatibility" } } }
+    },
+    "翻译由 macOS 本地语言模型处理，不会发送到第三方翻译服务。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation is processed by on-device macOS language models and is not sent to third-party translation services." } } }
+    },
+    "本地翻译需要 macOS 15 或更高版本；可用语言由系统管理。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device translation requires macOS 15 or later. Available languages are managed by the system." } } }
+    },
+    "PEEK 内置翻译工具" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Built-in PEEK translation tool" } } }
+    },
+    "内置工具" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Built-in Tool" } } }
+    },
+    "内置工具仅支持直接打开" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Built-in tools can only be opened directly" } } }
+    },
+    "处理方式" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Processing" } } }
+    },
+    "Mac 本地处理" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device on this Mac" } } }
+    },
+    "翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translate" } } }
+    },
+    "待识别" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting" } } }
+    },
+    "源语言与目标语言一致，已保留原文" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Source and target languages match; original text preserved" } } }
+    },
+    "按 ⌘↩ 开始翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Press ⌘↩ to translate" } } }
+    },
+    "输入文字后按 ⌘↩ 开始翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Type text, then press ⌘↩ to translate" } } }
+    },
+    "原文或语言已修改，按 ⌘↩ 重新翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Text or language changed. Press ⌘↩ to translate again." } } }
+    },
+    "语言检查超时，请重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Language check timed out. Please try again." } } }
+    },
+    "翻译服务未响应，请重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation service did not respond. Please try again." } } }
+    },
+    "聚焦渐进式翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Focused Progressive Translation" } } }
+    },
+    "翻译为" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translate to" } } }
+    },
+    "更多语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "More Languages" } } }
+    },
+    "等待输入" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for input" } } }
+    },
+    "输入文字以开始翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Type text to begin translating" } } }
+    },
+    "在本机完成翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translated on this Mac" } } }
+    },
+    "语言包尚未安装" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Language pack not installed" } } }
+    },
+    "翻译（快捷键冲突，可在设置中修改）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translate (shortcut conflict; change it in Settings)" } } }
+    },
+    "统一管理文件查找、翻译和截图快捷键" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Manage file search, translation, and capture shortcuts in one place" } } }
+    },
+    "自动检测" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Detect Language" } } }
+    },
+    "自动检测 · %@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Detected · %@" } } }
+    },
+    "源语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Source Language" } } }
+    },
+    "目标语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Target Language" } } }
+    },
+    "交换语言" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Swap Languages" } } }
+    },
+    "原文" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Source Text" } } }
+    },
+    "译文" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation" } } }
+    },
+    "输入或粘贴需要翻译的文字" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Type or paste text to translate" } } }
+    },
+    "译文会显示在这里" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "The translation will appear here" } } }
+    },
+    "等待输入完成…" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for you to finish typing…" } } }
+    },
+    "正在翻译…" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translating…" } } }
+    },
+    "粘贴" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Paste" } } }
+    },
+    "清空" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Clear" } } }
+    },
+    "复制译文" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Copy Translation" } } }
+    },
+    "朗读" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Speak" } } }
+    },
+    "本地处理 · 已安装语言（离线可用）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Installed languages available offline" } } }
+    },
+    "本地处理 · 等待输入完成" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Waiting for input" } } }
+    },
+    "本地处理 · 正在翻译" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Translating" } } }
+    },
+    "本地处理 · 翻译完成" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Translation complete" } } }
+    },
+    "本地处理 · 语言模型由 macOS 管理" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Language models managed by macOS" } } }
+    },
+    "本地处理 · 语言包尚未安装" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device · Language pack not installed" } } }
+    },
+    "尚未安装所需语言包" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Required Language Pack Not Installed" } } }
+    },
+    "%@ → %@ 语言包尚未安装" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ → %@ language pack is not installed" } } }
+    },
+    "你可以继续输入。安装完成后返回 PEEK，翻译会自动继续。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "You can keep typing. Return to PEEK after installation and translation will continue automatically." } } }
+    },
+    "你可以继续输入。安装完成后重新打开 PEEK 翻译即可继续。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "You can keep typing. Reopen PEEK Translate after installation to continue." } } }
+    },
+    "翻译失败" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation Failed" } } }
+    },
+    "翻译已中断，请重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation was interrupted. Try again." } } }
+    },
+    "翻译超时，请重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation timed out. Try again." } } }
+    },
+    "重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } } }
+    },
+    "当前语言组合不可用" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "This language pair is unavailable" } } }
+    },
+    "当前语言组合暂不支持" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "This language pair is not supported" } } }
+    },
+    "本地翻译需要 macOS 15 或更高版本" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "On-device translation requires macOS 15 or later" } } }
+    },
+    "升级系统后，PEEK 会使用 macOS 本地语言模型完成翻译，内容不会上传第三方服务。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "After upgrading, PEEK uses the on-device macOS language models. Your content is never sent to third-party services." } } }
+    },
     "上次完成：%@" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Last completed: %@" } } }
     },
@@ -886,6 +1234,16 @@
         }
       }
     },
+    "显示器 %u 的分辨率或布局已变化" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The resolution or layout of display %u has changed"
+          }
+        }
+      }
+    },
     "SQLite 索引不可用" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1333,6 +1691,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Close"
+          }
+        }
+      }
+    },
+    "关闭设置" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close Settings"
           }
         }
       }
@@ -5915,6 +6283,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Simplified Chinese"
+          }
+        }
+      }
+    },
+    "繁体中文" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Traditional Chinese"
           }
         }
       }

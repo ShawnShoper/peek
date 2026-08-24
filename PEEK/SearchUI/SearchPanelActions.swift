@@ -140,6 +140,14 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
         for item: SearchPanelItem
     ) async -> [SearchPanelFileAction: SearchPanelActionCapability] {
         let actions = SearchPanelFileAction.allCases
+        if item.launchBehavior.isPEEKBuiltInTool {
+            let unavailable = SearchPanelActionCapability.disabled(
+                L10n.tr("内置工具仅支持直接打开")
+            )
+            return Dictionary(uniqueKeysWithValues: actions.map { action in
+                (action, action == .open ? .enabled : unavailable)
+            })
+        }
         let sourceAccess: FileSearchSecurityScopedAccess?
         do {
             sourceAccess = try FileSearchSecurityScopeResolver.resolve(
@@ -196,6 +204,11 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
         for action: SearchPanelFileAction,
         item: SearchPanelItem
     ) -> SearchPanelActionCapability {
+        if item.launchBehavior.isPEEKBuiltInTool {
+            return action == .open
+                ? .enabled
+                : .disabled(L10n.tr("内置工具仅支持直接打开"))
+        }
         let sourceAccess: FileSearchSecurityScopedAccess?
         do {
             sourceAccess = try FileSearchSecurityScopeResolver.resolve(
@@ -234,6 +247,20 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
         _ action: SearchPanelFileAction,
         item: SearchPanelItem
     ) async throws -> SearchPanelActionFeedback {
+        if item.launchBehavior.isPEEKBuiltInTool {
+            guard action == .open else {
+                throw SearchPanelActionError.invalidDestination(
+                    L10n.tr("内置工具仅支持直接打开")
+                )
+            }
+            switch item.launchBehavior {
+            case .peekTranslation:
+                TranslationPanelController.shared.show()
+            case .fileURL:
+                break
+            }
+            return SearchPanelActionFeedback(L10n.tr("已打开 %@", item.displayName))
+        }
         let sourceAccess = try FileSearchSecurityScopeResolver.resolve(
             containing: item.url
         )

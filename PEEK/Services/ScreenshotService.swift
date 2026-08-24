@@ -66,7 +66,7 @@ final class ScreenshotService: ObservableObject {
     private var scrollWindowAnchor: ScrollCaptureWindowAnchor?
     private var editorActionOccurred = false
     private var shouldReactivateOriginalApplication = true
-    private var captureCancellationRequested = false
+    private var activeCaptureRequest: ScreenshotCaptureRequestToken?
     private var scrollAttemptContext: ScrollAttemptContext?
     private var pendingScrollAmountOverride: Int?
 
@@ -82,13 +82,16 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard beginCapture(message: L10n.tr("拖动选择区域；可移动或缩放，双击或 Enter 后截图")) else { return }
-        defer { endCapture() }
+        guard let captureRequest = await beginCapture(
+            message: L10n.tr("拖动选择区域；可移动或缩放，双击或 Enter 后截图")
+        ) else { return }
+        defer { endCapture(request: captureRequest) }
 
         do {
             editorActionOccurred = false
             guard try await captureCoordinator.captureRegionWithInlineEditor(
                 presentationDelayNanoseconds: presentationDelayNanoseconds,
+                requestToken: captureRequest,
                 onAction: { [weak self] action in
                     guard let self else { return }
                     self.editorActionOccurred = true
@@ -149,8 +152,12 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard beginCapture(message: L10n.tr("请选择要连续滚动的内容区域")) else { return }
-        defer { endCapture() }
+        guard let captureRequest = await beginCapture(
+            message: L10n.tr("请选择要连续滚动的内容区域")
+        ) else {
+            return
+        }
+        defer { endCapture(request: captureRequest) }
 
         // A recovery retry can lower the scroll distance for one attempt
         // without rewriting the user's persistent pixel ceiling.
@@ -228,7 +235,8 @@ final class ScreenshotService: ObservableObject {
                 automaticHoverWindowRect: detectedWindowTarget.flatMap {
                     Self.singleScreenWindowRect($0.windowFrame)
                 },
-                automaticHoverSelectionRects: detectedWindowTarget?.hoverSelectionRects ?? []
+                automaticHoverSelectionRects: detectedWindowTarget?.hoverSelectionRects ?? [],
+                requestToken: captureRequest
             ) else {
                 lastMessage = L10n.tr("已取消滚动截图")
                 return
@@ -305,12 +313,17 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard beginCapture(message: L10n.tr("请选择需要 OCR 的区域")) else { return }
-        defer { endCapture() }
+        guard let captureRequest = await beginCapture(
+            message: L10n.tr("请选择需要 OCR 的区域")
+        ) else {
+            return
+        }
+        defer { endCapture(request: captureRequest) }
 
         do {
             guard let capture = try await captureCoordinator.captureRegion(
-                presentationDelayNanoseconds: presentationDelayNanoseconds
+                presentationDelayNanoseconds: presentationDelayNanoseconds,
+                requestToken: captureRequest
             ) else {
                 lastMessage = L10n.tr("已取消 OCR")
                 return
@@ -328,7 +341,7 @@ final class ScreenshotService: ObservableObject {
     }
 
     func cancelActiveCapture() {
-        captureCancellationRequested = true
+        activeCaptureRequest?.cancel()
         captureCoordinator.cancelCapture()
         if let scrollSession {
             Task { await scrollSession.cancel() }
@@ -345,31 +358,43 @@ final class ScreenshotService: ObservableObject {
         openPrivacySettings(anchor: "Privacy_Accessibility")
     }
 
-    private func beginCapture(message: String) -> Bool {
+    private func beginCapture(message: String) async -> ScreenshotCaptureRequestToken? {
         guard !isCapturing else {
             lastMessage = L10n.tr("已有截图任务正在进行；按 Esc 可取消")
-            return false
+            return nil
         }
+        let request = ScreenshotCaptureRequestToken()
+        activeCaptureRequest = request
         originalFrontmostApplication = NSWorkspace.shared.frontmostApplication
         scrollTargetApplication = nil
         scrollCaptureTarget = nil
         scrollWindowAnchor = nil
         scrollAttemptContext = nil
-        captureCancellationRequested = false
         shouldReactivateOriginalApplication = true
         isCapturing = true
-        indexActivityController.setCaptureActive(true)
         lastMessage = message
-        return true
+        // Confirm the blocker is installed, but never wait for the indexer to
+        // finish its current synchronous metadata read. Capture keeps the
+        // higher user-initiated priority and starts as soon as the gate updates.
+        await indexActivityController.beginCaptureActivity()
+        do {
+            try request.checkCancellation()
+        } catch {
+            endCapture(request: request)
+            return nil
+        }
+        return request
     }
 
-    private func endCapture() {
+    private func endCapture(request: ScreenshotCaptureRequestToken) {
+        guard activeCaptureRequest === request else { return }
         let originalApplication = originalFrontmostApplication
         let shouldReactivate = shouldReactivateOriginalApplication
+        activeCaptureRequest = nil
         scrollHUD.close()
         isCapturing = false
         isScrolling = false
-        indexActivityController.setCaptureActive(false)
+        indexActivityController.endCaptureActivity()
         scrollSession = nil
         originalFrontmostApplication = nil
         scrollTargetApplication = nil
@@ -377,7 +402,6 @@ final class ScreenshotService: ObservableObject {
         scrollWindowAnchor = nil
         scrollAttemptContext = nil
         shouldReactivateOriginalApplication = true
-        captureCancellationRequested = false
 
         if shouldReactivate,
            let originalApplication,
@@ -835,10 +859,7 @@ final class ScreenshotService: ObservableObject {
     }
 
     private func checkCaptureCancellation() throws {
-        try Task.checkCancellation()
-        if captureCancellationRequested {
-            throw CancellationError()
-        }
+        try activeCaptureRequest?.checkCancellation()
     }
 
     private var shouldAutoDetectScrollTarget: Bool {

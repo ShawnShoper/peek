@@ -15,41 +15,145 @@ extension Notification.Name {
 
 @MainActor
 enum PEEKSettingsWindowPresenter {
-    private static let settingsWindowIdentifier = "com_apple_SwiftUI_Settings_window"
+    static let windowIdentifier = NSUserInterfaceItemIdentifier("PEEK.settings")
     private static let focusRetryDelays: [TimeInterval] = [0, 0.08, 0.2]
+    private static var presentationGeneration: UInt64 = 0
+    private static var contentFactory: (() -> AnyView)?
+    private static var windowController: NSWindowController?
+
+    static func configure(screenshotService: ScreenshotService) {
+        contentFactory = {
+            AnyView(
+                SettingsView()
+                    .environmentObject(screenshotService)
+                    .frame(minWidth: 980, minHeight: 640)
+            )
+        }
+    }
 
     static func show() {
+        let generation = beginPresentationAttempt()
         // MenuBarExtra actions run while AppKit is still dismissing the menu.
         // Defer presentation to the next run loop so the settings window can
         // become key instead of being ordered behind the previously active app.
         DispatchQueue.main.async {
+            guard isCurrentPresentationAttempt(generation) else { return }
+            guard let controller = settingsWindowController() else { return }
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.sendAction(
-                Selector(("showSettingsWindow:")),
-                to: nil,
-                from: nil
-            )
+            controller.showWindow(nil)
             focusRetryDelays.forEach { delay in
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    focusSettingsWindowIfAvailable()
+                    focusSettingsWindowIfCurrent(generation)
                 }
             }
         }
     }
 
     static func isSettingsWindow(_ window: NSWindow) -> Bool {
-        window.identifier?.rawValue == settingsWindowIdentifier
+        window.identifier == windowIdentifier
     }
 
-    private static func focusSettingsWindowIfAvailable() {
-        guard let window = NSApp.windows.first(where: isSettingsWindow) else { return }
+    /// Hides only PEEK's owned settings window and leaves the menu-bar app alive.
+    /// This is used for Command-Q while Settings is visible; explicit Quit
+    /// actions still terminate the application normally.
+    @discardableResult
+    static func closeIfVisible(in windows: [NSWindow] = NSApp.windows) -> Bool {
+        // Cancel delayed focus retries first so a just-hidden Settings window
+        // cannot be ordered front again a few milliseconds after Command-Q.
+        invalidatePendingPresentation()
+        let visibleSettingsWindows = windows.filter {
+            isSettingsWindow($0) && ($0.isVisible || $0.isMiniaturized)
+        }
+        guard !visibleSettingsWindows.isEmpty else { return false }
+
+        visibleSettingsWindows.forEach { $0.orderOut(nil) }
+        return true
+    }
+
+    @discardableResult
+    static func beginPresentationAttempt() -> UInt64 {
+        presentationGeneration &+= 1
+        if presentationGeneration == 0 {
+            presentationGeneration = 1
+        }
+        return presentationGeneration
+    }
+
+    static func isCurrentPresentationAttempt(_ generation: UInt64) -> Bool {
+        generation == presentationGeneration
+    }
+
+    private static func invalidatePendingPresentation() {
+        _ = beginPresentationAttempt()
+    }
+
+    /// Brings the owned settings window back even when Command-Q previously hid its
+    /// existing NSWindow with orderOut. The generation check prevents delayed
+    /// retries from an older presentation attempt from reopening it.
+    @discardableResult
+    static func focusSettingsWindowIfCurrent(
+        _ generation: UInt64,
+        in windows: [NSWindow] = NSApp.windows,
+        activateApplication: Bool = true
+    ) -> Bool {
+        guard isCurrentPresentationAttempt(generation) else { return false }
+        guard let window = windows.first(where: isSettingsWindow) else { return false }
         window.collectionBehavior.insert(.moveToActiveSpace)
         if window.isMiniaturized {
             window.deminiaturize(nil)
         }
         window.makeKeyAndOrderFront(nil)
         window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        if activateApplication {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return true
+    }
+
+    static func makeWindowController(rootView: AnyView) -> NSWindowController {
+        let hostingController = NSHostingController(rootView: rootView)
+        let window = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 980, height: 640),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentViewController = hostingController
+        window.identifier = windowIdentifier
+        window.title = AppBrand.displayName
+        window.minSize = NSSize(width: 980, height: 640)
+        window.isReleasedWhenClosed = false
+        window.isRestorable = false
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.setFrameAutosaveName("PEEK.SettingsWindow")
+        window.center()
+        return NSWindowController(window: window)
+    }
+
+    private static func settingsWindowController() -> NSWindowController? {
+        if let windowController {
+            return windowController
+        }
+        guard let contentFactory else { return nil }
+        let controller = makeWindowController(rootView: contentFactory())
+        windowController = controller
+        return controller
+    }
+}
+
+enum PEEKSettingsQuitShortcutPolicy {
+    static func matches(
+        charactersIgnoringModifiers: String?,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        let relevantModifiers = modifierFlags.intersection([
+            .command,
+            .option,
+            .control,
+            .shift,
+        ])
+        return relevantModifiers == .command
+            && charactersIgnoringModifiers?.lowercased() == "q"
     }
 }
 
@@ -64,43 +168,62 @@ struct PEEKApp: App {
         let searchProvider = FileSearchPanelProvider.shared
         _screenshotService = StateObject(wrappedValue: service)
         self.searchProvider = searchProvider
-        ScreenshotGlobalHotKeyManager.shared.start { action in
-            Task { @MainActor in
-                switch action {
-                case .region:
+        PEEKSettingsWindowPresenter.configure(screenshotService: service)
+        ScreenshotGlobalHotKeyManager.shared.start { action, diagnosticSession in
+            ScreenshotCaptureDiagnostics.record(
+                "action_handler_started",
+                session: diagnosticSession
+            )
+            switch action {
+            case .region:
+                await ScreenshotCaptureDiagnostics.$currentSession.withValue(
+                    diagnosticSession
+                ) {
                     await service.captureRegion(
                         presentationDelayNanoseconds: ScreenshotCapturePresentationDelay
                             .hotKeyNanoseconds
                     )
-                case .scrolling:
+                }
+            case .scrolling:
+                await ScreenshotCaptureDiagnostics.$currentSession.withValue(
+                    diagnosticSession
+                ) {
                     await service.captureScrolling(
                         presentationDelayNanoseconds: ScreenshotCapturePresentationDelay
                             .hotKeyNanoseconds
                     )
-                case .ocr:
+                }
+            case .ocr:
+                await ScreenshotCaptureDiagnostics.$currentSession.withValue(
+                    diagnosticSession
+                ) {
                     await service.captureAndRecognizeText(
                         presentationDelayNanoseconds: ScreenshotCapturePresentationDelay
                             .hotKeyNanoseconds
                     )
-                case .search:
-                    SearchPanelController.shared.toggle(provider: searchProvider)
                 }
+            case .search:
+                SearchPanelController.shared.toggle(provider: searchProvider)
+            case .translation:
+                TranslationPanelController.shared.toggle()
             }
         }
     }
 
     var body: some Scene {
-        Settings {
-            SettingsView()
-                .environmentObject(screenshotService)
-                .frame(minWidth: 980, minHeight: 640)
-        }
-
         MenuBarExtra(AppBrand.displayName, image: AppBrand.menuBarIconAssetName) {
             MenuBarMenuView(searchProvider: searchProvider)
                 .environmentObject(screenshotService)
         }
         .menuBarExtraStyle(.menu)
+        .commands {
+            CommandGroup(replacing: .appTermination) {
+                Button(L10n.tr("关闭设置")) {
+                    PEEKSettingsWindowPresenter.closeIfVisible()
+                }
+                .keyboardShortcut("q", modifiers: [.command])
+            }
+        }
     }
 }
 
@@ -108,6 +231,9 @@ struct PEEKApp: App {
 final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     private let instanceLock = SingleInstanceLock()
     private var ownsInstanceLock = false
+    private var screenCaptureMetadataTask: Task<Void, Never>?
+    private var screenCaptureMetadataLifecycleGeneration: UInt64 = 0
+    private var settingsQuitShortcutMonitor: Any?
 #if DEBUG
     private let screenshotToolbarPreviewController = ScreenshotEditorController()
 #endif
@@ -133,6 +259,9 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard ownsInstanceLock else { return }
         hideAutomaticallyRestoredWindows()
+        installSettingsQuitShortcutMonitor()
+        installScreenCaptureMetadataLifecycleObservers()
+        refreshScreenCaptureMetadata(invalidateFirst: false)
         FileSearchIndexRuntime.shared.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             SearchPanelController.shared.prepare(
@@ -154,6 +283,10 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
                     provider: FileSearchPanelProvider.shared,
                     initialQuery: "wei xin"
                 )
+            }
+        } else if ProcessInfo.processInfo.arguments.contains("--show-translation-panel-for-ui-testing") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                TranslationPanelController.shared.show(previewMode: true)
             }
         } else if ProcessInfo.processInfo.arguments.contains("--show-settings-for-ui-testing") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -229,6 +362,13 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
 #endif
 
     func applicationWillTerminate(_ notification: Notification) {
+        screenCaptureMetadataTask?.cancel()
+        screenCaptureMetadataTask = nil
+        if let settingsQuitShortcutMonitor {
+            NSEvent.removeMonitor(settingsQuitShortcutMonitor)
+            self.settingsQuitShortcutMonitor = nil
+        }
+        removeScreenCaptureMetadataLifecycleObservers()
         NotificationCenter.default.removeObserver(
             self,
             name: NSApplication.didFinishRestoringWindowsNotification,
@@ -236,7 +376,112 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
         )
         FileSearchIndexRuntime.shared.stop()
         SearchPanelController.shared.destroy()
+        TranslationPanelController.shared.destroy()
         ScreenshotGlobalHotKeyManager.shared.stop()
+    }
+
+    private func installSettingsQuitShortcutMonitor() {
+        guard settingsQuitShortcutMonitor == nil else { return }
+        settingsQuitShortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            event in
+            guard PEEKSettingsQuitShortcutPolicy.matches(
+                charactersIgnoringModifiers: event.charactersIgnoringModifiers,
+                modifierFlags: event.modifierFlags
+            ), PEEKSettingsWindowPresenter.closeIfVisible() else {
+                return event
+            }
+
+            // Consume Command-Q only after hiding Settings. Explicit menu-bar
+            // Quit does not produce this key event and still terminates PEEK.
+            return nil
+        }
+    }
+
+    /// Prewarm only ScreenCaptureKit metadata when screen recording access is
+    /// already granted. This never prompts and never stores desktop pixels.
+    private func refreshScreenCaptureMetadata(invalidateFirst: Bool) {
+        let generation = nextScreenCaptureMetadataLifecycleGeneration()
+        screenCaptureMetadataTask?.cancel()
+        screenCaptureMetadataTask = Task.detached(priority: .utility) {
+            let accepted = await SystemScreenImageCapturer.applyMetadataLifecycleTransition(
+                generation: generation,
+                invalidateCachedMetadata: invalidateFirst
+            )
+            guard accepted, !Task.isCancelled else { return }
+            await SystemScreenImageCapturer.prewarmIfAuthorized()
+        }
+    }
+
+    private func invalidateScreenCaptureMetadata() {
+        let generation = nextScreenCaptureMetadataLifecycleGeneration()
+        screenCaptureMetadataTask?.cancel()
+        screenCaptureMetadataTask = Task.detached(priority: .utility) {
+            _ = await SystemScreenImageCapturer.applyMetadataLifecycleTransition(
+                generation: generation,
+                invalidateCachedMetadata: true
+            )
+        }
+    }
+
+    private func nextScreenCaptureMetadataLifecycleGeneration() -> UInt64 {
+        screenCaptureMetadataLifecycleGeneration &+= 1
+        if screenCaptureMetadataLifecycleGeneration == 0 {
+            screenCaptureMetadataLifecycleGeneration = 1
+        }
+        return screenCaptureMetadataLifecycleGeneration
+    }
+
+    private func installScreenCaptureMetadataLifecycleObservers() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: NSApp
+        )
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(workspaceWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        workspaceCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    private func removeScreenCaptureMetadataLifecycleObservers() {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: NSApp
+        )
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.removeObserver(
+            self,
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        workspaceCenter.removeObserver(
+            self,
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func screenParametersDidChange(_ notification: Notification) {
+        refreshScreenCaptureMetadata(invalidateFirst: true)
+    }
+
+    @objc private func workspaceWillSleep(_ notification: Notification) {
+        invalidateScreenCaptureMetadata()
+    }
+
+    @objc private func workspaceDidWake(_ notification: Notification) {
+        refreshScreenCaptureMetadata(invalidateFirst: true)
     }
 
     private func activateExistingInstance() {
@@ -253,7 +498,8 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hideAutomaticallyRestoredWindows() {
-        for window in NSApp.windows where window.isVisible && window.title != L10n.tr("文件查找") {
+        for window in NSApp.windows
+        where window.isVisible && PEEKSettingsWindowPresenter.isSettingsWindow(window) {
             window.orderOut(nil)
         }
     }

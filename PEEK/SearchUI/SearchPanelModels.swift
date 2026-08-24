@@ -42,6 +42,13 @@ struct SearchPanelMetadataField: Identifiable, Hashable, Sendable {
     }
 }
 
+enum SearchPanelLaunchBehavior: String, Hashable, Sendable {
+    case fileURL
+    case peekTranslation
+
+    var isPEEKBuiltInTool: Bool { self != .fileURL }
+}
+
 struct SearchPanelItem: Identifiable, Hashable, Sendable {
     let id: String
     let url: URL
@@ -54,6 +61,7 @@ struct SearchPanelItem: Identifiable, Hashable, Sendable {
     let modifiedAt: Date?
     let applicationBundleIdentifier: String?
     let metadata: [SearchPanelMetadataField]
+    let launchBehavior: SearchPanelLaunchBehavior
 
     init(
         id: String? = nil,
@@ -66,7 +74,8 @@ struct SearchPanelItem: Identifiable, Hashable, Sendable {
         fileSize: Int64? = nil,
         modifiedAt: Date? = nil,
         applicationBundleIdentifier: String? = nil,
-        metadata: [SearchPanelMetadataField] = []
+        metadata: [SearchPanelMetadataField] = [],
+        launchBehavior: SearchPanelLaunchBehavior = .fileURL
     ) {
         self.id = id ?? url.standardizedFileURL.path
         self.url = url
@@ -79,6 +88,7 @@ struct SearchPanelItem: Identifiable, Hashable, Sendable {
         self.modifiedAt = modifiedAt
         self.applicationBundleIdentifier = applicationBundleIdentifier
         self.metadata = metadata
+        self.launchBehavior = launchBehavior
     }
 }
 

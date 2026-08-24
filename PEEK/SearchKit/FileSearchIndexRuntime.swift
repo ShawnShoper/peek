@@ -7,7 +7,13 @@ import OSLog
 @MainActor
 protocol FileSearchIndexActivityControlling: AnyObject {
     func setSearchPanelActive(_ isActive: Bool)
-    func setCaptureActive(_ isActive: Bool)
+    /// Installs the capture blocker before the caller starts reading pixels.
+    /// Awaiting this method confirms only that the blocker is visible to the
+    /// indexer; it never waits for an active filesystem operation to finish.
+    func beginCaptureActivity() async
+    /// Queues release behind the matching begin operation. This method stays
+    /// synchronous so capture cleanup can safely call it from `defer`.
+    func endCaptureActivity()
     func setOCRActive(_ isActive: Bool)
     func setFileOperationActive(_ isActive: Bool)
 }
@@ -87,9 +93,16 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
         }
     }
 
-    func setCaptureActive(_ isActive: Bool) {
+    func beginCaptureActivity() async {
+        let task = enqueueActivity { coordinator in
+            await coordinator.setCaptureActive(true)
+        }
+        await task.value
+    }
+
+    func endCaptureActivity() {
         enqueueActivity { coordinator in
-            await coordinator.setCaptureActive(isActive)
+            await coordinator.setCaptureActive(false)
         }
     }
 
@@ -209,18 +222,21 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
 
     /// Preserve UI event order so a quick open/close or begin/end pair cannot
     /// leave a stale blocker set because two unstructured tasks raced.
+    @discardableResult
     private func enqueueActivity(
         _ operation: @escaping @Sendable (
             FileSearchIndexCoordinator<FileSearchIndexStore>
         ) async -> Void
-    ) {
+    ) -> Task<Void, Never> {
         let precedingTask = activityTask
         let coordinator = coordinator
-        activityTask = Task {
+        let task = Task {
             _ = await precedingTask?.value
             guard !Task.isCancelled else { return }
             await operation(coordinator)
         }
+        activityTask = task
+        return task
     }
 
     private static func makeRootProvider(

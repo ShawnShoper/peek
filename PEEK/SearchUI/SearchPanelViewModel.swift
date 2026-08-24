@@ -431,7 +431,8 @@ final class SearchPanelViewModel: ObservableObject {
             scheduleSearch(immediately: true)
         }
         if action == .open {
-            if item.category == .applications {
+            if item.category == .applications,
+               item.launchBehavior == .fileURL {
                 applicationUsageTracker.recordOpen(for: item.url)
             }
             onRequestClose?()

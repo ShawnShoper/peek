@@ -62,6 +62,13 @@
 		B00000000000000000000054 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000054 /* Localizable.xcstrings */; };
 		B00000000000000000000055 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000055 /* InfoPlist.xcstrings */; };
 		B00000000000000000000056 /* SearchApplicationUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000056 /* SearchApplicationUsageStore.swift */; };
+		B00000000000000000000057 /* TranslationPanelSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000057 /* TranslationPanelSupport.swift */; };
+		B00000000000000000000058 /* TranslationPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000058 /* TranslationPanelView.swift */; };
+		B00000000000000000000059 /* TranslationPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000059 /* TranslationPanelController.swift */; };
+		B0000000000000000000005A /* PEEKTranslateSearchRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000005A /* PEEKTranslateSearchRegistration.swift */; };
+		B0000000000000000000005B /* TranslationCloudSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000005B /* TranslationCloudSupport.swift */; };
+		B0000000000000000000005C /* TranslationTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000005C /* TranslationTextEditor.swift */; };
+		B00000000000000000000071 /* HotKeyRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000071 /* HotKeyRecorderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -132,6 +139,13 @@
 		F00000000000000000000054 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		F00000000000000000000055 /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		F00000000000000000000056 /* SearchApplicationUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchApplicationUsageStore.swift; sourceTree = "<group>"; };
+		F00000000000000000000057 /* TranslationPanelSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationPanelSupport.swift; sourceTree = "<group>"; };
+		F00000000000000000000058 /* TranslationPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationPanelView.swift; sourceTree = "<group>"; };
+		F00000000000000000000059 /* TranslationPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationPanelController.swift; sourceTree = "<group>"; };
+		F0000000000000000000005A /* PEEKTranslateSearchRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKTranslateSearchRegistration.swift; sourceTree = "<group>"; };
+		F0000000000000000000005B /* TranslationCloudSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationCloudSupport.swift; sourceTree = "<group>"; };
+		F0000000000000000000005C /* TranslationTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationTextEditor.swift; sourceTree = "<group>"; };
+		F00000000000000000000071 /* HotKeyRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyRecorderTests.swift; sourceTree = "<group>"; };
 		F10000000000000000000001 /* PEEK.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PEEK.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000002 /* PEEKTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PEEKTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -160,6 +174,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000001 /* PEEK */,
+				A1000000000000000000000B /* PEEKTranslate */,
 				A20000000000000000000001 /* PEEKTests */,
 				A30000000000000000000001 /* Frameworks */,
 				A40000000000000000000001 /* Products */,
@@ -282,10 +297,24 @@
 			path = SearchUI;
 			sourceTree = "<group>";
 		};
+		A1000000000000000000000B /* PEEKTranslate */ = {
+			isa = PBXGroup;
+			children = (
+				F0000000000000000000005A /* PEEKTranslateSearchRegistration.swift */,
+				F0000000000000000000005B /* TranslationCloudSupport.swift */,
+				F00000000000000000000059 /* TranslationPanelController.swift */,
+				F00000000000000000000058 /* TranslationPanelView.swift */,
+				F00000000000000000000057 /* TranslationPanelSupport.swift */,
+				F0000000000000000000005C /* TranslationTextEditor.swift */,
+			);
+			path = PEEKTranslate;
+			sourceTree = "<group>";
+		};
 		A20000000000000000000001 /* PEEKTests */ = {
 			isa = PBXGroup;
 			children = (
 				F00000000000000000000040 /* FileSearchTests.swift */,
+				F00000000000000000000071 /* HotKeyRecorderTests.swift */,
 				F00000000000000000000031 /* ScreenshotKitTests.swift */,
 			);
 			path = PEEKTests;
@@ -459,6 +488,12 @@
 				B0000000000000000000003D /* SearchPanelView.swift in Sources */,
 				B0000000000000000000003E /* SearchPanelKeyboardBridge.swift in Sources */,
 				B0000000000000000000003F /* SearchPanelController.swift in Sources */,
+				B00000000000000000000057 /* TranslationPanelSupport.swift in Sources */,
+				B00000000000000000000058 /* TranslationPanelView.swift in Sources */,
+				B00000000000000000000059 /* TranslationPanelController.swift in Sources */,
+				B0000000000000000000005A /* PEEKTranslateSearchRegistration.swift in Sources */,
+				B0000000000000000000005B /* TranslationCloudSupport.swift in Sources */,
+				B0000000000000000000005C /* TranslationTextEditor.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -467,6 +502,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000040 /* FileSearchTests.swift in Sources */,
+				B00000000000000000000071 /* HotKeyRecorderTests.swift in Sources */,
 				B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

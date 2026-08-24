@@ -589,18 +589,24 @@ final class ScreenshotSelectionOverlayView: NSView {
     private let display: ScreenshotFrozenDisplay
     private let frozenImage: NSImage
     private let model: ScreenshotSelectionModel
+    private let diagnosticSession: ScreenshotCaptureDiagnosticSession?
     private var trackingAreaReference: NSTrackingArea?
     private var colorCopyFeedback: String?
     private var colorFeedbackTask: Task<Void, Never>?
     private var cachedPixelSample: PixelSample?
 
-    init(display: ScreenshotFrozenDisplay, model: ScreenshotSelectionModel) {
+    init(
+        display: ScreenshotFrozenDisplay,
+        model: ScreenshotSelectionModel,
+        diagnosticSession: ScreenshotCaptureDiagnosticSession? = nil
+    ) {
         self.display = display
         frozenImage = NSImage(
             cgImage: display.image,
             size: display.screenFrame.size
         )
         self.model = model
+        self.diagnosticSession = diagnosticSession
         super.init(frame: CGRect(origin: .zero, size: display.screenFrame.size))
         wantsLayer = true
     }
@@ -656,6 +662,15 @@ final class ScreenshotSelectionOverlayView: NSView {
         }
         drawCrosshair()
         drawPixelInspector()
+
+        if let diagnosticSession,
+           diagnosticSession.claimFirstFrame() {
+            ScreenshotCaptureDiagnostics.record(
+                "overlay_first_frame",
+                session: diagnosticSession,
+                detail: "display_id=\(display.displayID)"
+            )
+        }
     }
 
     override func mouseMoved(with event: NSEvent) {

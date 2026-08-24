@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import OSLog
 
 enum ScreenshotCaptureError: LocalizedError {
     case alreadyRunning
@@ -55,6 +56,175 @@ struct ScreenshotWindowCandidate: Equatable, Sendable {
     let frame: CGRect
     let ownerName: String
     let title: String?
+}
+
+struct ScreenshotWindowCandidateFetchResult: Equatable, Sendable {
+    let candidates: [ScreenshotWindowCandidate]
+    let timedOut: Bool
+    let elapsedMilliseconds: Int
+}
+
+/// Identifies the display geometry used to convert WindowServer's top-down
+/// bounds into AppKit coordinates. A result produced for a previous display
+/// layout must never be attached to the current frozen desktop.
+struct ScreenshotWindowCandidateRequestKey: Hashable, Sendable {
+    let desktopBounds: CGRect
+    let appKitReferenceTop: CGFloat
+}
+
+/// `CGWindowListCopyWindowInfo` is synchronous and can occasionally wait on
+/// WindowServer. Cancellation cannot interrupt that system call, so starting a
+/// fresh detached worker after every timeout would accumulate blocked workers.
+/// This actor keeps at most one synchronous provider in flight and gives each
+/// caller its own bounded waiter. Manual selection remains available whenever
+/// the optional window-hover metadata times out.
+actor ScreenshotWindowCandidateSingleFlight {
+    private struct InFlight {
+        let generation: UInt64
+        let key: ScreenshotWindowCandidateRequestKey
+    }
+
+    private struct Waiter {
+        let generation: UInt64
+        let startedAt: TimeInterval
+        let continuation: CheckedContinuation<
+            ScreenshotWindowCandidateFetchResult,
+            Never
+        >
+        let timeoutTask: Task<Void, Never>
+    }
+
+    private var inFlight: InFlight?
+    private var waiters: [UUID: Waiter] = [:]
+    private var nextGeneration: UInt64 = 1
+
+    func fetch(
+        key: ScreenshotWindowCandidateRequestKey,
+        timeoutNanoseconds: UInt64,
+        provider: @escaping @Sendable () -> [ScreenshotWindowCandidate]
+    ) async -> ScreenshotWindowCandidateFetchResult {
+        let timeoutNanoseconds = max(1_000_000, timeoutNanoseconds)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        return await withCheckedContinuation { continuation in
+            let generation: UInt64
+            if let inFlight {
+                guard inFlight.key == key else {
+                    continuation.resume(
+                        returning: ScreenshotWindowCandidateFetchResult(
+                            candidates: [],
+                            timedOut: true,
+                            elapsedMilliseconds: 0
+                        )
+                    )
+                    return
+                }
+                generation = inFlight.generation
+            } else {
+                generation = allocateGeneration()
+                inFlight = InFlight(generation: generation, key: key)
+                Task.detached(priority: .utility) { [weak self] in
+                    let candidates = provider()
+                    await self?.finish(
+                        generation: generation,
+                        candidates: candidates
+                    )
+                }
+            }
+
+            let waiterID = UUID()
+            let timeoutTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                } catch {
+                    return
+                }
+                await self?.timeout(
+                    waiterID: waiterID,
+                    timeoutNanoseconds: timeoutNanoseconds
+                )
+            }
+            waiters[waiterID] = Waiter(
+                generation: generation,
+                startedAt: startedAt,
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
+        }
+    }
+
+    private func finish(
+        generation: UInt64,
+        candidates: [ScreenshotWindowCandidate]
+    ) {
+        guard inFlight?.generation == generation else { return }
+        inFlight = nil
+        let completedAt = ProcessInfo.processInfo.systemUptime
+        let matchingWaiters = waiters.filter { $0.value.generation == generation }
+        for (waiterID, waiter) in matchingWaiters {
+            waiters.removeValue(forKey: waiterID)
+            waiter.timeoutTask.cancel()
+            waiter.continuation.resume(
+                returning: ScreenshotWindowCandidateFetchResult(
+                    candidates: candidates,
+                    timedOut: false,
+                    elapsedMilliseconds: Self.elapsedMilliseconds(
+                        from: waiter.startedAt,
+                        to: completedAt
+                    )
+                )
+            )
+        }
+    }
+
+    private func timeout(
+        waiterID: UUID,
+        timeoutNanoseconds: UInt64
+    ) {
+        guard let waiter = waiters.removeValue(forKey: waiterID) else { return }
+        waiter.continuation.resume(
+            returning: ScreenshotWindowCandidateFetchResult(
+                candidates: [],
+                timedOut: true,
+                elapsedMilliseconds: Int(timeoutNanoseconds / 1_000_000)
+            )
+        )
+    }
+
+    private func allocateGeneration() -> UInt64 {
+        let generation = nextGeneration
+        nextGeneration &+= 1
+        if nextGeneration == 0 {
+            nextGeneration = 1
+        }
+        return generation
+    }
+
+    private static func elapsedMilliseconds(
+        from start: TimeInterval,
+        to end: TimeInterval
+    ) -> Int {
+        Int((max(0, end - start) * 1_000).rounded())
+    }
+}
+
+private let screenshotWindowCandidateSingleFlight = ScreenshotWindowCandidateSingleFlight()
+
+func fetchScreenshotWindowCandidates(
+    singleFlight: ScreenshotWindowCandidateSingleFlight =
+        screenshotWindowCandidateSingleFlight,
+    key: ScreenshotWindowCandidateRequestKey = ScreenshotWindowCandidateRequestKey(
+        desktopBounds: .zero,
+        appKitReferenceTop: 0
+    ),
+    timeoutNanoseconds: UInt64,
+    provider: @escaping @Sendable () -> [ScreenshotWindowCandidate]
+) async -> ScreenshotWindowCandidateFetchResult {
+    await singleFlight.fetch(
+        key: key,
+        timeoutNanoseconds: timeoutNanoseconds,
+        provider: provider
+    )
 }
 
 /// Window candidates preserve the front-to-back order returned by
@@ -131,6 +301,12 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
 
     private let appKitReferenceTop: CGFloat
 
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.shawnshoper.peek",
+        category: "ScreenshotCapture"
+    )
+    private static let windowCandidateTimeoutNanoseconds: UInt64 = 250_000_000
+
     private init(
         displays: [ScreenshotFrozenDisplay],
         desktopBounds: CGRect,
@@ -161,7 +337,14 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
     /// PEEK freezes a Retina or multi-display desktop.
     @MainActor
     static func capture() async throws -> ScreenshotFrozenDesktop {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         let plan = try makeCapturePlan()
+        let planMilliseconds = Int(
+            ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
+        )
+        logger.info(
+            "stage=capture_plan elapsed_ms=\(planMilliseconds, privacy: .public) displays=\(plan.displays.count, privacy: .public)"
+        )
         return try await Task.detached(priority: .userInitiated) {
             try await capture(using: plan)
         }.value
@@ -212,7 +395,33 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
     private static func capture(
         using plan: CapturePlan
     ) async throws -> ScreenshotFrozenDesktop {
+        let totalStartedAt = ProcessInfo.processInfo.systemUptime
+        async let candidateFetch = fetchScreenshotWindowCandidates(
+            key: ScreenshotWindowCandidateRequestKey(
+                desktopBounds: plan.desktopBounds,
+                appKitReferenceTop: plan.appKitReferenceTop
+            ),
+            timeoutNanoseconds: windowCandidateTimeoutNanoseconds
+        ) {
+            screenshotWindowCandidates(
+                desktopBounds: plan.desktopBounds,
+                appKitReferenceTop: plan.appKitReferenceTop
+            )
+        }
+
         let screenCapturer = SystemScreenImageCapturer()
+        let metadataStartedAt = ProcessInfo.processInfo.systemUptime
+        let captureSession = try await screenCapturer.prepareCaptureSession(
+            expectedDisplayIDs: plan.displays.map(\.displayID)
+        )
+        let metadataMilliseconds = Int(
+            ((ProcessInfo.processInfo.systemUptime - metadataStartedAt) * 1_000).rounded()
+        )
+        logger.info(
+            "stage=prepare_metadata elapsed_ms=\(metadataMilliseconds, privacy: .public) displays=\(plan.displays.count, privacy: .public)"
+        )
+
+        let pixelsStartedAt = ProcessInfo.processInfo.systemUptime
         let frozenDisplays = try await withThrowingTaskGroup(
             of: (Int, ScreenshotFrozenDisplay).self,
             returning: [ScreenshotFrozenDisplay].self
@@ -223,7 +432,8 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
                     do {
                         image = try await screenCapturer.captureDisplay(
                             displayID: descriptor.displayID,
-                            logicalFrame: descriptor.screenFrame
+                            logicalFrame: descriptor.screenFrame,
+                            session: captureSession
                         )
                     } catch {
                         throw ScreenshotCaptureError.displayCaptureFailed(
@@ -251,13 +461,35 @@ final class ScreenshotFrozenDesktop: @unchecked Sendable {
                 .map(\.1)
         }
 
+        let pixelsMilliseconds = Int(
+            ((ProcessInfo.processInfo.systemUptime - pixelsStartedAt) * 1_000).rounded()
+        )
+        logger.info(
+            "stage=freeze_pixels elapsed_ms=\(pixelsMilliseconds, privacy: .public) displays=\(frozenDisplays.count, privacy: .public)"
+        )
+
+        let windowResult = await candidateFetch
+        if windowResult.timedOut {
+            logger.warning(
+                "stage=window_candidates result=timeout elapsed_ms=\(windowResult.elapsedMilliseconds, privacy: .public)"
+            )
+        } else {
+            logger.info(
+                "stage=window_candidates result=success elapsed_ms=\(windowResult.elapsedMilliseconds, privacy: .public) count=\(windowResult.candidates.count, privacy: .public)"
+            )
+        }
+
+        let totalMilliseconds = Int(
+            ((ProcessInfo.processInfo.systemUptime - totalStartedAt) * 1_000).rounded()
+        )
+        logger.info(
+            "stage=freeze_desktop result=success elapsed_ms=\(totalMilliseconds, privacy: .public) displays=\(frozenDisplays.count, privacy: .public)"
+        )
+
         return ScreenshotFrozenDesktop(
             displays: frozenDisplays,
             desktopBounds: plan.desktopBounds,
-            windowCandidates: screenshotWindowCandidates(
-                desktopBounds: plan.desktopBounds,
-                appKitReferenceTop: plan.appKitReferenceTop
-            ),
+            windowCandidates: windowResult.candidates,
             appKitReferenceTop: plan.appKitReferenceTop
         )
     }

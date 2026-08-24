@@ -7,6 +7,7 @@ struct SettingsView: View {
         case general
         case search
         case shortcuts
+        case translation
         case capture
         case appearance
         case about
@@ -18,6 +19,7 @@ struct SettingsView: View {
             case .general: return L10n.tr("通用")
             case .search: return L10n.tr("搜索")
             case .shortcuts: return L10n.tr("快捷键")
+            case .translation: return L10n.tr("翻译")
             case .capture: return L10n.tr("截图")
             case .appearance: return L10n.tr("外观")
             case .about: return L10n.tr("关于")
@@ -29,6 +31,7 @@ struct SettingsView: View {
             case .general: return "gearshape"
             case .search: return "magnifyingglass"
             case .shortcuts: return "keyboard"
+            case .translation: return "character.book.closed"
             case .capture: return "viewfinder.circle"
             case .appearance: return "paintpalette"
             case .about: return "info.circle"
@@ -193,6 +196,7 @@ struct SettingsView: View {
     @ObservedObject private var documentDefaultRootStore = FileSearchDocumentDefaultRootStore.shared
     @ObservedObject private var applicationRootStore = FileSearchApplicationRootStore.shared
     @ObservedObject private var exclusionSettings = FileSearchExclusionSettings.shared
+    @ObservedObject private var translationCloudSettings = TranslationCloudSettings.shared
 
     @AppStorage("screenshot.scrollAutomatic") private var automaticScrolling = true
     @AppStorage("screenshot.scrollAutoDetectTarget") private var autoDetectScrollTarget = true
@@ -228,6 +232,7 @@ struct SettingsView: View {
     @State private var screenRecordingRestartRequired = false
     @State private var permissionMessage: String?
     @State private var hotKeyMessage: String?
+    @State private var hotKeyErrors: [ScreenshotGlobalHotKeyAction: String] = [:]
     @State private var fileIndexMessage: String?
     @State private var initialIndexProgress: FileSearchInitialIndexProgressSnapshot?
     @State private var indexMetadata: FileSearchIndexMetadata?
@@ -239,6 +244,10 @@ struct SettingsView: View {
     @State private var launchAtLoginMessage: String?
     @State private var showResetConfirmation = false
     @State private var showLanguageRestartPrompt = false
+    @State private var baiduSecretDraft = ""
+    @State private var googleAPIKeyDraft = ""
+    @State private var translationCredentialMessage: String?
+    @State private var translationCredentialMessageIsError = false
 
     var body: some View {
         TabView(selection: $selectedPane) {
@@ -253,6 +262,10 @@ struct SettingsView: View {
             shortcutsPage
                 .tabItem { Label(Pane.shortcuts.title, systemImage: Pane.shortcuts.systemImage) }
                 .tag(Pane.shortcuts)
+
+            translationPage
+                .tabItem { Label(Pane.translation.title, systemImage: Pane.translation.systemImage) }
+                .tag(Pane.translation)
 
             capturePage
                 .tabItem { Label(Pane.capture.title, systemImage: Pane.capture.systemImage) }
@@ -711,7 +724,7 @@ struct SettingsView: View {
     private var shortcutsPage: some View {
         settingsPage(
             title: L10n.tr("全局快捷键"),
-            subtitle: L10n.tr("统一管理文件查找和截图快捷键"),
+            subtitle: L10n.tr("统一管理文件查找、翻译和截图快捷键"),
             systemImage: "keyboard.fill"
         ) {
             settingsSection {
@@ -745,6 +758,185 @@ struct SettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var translationPage: some View {
+        settingsPage(
+            title: L10n.tr("PEEK 翻译"),
+            subtitle: L10n.tr("本地语言策略、启动入口与快捷键"),
+            systemImage: "character.book.closed.fill"
+        ) {
+            settingsSection(L10n.tr("使用方式")) {
+                settingsControlRow(
+                    L10n.tr("原文语言"),
+                    detail: L10n.tr("每次翻译时自动识别，也可以在翻译窗口中手动选择")
+                ) {
+                    Text(L10n.tr("自动检测"))
+                        .foregroundStyle(.secondary)
+                }
+                settingsControlRow(
+                    L10n.tr("默认目标语言"),
+                    detail: L10n.tr("默认使用当前 macOS 系统语言，可在翻译窗口中临时切换")
+                ) {
+                    Text(L10n.tr("跟随系统"))
+                        .foregroundStyle(.secondary)
+                }
+                settingsActionRow(L10n.tr("翻译使用独立浮窗，不会占用文件查找或截图界面。")) {
+                    Button(L10n.tr("打开翻译")) {
+                        TranslationPanelController.shared.show()
+                    }
+                }
+            }
+
+            settingsSection(L10n.tr("快捷键")) {
+                hotKeyRow(.translation)
+                if hotKeyManager.registrationStates[.translation] == .systemConflict {
+                    Label(
+                        L10n.tr("当前组合与系统或其他应用冲突，请在右侧直接录入新的组合。"),
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+            }
+
+            settingsSection(L10n.tr("百度翻译（可选）")) {
+                settingsControlRow(
+                    L10n.tr("启用百度翻译"),
+                    detail: L10n.tr("启用并配置后，点击“翻译”或按 Command + Enter 时，正文、语言、APP ID、salt 与签名会发送给百度")
+                ) {
+                    Toggle(
+                        L10n.tr("启用百度翻译"),
+                        isOn: $translationCloudSettings.baiduEnabled
+                    )
+                    .labelsHidden()
+                }
+                settingsControlRow(L10n.tr("APP ID")) {
+                    TextField(
+                        L10n.tr("输入百度翻译 APP ID"),
+                        text: $translationCloudSettings.baiduAppID
+                    )
+                    .textFieldStyle(.roundedBorder)
+                }
+                settingsControlRow(
+                    L10n.tr("密钥"),
+                    detail: translationCloudSettings.hasBaiduSecret
+                        ? L10n.tr("已保存在 macOS 钥匙串；仅用于本机生成签名，留空不会覆盖")
+                        : L10n.tr("密钥保存在 macOS 钥匙串，仅在本机生成请求签名；不会以明文发送给百度")
+                ) {
+                    SecureField(L10n.tr("输入百度翻译密钥"), text: $baiduSecretDraft)
+                        .textFieldStyle(.roundedBorder)
+                }
+                settingsActionRow(L10n.tr("使用百度翻译开放平台官方接口")) {
+                    HStack(spacing: 8) {
+                        if translationCloudSettings.hasBaiduSecret {
+                            Button(L10n.tr("移除密钥"), role: .destructive) {
+                                removeTranslationCredential(.baidu)
+                            }
+                        }
+                        Button(L10n.tr("保存配置")) {
+                            saveTranslationCredential(.baidu)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            settingsSection(L10n.tr("Google 翻译（可选）")) {
+                settingsControlRow(
+                    L10n.tr("启用 Google 翻译"),
+                    detail: L10n.tr("启用并配置后，点击“翻译”或按 Command + Enter 时，正文、语言和 API Key 会发送给 Google")
+                ) {
+                    Toggle(
+                        L10n.tr("启用 Google 翻译"),
+                        isOn: $translationCloudSettings.googleEnabled
+                    )
+                    .labelsHidden()
+                }
+                settingsControlRow(
+                    L10n.tr("API Key"),
+                    detail: translationCloudSettings.hasGoogleAPIKey
+                        ? L10n.tr("已保存在 macOS 钥匙串；调用时会发送给 Google 验证，留空不会覆盖")
+                        : L10n.tr("保存在 macOS 钥匙串；调用时会发送给 Google 验证")
+                ) {
+                    SecureField(L10n.tr("输入 Google Cloud Translation API Key"), text: $googleAPIKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                }
+                settingsActionRow(L10n.tr("使用 Google Cloud Translation Basic 官方接口")) {
+                    HStack(spacing: 8) {
+                        if translationCloudSettings.hasGoogleAPIKey {
+                            Button(L10n.tr("移除密钥"), role: .destructive) {
+                                removeTranslationCredential(.google)
+                            }
+                        }
+                        Button(L10n.tr("保存配置")) {
+                            saveTranslationCredential(.google)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
+            if let translationCredentialMessage {
+                Label(
+                    translationCredentialMessage,
+                    systemImage: translationCredentialMessageIsError
+                        ? "exclamationmark.circle.fill"
+                        : "checkmark.circle.fill"
+                )
+                .font(.callout)
+                .foregroundStyle(translationCredentialMessageIsError ? .orange : .green)
+                .padding(.horizontal, 4)
+            }
+
+            settingsSection(L10n.tr("隐私与兼容性")) {
+                Label(
+                    L10n.tr("Apple 本地翻译由 macOS 在本机处理；如果同时启用云翻译，同一次提交的正文仍会发送给所有已启用且配置完整的云服务商。"),
+                    systemImage: "lock.shield.fill"
+                )
+                Label(
+                    L10n.tr("仅在你点击“翻译”或按 Command + Enter 后，云服务商才会收到正文、语言信息和所需认证数据。请求不经过 PEEK 自有服务器；PEEK 不建立云端翻译历史，也不在应用日志中记录正文或凭据。"),
+                    systemImage: "network"
+                )
+                Label(
+                    L10n.tr("云翻译凭据保存在 macOS 钥匙串；服务商可能依据其条款处理数据，使用前请查看对应隐私政策。"),
+                    systemImage: "key.fill"
+                )
+                Label(
+                    L10n.tr("本地翻译需要 macOS 15 或更高版本；可用语言由系统管理。"),
+                    systemImage: "laptopcomputer"
+                )
+            }
+        }
+    }
+
+    private func saveTranslationCredential(_ provider: TranslationCloudProvider) {
+        do {
+            switch provider {
+            case .baidu:
+                try translationCloudSettings.saveCredential(baiduSecretDraft, for: provider)
+                baiduSecretDraft = ""
+            case .google:
+                try translationCloudSettings.saveCredential(googleAPIKeyDraft, for: provider)
+                googleAPIKeyDraft = ""
+            }
+            translationCredentialMessageIsError = false
+            translationCredentialMessage = L10n.tr("%@ 配置已保存", provider.title)
+        } catch {
+            translationCredentialMessageIsError = true
+            translationCredentialMessage = error.localizedDescription
+        }
+    }
+
+    private func removeTranslationCredential(_ provider: TranslationCloudProvider) {
+        do {
+            try translationCloudSettings.removeCredential(for: provider)
+            translationCredentialMessageIsError = false
+            translationCredentialMessage = L10n.tr("已移除 %@ 密钥", provider.title)
+        } catch {
+            translationCredentialMessageIsError = true
+            translationCredentialMessage = error.localizedDescription
         }
     }
 
@@ -952,6 +1144,25 @@ struct SettingsView: View {
                 Label(L10n.tr("正常启动只显示菜单栏图标，不打开普通主窗口。"), systemImage: "menubar.rectangle")
             }
 
+            settingsSection(L10n.tr("隐私与支持")) {
+                settingsActionRow(L10n.tr("了解 PEEK 如何处理数据、权限和第三方服务")) {
+                    if let privacyPolicyURL = URL(
+                        string: "https://github.com/ShawnShoper/peek/blob/master/PRIVACY.md"
+                    ) {
+                        Link(L10n.tr("隐私政策"), destination: privacyPolicyURL)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                settingsActionRow(L10n.tr("报告问题或获取使用帮助")) {
+                    if let supportURL = URL(
+                        string: "https://github.com/ShawnShoper/peek/issues"
+                    ) {
+                        Link(L10n.tr("支持与反馈"), destination: supportURL)
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+
             settingsSection(L10n.tr("诊断")) {
                 settingsActionRow(L10n.tr("不包含文件内容、截图或搜索词")) {
                     Button(L10n.tr("复制版本与索引信息")) { copyDiagnostics() }
@@ -1154,9 +1365,23 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
             Text(action.displayName)
             Spacer()
-            HotKeyRecorderView(shortcut: shortcut) { updateHotKey($0, for: action) }
+            HotKeyRecorderView(
+                shortcut: shortcut,
+                onRecordingChanged: { isRecording in
+                    if isRecording {
+                        hotKeyManager.beginRecordingShortcut(for: action)
+                    } else {
+                        hotKeyManager.endRecordingShortcut(for: action)
+                    }
+                },
+                onChange: { updateHotKey($0, for: action) }
+            )
                 .frame(width: 112, height: 28)
-            hotKeyStatus(shortcut: shortcut, state: state)
+            hotKeyStatus(
+                shortcut: shortcut,
+                state: state,
+                errorMessage: hotKeyErrors[action]
+            )
                 .font(.caption)
                 .frame(minWidth: 100, idealWidth: 150, alignment: .trailing)
         }
@@ -1165,9 +1390,14 @@ struct SettingsView: View {
     @ViewBuilder
     private func hotKeyStatus(
         shortcut: ScreenshotHotKey?,
-        state: ScreenshotHotKeyRegistrationState?
+        state: ScreenshotHotKeyRegistrationState?,
+        errorMessage: String?
     ) -> some View {
-        if shortcut == nil {
+        if let errorMessage {
+            Label(errorMessage, systemImage: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+        } else if shortcut == nil {
             Label(L10n.tr("已停用"), systemImage: "minus.circle").foregroundStyle(.secondary)
         } else if let state {
             switch state {
@@ -1956,7 +2186,7 @@ struct SettingsView: View {
     private func updateHotKey(
         _ shortcut: ScreenshotHotKey?,
         for action: ScreenshotGlobalHotKeyAction
-    ) {
+    ) -> Bool {
         do {
             if let shortcut {
                 try hotKeyManager.update(shortcut: shortcut, for: action)
@@ -1969,15 +2199,19 @@ struct SettingsView: View {
                 hotKeyManager.disable(action)
                 hotKeyMessage = L10n.tr("“%@”快捷键已停用", action.displayName)
             }
+            hotKeyErrors.removeValue(forKey: action)
+            return true
         } catch {
-            hotKeyMessage = error.localizedDescription
+            hotKeyErrors[action] = error.localizedDescription
             NSSound.beep()
+            return false
         }
     }
 
     private func restoreDefaultHotKeys() {
         do {
             try hotKeyManager.restoreDefaults()
+            hotKeyErrors.removeAll()
             hotKeyMessage = L10n.tr("已恢复默认快捷键")
         } catch {
             hotKeyMessage = error.localizedDescription
@@ -1991,6 +2225,7 @@ struct SettingsView: View {
         case .scrolling: return "rectangle.stack.badge.plus"
         case .ocr: return "text.viewfinder"
         case .search: return "magnifyingglass"
+        case .translation: return "character.book.closed"
         }
     }
 

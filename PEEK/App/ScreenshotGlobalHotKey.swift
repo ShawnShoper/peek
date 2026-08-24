@@ -7,8 +7,19 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
     case scrolling = 2
     case ocr = 3
     case search = 4
+    case translation = 5
 
     var id: UInt32 { rawValue }
+
+    var diagnosticName: String {
+        switch self {
+        case .region: return "region"
+        case .scrolling: return "scrolling"
+        case .ocr: return "ocr"
+        case .search: return "search"
+        case .translation: return "translation"
+        }
+    }
 
     var displayName: String {
         switch self {
@@ -20,6 +31,8 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
             return L10n.tr("截图 OCR")
         case .search:
             return L10n.tr("文件查找")
+        case .translation:
+            return L10n.tr("翻译")
         }
     }
 
@@ -36,6 +49,11 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
             return ScreenshotHotKey(
                 keyCode: UInt32(kVK_Space),
                 modifiers: UInt32(controlKey)
+            )
+        case .translation:
+            return ScreenshotHotKey(
+                keyCode: UInt32(kVK_ANSI_T),
+                modifiers: modifiers
             )
         }
     }
@@ -207,24 +225,28 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
     var scrolling: ScreenshotHotKey?
     var ocr: ScreenshotHotKey?
     var search: ScreenshotHotKey?
+    var translation: ScreenshotHotKey?
 
     init(
         region: ScreenshotHotKey?,
         scrolling: ScreenshotHotKey?,
         ocr: ScreenshotHotKey?,
-        search: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.search.defaultShortcut
+        search: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.search.defaultShortcut,
+        translation: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.translation.defaultShortcut
     ) {
         self.region = region
         self.scrolling = scrolling
         self.ocr = ocr
         self.search = search
+        self.translation = translation
     }
 
     static let defaults = ScreenshotHotKeyConfiguration(
         region: ScreenshotGlobalHotKeyAction.region.defaultShortcut,
         scrolling: ScreenshotGlobalHotKeyAction.scrolling.defaultShortcut,
         ocr: ScreenshotGlobalHotKeyAction.ocr.defaultShortcut,
-        search: ScreenshotGlobalHotKeyAction.search.defaultShortcut
+        search: ScreenshotGlobalHotKeyAction.search.defaultShortcut,
+        translation: ScreenshotGlobalHotKeyAction.translation.defaultShortcut
     )
 
     subscript(action: ScreenshotGlobalHotKeyAction) -> ScreenshotHotKey? {
@@ -234,6 +256,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             case .scrolling: return scrolling
             case .ocr: return ocr
             case .search: return search
+            case .translation: return translation
             }
         }
         set {
@@ -242,6 +265,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             case .scrolling: scrolling = newValue
             case .ocr: ocr = newValue
             case .search: search = newValue
+            case .translation: translation = newValue
             }
         }
     }
@@ -251,6 +275,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
         case scrolling
         case ocr
         case search
+        case translation
     }
 
     init(from decoder: Decoder) throws {
@@ -263,6 +288,10 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
         search = container.contains(.search)
             ? try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .search)
             : ScreenshotGlobalHotKeyAction.search.defaultShortcut
+        // Migrate configurations saved before the translation sub-app existed.
+        translation = container.contains(.translation)
+            ? try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .translation)
+            : ScreenshotGlobalHotKeyAction.translation.defaultShortcut
     }
 
     func encode(to encoder: Encoder) throws {
@@ -274,6 +303,11 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             try container.encode(search, forKey: .search)
         } else {
             try container.encodeNil(forKey: .search)
+        }
+        if let translation {
+            try container.encode(translation, forKey: .translation)
+        } else {
+            try container.encodeNil(forKey: .translation)
         }
     }
 
@@ -413,20 +447,37 @@ final class ScreenshotGlobalHotKeyManager: ObservableObject {
         let shortcut: ScreenshotHotKey
     }
 
+    private struct PendingInvocation: Sendable {
+        let sessionID: UUID
+        let callbackAtNanoseconds: UInt64
+        let eventAgeMilliseconds: Double
+    }
+
     private let signature: OSType = 0x41495348 // "AISH"
     private let userDefaults: UserDefaults
     private var eventHandler: EventHandlerRef?
     private var registrations: [ScreenshotGlobalHotKeyAction: Registration] = [:]
     private var actionsByEventID: [UInt32: ScreenshotGlobalHotKeyAction] = [:]
+    private var recordingAction: ScreenshotGlobalHotKeyAction?
     private var nextEventID: UInt32 = 1
-    private var actionHandler: (@MainActor (ScreenshotGlobalHotKeyAction) -> Void)?
+    private var actionHandler: (
+        @MainActor (
+            ScreenshotGlobalHotKeyAction,
+            ScreenshotCaptureDiagnosticSession
+        ) async -> Void
+    )?
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
         configuration = Self.loadConfiguration(from: userDefaults)
     }
 
-    func start(actionHandler: @escaping @MainActor (ScreenshotGlobalHotKeyAction) -> Void) {
+    func start(
+        actionHandler: @escaping @MainActor (
+            ScreenshotGlobalHotKeyAction,
+            ScreenshotCaptureDiagnosticSession
+        ) async -> Void
+    ) {
         self.actionHandler = actionHandler
         do {
             try installEventHandlerIfNeeded()
@@ -479,6 +530,7 @@ final class ScreenshotGlobalHotKeyManager: ObservableObject {
         registrations.removeAll()
         actionsByEventID.removeAll()
         registrationStates.removeAll()
+        recordingAction = nil
         if let eventHandler {
             RemoveEventHandler(eventHandler)
             self.eventHandler = nil
@@ -488,6 +540,49 @@ final class ScreenshotGlobalHotKeyManager: ObservableObject {
 
     func shortcut(for action: ScreenshotGlobalHotKeyAction) -> ScreenshotHotKey? {
         configuration[action]
+    }
+
+    /// Temporarily releases only the shortcut being edited. Carbon receives an
+    /// exclusive hot key before AppKit, so leaving that previous registration
+    /// active would prevent the recorder from seeing the same combination.
+    func beginRecordingShortcut(for action: ScreenshotGlobalHotKeyAction) {
+        guard recordingAction == nil else { return }
+        recordingAction = action
+        if let registration = registrations.removeValue(forKey: action) {
+            UnregisterEventHotKey(registration.reference)
+            actionsByEventID.removeValue(forKey: registration.eventID)
+        }
+    }
+
+    /// Restores the edited shortcut after accepting or cancelling a
+    /// recording. Configuration is persisted only by `update`/`disable`, so a
+    /// cancelled or rejected candidate always restores the previous shortcut.
+    func endRecordingShortcut(for action: ScreenshotGlobalHotKeyAction) {
+        guard recordingAction == action else { return }
+        recordingAction = nil
+        guard actionHandler != nil,
+              registrations[action] == nil,
+              let shortcut = configuration[action] else {
+            if configuration[action] == nil {
+                registrationStates.removeValue(forKey: action)
+            }
+            return
+        }
+        do {
+            let registration = try register(shortcut, for: action)
+            registrations[action] = registration
+            registrationStates[action] = .success
+        } catch let error as ScreenshotGlobalHotKeyManagerError {
+            switch error {
+            case .systemShortcutConflict:
+                registrationStates[action] = .systemConflict
+            case .registrationFailed(_, let status),
+                 .eventHandlerInstallationFailed(let status):
+                registrationStates[action] = .failure(status)
+            }
+        } catch {
+            registrationStates[action] = .failure(OSStatus(paramErr))
+        }
     }
 
     func update(
@@ -625,8 +720,29 @@ final class ScreenshotGlobalHotKeyManager: ObservableObject {
                     .takeUnretainedValue()
                 let signature = identifier.signature
                 let eventID = identifier.id
+                let sessionID = UUID()
+                let callbackAtNanoseconds = ScreenshotCaptureDiagnostics.nowNanoseconds()
+                let eventAgeMilliseconds = ScreenshotCaptureDiagnostics
+                    .carbonEventAgeMilliseconds(
+                        eventTime: GetEventTime(event),
+                        systemUptime: ProcessInfo.processInfo.systemUptime
+                    )
+                ScreenshotCaptureDiagnostics.recordCarbonCallback(
+                    sessionID: sessionID,
+                    eventID: eventID,
+                    eventAgeMilliseconds: eventAgeMilliseconds
+                )
+                let invocation = PendingInvocation(
+                    sessionID: sessionID,
+                    callbackAtNanoseconds: callbackAtNanoseconds,
+                    eventAgeMilliseconds: eventAgeMilliseconds
+                )
                 Task { @MainActor in
-                    manager.dispatch(signature: signature, eventID: eventID)
+                    await manager.dispatch(
+                        signature: signature,
+                        eventID: eventID,
+                        invocation: invocation
+                    )
                 }
                 return noErr
             },
@@ -700,12 +816,32 @@ final class ScreenshotGlobalHotKeyManager: ObservableObject {
         return result
     }
 
-    private func dispatch(signature: OSType, eventID: UInt32) {
+    private func dispatch(
+        signature: OSType,
+        eventID: UInt32,
+        invocation: PendingInvocation
+    ) async {
         guard signature == self.signature,
               let action = actionsByEventID[eventID] else {
             return
         }
-        actionHandler?(action)
+        let session = ScreenshotCaptureDiagnosticSession(
+            id: invocation.sessionID,
+            source: "hotKey",
+            action: action.diagnosticName,
+            startedAtNanoseconds: invocation.callbackAtNanoseconds
+        )
+        let mainActorStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
+        let queueMilliseconds = ScreenshotCaptureDiagnostics.milliseconds(
+            from: invocation.callbackAtNanoseconds,
+            to: mainActorStartedAt
+        )
+        ScreenshotCaptureDiagnostics.record(
+            "main_actor_dispatch",
+            session: session,
+            detail: "queue_ms=\(String(format: "%.2f", queueMilliseconds)) event_age_ms=\(String(format: "%.2f", invocation.eventAgeMilliseconds))"
+        )
+        await actionHandler?(action, session)
     }
 
     private func persistConfiguration() {
