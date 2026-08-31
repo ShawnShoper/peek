@@ -13,9 +13,9 @@ fi
 
 source_revision="$(git -C "$project_root" rev-parse --verify HEAD)"
 if ! security find-identity -v -p codesigning | grep -Eq \
-  'Apple (Development|Distribution): .+ \([A-Z0-9]+\)'; then
-  echo "No valid Apple code-signing identity is available in the active keychains." >&2
-  echo "Repair the certificate and trust chain in Xcode before creating an App Store archive." >&2
+  'Apple Distribution: .+ \(4DXU5FSLLY\)'; then
+  echo "No valid Apple Distribution identity for Team 4DXU5FSLLY is available in the active keychains." >&2
+  echo "Create or repair the distribution certificate in Xcode before creating an App Store archive." >&2
   exit 69
 fi
 
@@ -40,4 +40,4 @@ print -r -- "$source_revision" > "${archive_path}.source-revision.txt"
 
 echo "Archive created at: $archive_path"
 echo "Source revision: $source_revision"
-echo "Export or upload it from Xcode Organizer with the App Store Connect distribution profile."
+echo "Upload it from Xcode Organizer using TestFlight & App Store automatic distribution signing."

@@ -8,6 +8,24 @@
   一款简单、安静、只在本机工作的 macOS 查找与截图工具。
 </p>
 
+<p align="center">
+  <a href="https://github.com/ShawnShoper/peek/releases/latest"><strong>下载最新版</strong></a>
+  ·
+  <a href="https://github.com/ShawnShoper/peek/releases">版本记录</a>
+  ·
+  <a href="https://github.com/ShawnShoper/peek/issues">问题反馈</a>
+</p>
+
+## 下载与安装
+
+PEEK 支持 macOS 13 Ventura 及以上版本，安装包同时支持 Apple Silicon 和 Intel Mac。
+
+- **GitHub Release**：提供 Apple Developer ID 签名并经 Apple 公证的 `.dmg` 和 `.zip`。推荐普通用户下载 `.dmg`，打开后将 PEEK 拖入“应用程序”文件夹。
+- **Mac App Store**：商店版本通过 Apple Distribution 签名并由 App Store 分发；上架后可直接从 Mac App Store 安装和更新。
+- **完整性校验**：每个 GitHub Release 都附带 `SHA256SUMS.txt`，可运行 `shasum -a 256 -c SHA256SUMS.txt` 核对下载文件。
+
+PEEK 是菜单栏应用。启动后请在屏幕顶部菜单栏寻找 PEEK 图标，不会自动出现普通主窗口。
+
 PEEK 常驻在 Mac 菜单栏，需要时一键出现，用完即走。它可以帮你快速找到应用、文件和文件夹，也能完成区域截图、图片标注、马赛克、文字识别、二维码识别、滚动长截图和本地翻译。
 
 你的搜索词、文件索引、截图和识别结果默认只保留在本机，不会上传到云端。
@@ -169,3 +187,7 @@ PEEK 只能搜索你明确授权的个人目录。系统应用目录会自动用
 完整的数据处理、保留、删除和权限撤回说明，请阅读[《PEEK 隐私政策 / Privacy Policy》](https://github.com/ShawnShoper/peek/blob/master/PRIVACY.md)。如需帮助，请前往 [PEEK GitHub Issues](https://github.com/ShawnShoper/peek/issues)。
 
 PEEK 支持 macOS 13 及以上版本，并提供简体中文和 English 界面。
+
+## 开源许可
+
+PEEK 源代码按 [Apache License 2.0](LICENSE) 发布。应用名称、图标和其他品牌素材的使用仍应遵守适用的商标与版权规则。
