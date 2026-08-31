@@ -51,12 +51,10 @@ final class FileSearchPanelProvider: SearchPanelProviding {
                         var items = rankedResults
                             .prefix(preferences.resultLimit)
                             .map(Self.panelItem)
-                        let builtInItems = [
-                            PEEKTranslateSearchRegistration.item(
-                                matching: query,
-                                category: category
-                            )
-                        ].compactMap { $0 }
+                        let builtInItems = PEEKBuiltInSearchRegistration.items(
+                            matching: query,
+                            category: category
+                        )
                         if !builtInItems.isEmpty {
                             let identifiers = Set(builtInItems.map(\.id))
                             items.removeAll { identifiers.contains($0.id) }

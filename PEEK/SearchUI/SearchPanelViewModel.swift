@@ -107,11 +107,15 @@ final class SearchPanelViewModel: ObservableObject {
                 : .documents
             return results.isEmpty ? [] : [SearchPanelResultGroup(kind: kind, items: results)]
         }
-        let applications = results.filter { $0.category == .applications }
+        let tools = results.filter { $0.launchBehavior.isPEEKBuiltInTool }
+        let applications = results.filter {
+            $0.category == .applications && !$0.launchBehavior.isPEEKBuiltInTool
+        }
         let documents = results.filter {
             $0.category == .files || $0.category == .folders
         }
         return [
+            SearchPanelResultGroup(kind: .tools, items: tools),
             SearchPanelResultGroup(kind: .applications, items: applications),
             SearchPanelResultGroup(kind: .documents, items: documents)
         ].filter { !$0.items.isEmpty }
@@ -375,6 +379,13 @@ final class SearchPanelViewModel: ObservableObject {
         isPerformingAction = true
         errorMessage = nil
         feedbackMessage = nil
+        if action == .open,
+           item.category == .applications,
+           item.launchBehavior == .fileURL {
+            // Match Spotlight-style launch behavior: hide immediately so a
+            // cold application launch never makes the search panel feel stuck.
+            onRequestClose?()
+        }
         let actionHandler = actionHandler
         let provider = provider
         let blocksBackgroundIndex = action == .moveTo || action == .copyTo
@@ -389,18 +400,31 @@ final class SearchPanelViewModel: ObservableObject {
             }
             do {
                 let feedback = try await actionHandler.perform(action, item: item)
+                var indexRefreshFailed = false
                 if let destinationURL = feedback.updatedURL {
-                    if action == .moveTo {
-                        try await provider.didMoveItem(
-                            from: item.url,
-                            to: destinationURL
-                        )
-                    } else if action == .copyTo {
-                        try await provider.didCopyItem(to: destinationURL)
+                    do {
+                        if feedback.fileSystemMutation == .moved {
+                            try await provider.didMoveItem(
+                                from: item.url,
+                                to: destinationURL
+                            )
+                        } else if feedback.fileSystemMutation == .copied {
+                            try await provider.didCopyItem(to: destinationURL)
+                        }
+                    } catch {
+                        // The file-system transaction already succeeded. An
+                        // index refresh failure must not be reported as if the
+                        // user's copy or move failed.
+                        indexRefreshFailed = true
                     }
                 }
                 guard !Task.isCancelled, let self else { return }
                 self.finishAction(action, item: item, feedback: feedback)
+                if indexRefreshFailed {
+                    self.errorMessage = L10n.tr(
+                        "本地搜索索引暂时不可用，请稍后重试或在设置中重新构建索引"
+                    )
+                }
             } catch SearchPanelActionError.destinationCancelled {
                 guard !Task.isCancelled, let self else { return }
                 self.finishActionWithCancellation()
@@ -423,11 +447,11 @@ final class SearchPanelViewModel: ObservableObject {
         isPerformingAction = false
         actionTask = nil
         feedbackMessage = feedback.message
-        if action == .moveTo {
+        if feedback.fileSystemMutation == .moved {
             results.removeAll { $0.id == item.id }
             selectedItemID = results.first?.id
             scheduleSearch(immediately: true)
-        } else if action == .copyTo {
+        } else if feedback.fileSystemMutation == .copied {
             scheduleSearch(immediately: true)
         }
         if action == .open {
@@ -613,9 +637,10 @@ final class SearchPanelViewModel: ObservableObject {
             let includeHidden = includesHiddenFiles
             let url = item.url
             previewTask = Task { @MainActor [weak self] in
-                let entries = await Task.detached(priority: .userInitiated) {
-                    Self.folderEntries(at: url, includeHidden: includeHidden)
-                }.value
+                let entries = await Self.loadFolderEntries(
+                    at: url,
+                    includeHidden: includeHidden
+                )
                 guard !Task.isCancelled,
                       let self,
                       self.previewGeneration == generation,
@@ -742,26 +767,57 @@ final class SearchPanelViewModel: ObservableObject {
         }
     }
 
+    private nonisolated static func loadFolderEntries(
+        at url: URL,
+        includeHidden: Bool
+    ) async -> [SearchPanelFolderEntry] {
+        let worker = Task.detached(priority: .userInitiated) {
+            try Self.folderEntries(at: url, includeHidden: includeHidden)
+        }
+        return await withTaskCancellationHandler {
+            (try? await worker.value) ?? []
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+
     private nonisolated static func folderEntries(
         at url: URL,
         includeHidden: Bool
-    ) -> [SearchPanelFolderEntry] {
+    ) throws -> [SearchPanelFolderEntry] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isHiddenKey, .nameKey]
-        guard let urls = try? FileManager.default.contentsOfDirectory(
+        var options: FileManager.DirectoryEnumerationOptions = [
+            .skipsSubdirectoryDescendants,
+            .skipsPackageDescendants,
+        ]
+        if !includeHidden {
+            options.insert(.skipsHiddenFiles)
+        }
+        guard let enumerator = FileManager.default.enumerator(
             at: url,
             includingPropertiesForKeys: keys,
-            options: []
+            options: options,
+            errorHandler: { _, _ in true }
         ) else { return [] }
-        return urls.compactMap { child in
+
+        // A preview is deliberately bounded. Reading and sorting every child
+        // of a 100k-item directory makes keyboard navigation appear frozen.
+        // The first 160 candidates provide a useful stable preview while
+        // keeping metadata I/O and memory predictable.
+        var entries: [SearchPanelFolderEntry] = []
+        entries.reserveCapacity(160)
+        while let child = enumerator.nextObject() as? URL,
+              entries.count < 160 {
+            try Task.checkCancellation()
             let values = try? child.resourceValues(forKeys: Set(keys))
-            guard includeHidden || values?.isHidden != true else { return nil }
-            return SearchPanelFolderEntry(
+            guard includeHidden || values?.isHidden != true else { continue }
+            entries.append(SearchPanelFolderEntry(
                 url: child,
                 displayName: values?.name ?? child.lastPathComponent,
                 isDirectory: values?.isDirectory == true
-            )
+            ))
         }
-        .sorted { lhs, rhs in
+        return entries.sorted { lhs, rhs in
             if lhs.isDirectory != rhs.isDirectory { return lhs.isDirectory }
             return lhs.displayName.localizedStandardCompare(rhs.displayName)
                 == .orderedAscending

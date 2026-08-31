@@ -48,7 +48,24 @@ xcodebuild \
 
 lipo "$release_app/Contents/MacOS/PEEK" -verify_arch x86_64 arm64
 test -f "$release_app/Contents/Resources/Assets.car"
+test -s "$release_app/Contents/Resources/PrivacyPolicy.zh-Hans.md"
+test -s "$release_app/Contents/Resources/PrivacyPolicy.en.md"
+test -s "$release_app/Contents/Resources/PrivacyInfo.xcprivacy"
+plutil -lint "$project_root/PEEK/Resources/PrivacyInfo.xcprivacy" >/dev/null
+plutil -lint "$release_app/Contents/Resources/PrivacyInfo.xcprivacy" >/dev/null
+"$project_root/scripts/verify-privacy-manifest.sh" \
+  "$project_root/PEEK/Resources/PrivacyInfo.xcprivacy"
+"$project_root/scripts/verify-privacy-manifest.sh" \
+  "$release_app/Contents/Resources/PrivacyInfo.xcprivacy"
+if grep -Fq \
+  'https://github.com/ShawnShoper/peek/blob/master/PRIVACY.md' \
+  "$project_root/PEEK/Views/SettingsView.swift"; then
+  echo "Settings must open the bundled privacy policy instead of GitHub." >&2
+  exit 1
+fi
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")" = "0.3.0"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$release_app/Contents/Info.plist")" = "3"
+test "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$release_app/Contents/Info.plist")" = "public.app-category.productivity"
+test "$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$release_app/Contents/Info.plist")" = "false"
 
-echo "PEEK verification passed: localization, tests, Release Analyze, Universal 2, AppIcon assets, version 0.3.0 (3)."
+echo "PEEK verification passed: localization, tests, Release Analyze, Universal 2, AppIcon assets, bundled privacy policies, privacy manifest, version 0.3.0 (3)."

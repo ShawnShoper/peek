@@ -2,7 +2,6 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import Security
 
 /// The coordinate source used to resolve a scrolling-capture target.
 enum ScrollCaptureTargetSource: String, Equatable, Sendable {
@@ -779,10 +778,8 @@ struct ScrollCaptureTargetResolver {
         // A signed Mac App Store build therefore fails closed to the existing
         // WindowServer whole-window preselection instead of attempting a
         // restricted API or requesting a temporary exception.
-        guard !isAppSandboxEnabled else { return nil }
-        // Read the current TCC state only. Never request or prompt from an
-        // automatic capture path.
-        guard AXIsProcessTrusted() else { return nil }
+        guard ScrollCaptureRuntimeCapabilities.current
+            .supportsCrossProcessAccessibilityInspection else { return nil }
 
         let application = AXUIElementCreateApplication(ownerPID)
         // AX calls are synchronous. Bound every request and the traversal so
@@ -838,18 +835,6 @@ struct ScrollCaptureTargetResolver {
             didHitTestFocusedWindow: resolvedHitTestPoint != nil
         )
     }
-
-    private nonisolated static let isAppSandboxEnabled: Bool = {
-        guard let task = SecTaskCreateFromSelf(nil),
-              let value = SecTaskCopyValueForEntitlement(
-                task,
-                "com.apple.security.app-sandbox" as CFString,
-                nil
-              ) else {
-            return false
-        }
-        return (value as? Bool) == true
-    }()
 
     /// Directly hit-tests the pointer in the target process and walks the AX
     /// parent chain from the deepest element outward. The first scrolling role

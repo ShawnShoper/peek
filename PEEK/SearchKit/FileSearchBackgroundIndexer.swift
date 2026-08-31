@@ -573,14 +573,13 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             guard try await waitForActivityGate(policy: policy) else {
                 throw FileSearchBackgroundIndexControl.deferred
             }
-            guard try await sink.purgeObsoleteEntries(
+            await Task.yield()
+            let deletedCount = try await sink.purgeObsoleteEntries(
                 for: token,
-                limit: 1_000
-            ) else { break }
-            // One batched SQLite DELETE is not equivalent to 1,000 separate
-            // filesystem metadata reads. Count it as one execution batch;
-            // process CPU time still captures the real database work.
-            try await policy.ioBudget.throttleAfterProcessing(policy.batchSize)
+                limit: 256
+            )
+            guard deletedCount > 0 else { break }
+            try await policy.ioBudget.throttleAfterProcessing(deletedCount)
             try await policy.cpuBudget.throttleAfterBatch()
         }
     }
@@ -597,10 +596,10 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             guard try await waitForActivityGate(policy: policy) else {
                 throw FileSearchBackgroundIndexControl.deferred
             }
-            guard try await sink.purgeOrphanedEntries(limit: 1_000) else {
-                break
-            }
-            try await policy.ioBudget.throttleAfterProcessing(policy.batchSize)
+            await Task.yield()
+            let deletedCount = try await sink.purgeOrphanedEntries(limit: 256)
+            guard deletedCount > 0 else { break }
+            try await policy.ioBudget.throttleAfterProcessing(deletedCount)
             try await policy.cpuBudget.throttleAfterBatch()
         }
     }
@@ -697,7 +696,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                 )
                 continue
             }
-            if Self.shouldSkipDescendants(of: url) {
+            if Self.shouldSkipDescendants(of: url, scanningRoot: root.url) {
                 enumerator.skipDescendants()
                 result.statistics.skippedGeneratedDirectories += 1
                 try await throttleIfNeededAfterVisit(
@@ -818,8 +817,8 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
     }
 
     /// The commit batch can be large during the first index, but explicit PEEK
-    /// work must preempt traversal much sooner. This checkpoint only observes
-    /// the activity gate; it does not flush SQLite or change index throughput.
+    /// work must preempt traversal much sooner. This checkpoint observes the
+    /// activity gate and accounts for traversal CPU without flushing SQLite.
     private func checkActivityAfterVisitIfNeeded(
         _ visitedCount: Int,
         policy: FileSearchIndexExecutionPolicy
@@ -830,6 +829,13 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         guard try await waitForActivityGate(policy: policy) else {
             throw FileSearchBackgroundIndexControl.deferred
         }
+        // The 60-second feedback budget keeps average CPU low, but waiting
+        // only after a complete SQLite batch still permits a visible one-second
+        // burst during metadata-heavy traversal. Account for CPU every small
+        // activity checkpoint as well (16 entries by default). The later batch
+        // throttle observes the same baseline, so this does not double-sleep;
+        // it simply bounds how much traversal work can run before yielding.
+        try await policy.cpuBudget.throttleAfterBatch()
     }
 
     private func flush(
@@ -846,6 +852,10 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         await initialIndexProgress.recordPaths(
             batch.suffix(8).map { $0.url.path }
         )
+        // Yield before the first SQLite write as well as subsequent batches.
+        // The feedback budget remains authoritative, while this prevents a
+        // newly-started fast pass from monopolizing its executor immediately.
+        await Task.yield()
         try await sink.upsert(batch, in: token)
         await initialIndexProgress.recordIndexed(indexedCount)
         batch.removeAll(keepingCapacity: true)
@@ -937,7 +947,10 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             .filter { seen.insert($0.url.path).inserted }
     }
 
-    private nonisolated static func shouldSkipDescendants(of url: URL) -> Bool {
+    private nonisolated static func shouldSkipDescendants(
+        of url: URL,
+        scanningRoot rootURL: URL
+    ) -> Bool {
         let name = url.lastPathComponent.lowercased()
         if [
             "node_modules", "deriveddata", ".build", "caches",
@@ -945,11 +958,20 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         ].contains(name) {
             return true
         }
-        let path = url.path.lowercased()
+        let path = url.standardizedFileURL.path.lowercased()
+        let rootPath = rootURL.standardizedFileURL.path.lowercased()
+        // Skip app-container trees when they are encountered below a broad
+        // authorized root. If the user explicitly selected a directory that
+        // is already inside a container (also true for sandboxed test roots),
+        // honor that narrower authorization instead of rejecting every child.
+        let entersContainers = path.contains("/library/containers/")
+            && !rootPath.contains("/library/containers/")
+        let entersGroupContainers = path.contains("/library/group containers/")
+            && !rootPath.contains("/library/group containers/")
         return path.hasSuffix("/.git/objects")
             || path.hasSuffix("/.git/lfs/objects")
-            || path.contains("/library/containers/")
-            || path.contains("/library/group containers/")
+            || entersContainers
+            || entersGroupContainers
     }
 
     private nonisolated static func path(

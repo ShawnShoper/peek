@@ -55,6 +55,7 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
 
     private var firstRunTask: Task<Void, Never>?
     private var activeRunTask: Task<FileSearchBackgroundIndexRunResult, Never>?
+    private var activeRunID: UUID?
     private var isStarted = false
 
     init(
@@ -134,6 +135,7 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         firstRunTask = nil
         activeRunTask?.cancel()
         activeRunTask = nil
+        activeRunID = nil
         scheduler.invalidate()
     }
 
@@ -211,9 +213,17 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
                 requestedRootPaths: requestedRootPaths
             )
         }
+        let runID = UUID()
         activeRunTask = task
+        activeRunID = runID
         let result = await task.value
+
+        // `stop()` can cancel this run and a manual/restarted run can begin
+        // while the cancelled indexer is still unwinding. Only the task that
+        // still owns the slot may clear it or publish full-index metadata.
+        guard activeRunID == runID else { return result }
         activeRunTask = nil
+        activeRunID = nil
 
         if case let .completed(mode: .full, roots, _) = result,
            roots > 0 {

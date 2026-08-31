@@ -1,43 +1,19 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import UniformTypeIdentifiers
+
+enum PEEKSettingsIndexRefreshPolicy {
+    static func shouldRefresh(
+        windowIsVisible: Bool,
+        destination: PEEKSettingsDestination
+    ) -> Bool {
+        windowIsVisible && destination == .search
+    }
+}
 
 struct SettingsView: View {
-    private enum Pane: String, CaseIterable, Identifiable {
-        case general
-        case search
-        case shortcuts
-        case translation
-        case capture
-        case appearance
-        case about
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .general: return L10n.tr("通用")
-            case .search: return L10n.tr("搜索")
-            case .shortcuts: return L10n.tr("快捷键")
-            case .translation: return L10n.tr("翻译")
-            case .capture: return L10n.tr("截图")
-            case .appearance: return L10n.tr("外观")
-            case .about: return L10n.tr("关于")
-            }
-        }
-
-        var systemImage: String {
-            switch self {
-            case .general: return "gearshape"
-            case .search: return "magnifyingglass"
-            case .shortcuts: return "keyboard"
-            case .translation: return "character.book.closed"
-            case .capture: return "viewfinder.circle"
-            case .appearance: return "paintpalette"
-            case .about: return "info.circle"
-            }
-        }
-    }
+    private typealias Pane = PEEKSettingsDestination
 
     private enum SearchPane: String, CaseIterable, Identifiable {
         case documents
@@ -191,12 +167,16 @@ struct SettingsView: View {
     }
 
     @EnvironmentObject private var screenshotService: ScreenshotService
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var hotKeyManager = ScreenshotGlobalHotKeyManager.shared
+    @ObservedObject private var clipboardHistoryMonitor = ClipboardHistoryMonitor.shared
     @ObservedObject private var authorizedRootStore = FileSearchAuthorizedRootStore.shared
     @ObservedObject private var documentDefaultRootStore = FileSearchDocumentDefaultRootStore.shared
     @ObservedObject private var applicationRootStore = FileSearchApplicationRootStore.shared
     @ObservedObject private var exclusionSettings = FileSearchExclusionSettings.shared
     @ObservedObject private var translationCloudSettings = TranslationCloudSettings.shared
+    @ObservedObject private var routeCoordinator = PEEKSettingsRouteCoordinator.shared
+    @ObservedObject private var windowVisibility = PEEKSettingsWindowVisibility.shared
 
     @AppStorage("screenshot.scrollAutomatic") private var automaticScrolling = true
     @AppStorage("screenshot.scrollAutoDetectTarget") private var autoDetectScrollTarget = true
@@ -238,16 +218,21 @@ struct SettingsView: View {
     @State private var indexMetadata: FileSearchIndexMetadata?
     @State private var rootIndexStatuses: [String: FileSearchRootIndexStatus] = [:]
     @State private var selectedDocumentDirectoryID: String?
-    @State private var indexDatabaseSize: Int64?
     @State private var queuedRootRefreshPaths: Set<String> = []
     @State private var launchAtLoginEnabled = false
     @State private var launchAtLoginMessage: String?
     @State private var showResetConfirmation = false
+    @State private var showClearClipboardConfirmation = false
     @State private var showLanguageRestartPrompt = false
+    @State private var showPrivacyPolicy = false
+    @State private var showOnboardingGuide = false
+    @State private var onboardingTarget = OnboardingGuideTarget.settingsTabs
     @State private var baiduSecretDraft = ""
     @State private var googleAPIKeyDraft = ""
     @State private var translationCredentialMessage: String?
     @State private var translationCredentialMessageIsError = false
+    @State private var diagnosticExportMessage: String?
+    @State private var diagnosticExportMessageIsError = false
 
     var body: some View {
         TabView(selection: $selectedPane) {
@@ -258,6 +243,10 @@ struct SettingsView: View {
             searchPage
                 .tabItem { Label(Pane.search.title, systemImage: Pane.search.systemImage) }
                 .tag(Pane.search)
+
+            clipboardPage
+                .tabItem { Label(Pane.clipboard.title, systemImage: Pane.clipboard.systemImage) }
+                .tag(Pane.clipboard)
 
             shortcutsPage
                 .tabItem { Label(Pane.shortcuts.title, systemImage: Pane.shortcuts.systemImage) }
@@ -279,6 +268,11 @@ struct SettingsView: View {
                 .tabItem { Label(Pane.about.title, systemImage: Pane.about.systemImage) }
                 .tag(Pane.about)
         }
+        // While the guide is active, only its own controls (including the
+        // explicit directory-authorization action) may receive input. This
+        // also keeps keyboard focus and VoiceOver away from obscured controls.
+        .disabled(showOnboardingGuide)
+        .accessibilityHidden(showOnboardingGuide)
         .onChange(of: appearanceModeRaw) { rawValue in
             PEEKAppearanceController.apply(
                 PEEKAppearanceMode(rawValue: rawValue) ?? .system
@@ -286,19 +280,25 @@ struct SettingsView: View {
         }
         .task {
             applyPendingSettingsRoute()
+            presentPendingOnboardingIfNeeded()
             refreshPermissionState()
             refreshLaunchAtLoginState()
             authorizedRootStore.refresh()
             applicationRootStore.refresh()
+        }
+        .task(id: shouldRefreshIndexStatus) {
+            guard shouldRefreshIndexStatus else { return }
             while !Task.isCancelled {
                 await refreshIndexStatus()
-                try? await Task<Never, Never>.sleep(nanoseconds: 1_000_000_000)
+                do {
+                    try await Task<Never, Never>.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    return
+                }
             }
         }
-        .onReceive(
-            NotificationCenter.default.publisher(for: .peekOpenDocumentSearchSettings)
-        ) { _ in
-            showDocumentSearchSettings()
+        .onChange(of: routeCoordinator.revision) { _ in
+            applyPendingSettingsRoute()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionState()
@@ -320,11 +320,41 @@ struct SettingsView: View {
         } message: {
             Text(L10n.tr("将恢复通用、搜索、外观、截图和快捷键设置，不会删除授权目录或现有索引。"))
         }
+        .confirmationDialog(
+            L10n.tr("清空全部剪贴板历史？"),
+            isPresented: $showClearClipboardConfirmation
+        ) {
+            Button(L10n.tr("清空全部记录"), role: .destructive) {
+                clipboardHistoryMonitor.clear()
+            }
+            Button(L10n.tr("取消"), role: .cancel) {}
+        } message: {
+            Text(L10n.tr("这会永久删除 PEEK 本地保存的剪贴板内容，无法撤销。"))
+        }
         .alert(L10n.tr("需要重新启动 PEEK"), isPresented: $showLanguageRestartPrompt) {
             Button(L10n.tr("稍后"), role: .cancel) {}
             Button(L10n.tr("退出 PEEK")) { NSApp.terminate(nil) }
         } message: {
             Text(L10n.tr("语言已保存。完全退出并重新打开 PEEK 后，菜单栏、搜索、截图与设置界面会统一使用新语言。"))
+        }
+        .sheet(isPresented: $showPrivacyPolicy) {
+            // Bundle.main reflects the language used by the running process.
+            // A newly selected language remains pending until the requested restart.
+            PrivacyPolicyView(appLanguage: .system)
+        }
+        .overlayPreferenceValue(OnboardingGuideTargetPreferenceKey.self) { anchors in
+            if showOnboardingGuide {
+                OnboardingGuideView(
+                    targetAnchors: anchors,
+                    onNavigate: navigateOnboarding,
+                    onTargetChange: { onboardingTarget = $0 },
+                    onAuthorizeDocuments: authorizeDocumentsFromOnboarding,
+                    onComplete: completeOnboarding,
+                    onSkip: completeOnboarding
+                )
+                .transition(.opacity)
+                .zIndex(100)
+            }
         }
     }
 
@@ -342,13 +372,17 @@ struct SettingsView: View {
                     ))
                     .labelsHidden()
                 }
-                Label(L10n.tr("应用启动后只显示菜单栏图标，不自动打开普通窗口。"), systemImage: "menubar.rectangle")
+                Label(
+                    L10n.tr("除首次使用引导外，应用启动后只显示菜单栏图标，不自动打开普通窗口。"),
+                    systemImage: "menubar.rectangle"
+                )
                 if let launchAtLoginMessage {
                     Label(launchAtLoginMessage, systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
+            .onboardingGuideTarget(.settingsTabs)
 
             settingsSection(L10n.tr("查找窗口")) {
                 settingsControlRow(L10n.tr("窗口出现屏幕")) {
@@ -509,6 +543,7 @@ struct SettingsView: View {
             .padding(.horizontal, 20)
             .padding(.top, 18)
             .padding(.bottom, 14)
+            .onboardingGuideTarget(.documentSearch)
 
             VStack(spacing: 0) {
                 documentDirectoryTableHeader
@@ -735,7 +770,13 @@ struct SettingsView: View {
 
             settingsSection(L10n.tr("快捷键")) {
                 ForEach(ScreenshotGlobalHotKeyAction.allCases) { action in
-                    hotKeyRow(action)
+                    if action == .region {
+                        hotKeyRow(action)
+                            .id(OnboardingGuideTarget.shortcutRecorder)
+                            .onboardingGuideTarget(.shortcutRecorder)
+                    } else {
+                        hotKeyRow(action)
+                    }
                 }
             }
 
@@ -755,6 +796,107 @@ struct SettingsView: View {
                     .foregroundStyle(.orange)
                 }
                 Text(L10n.tr("保存前会检查 PEEK 内部重复、菜单占用、可读取的 macOS 系统快捷键和 Carbon 独占冲突。"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var clipboardPage: some View {
+        settingsPage(
+            title: L10n.tr("剪贴板历史"),
+            subtitle: L10n.tr("在本机保留最近 100 条复制内容"),
+            systemImage: "clipboard.fill"
+        ) {
+            settingsSection(L10n.tr("记录")) {
+                settingsControlRow(
+                    L10n.tr("启用剪贴板历史"),
+                    detail: L10n.tr("支持文字、富文本、图片、链接、文件和文件夹；关闭后已有记录仍会保留。")
+                ) {
+                    Toggle(
+                        L10n.tr("启用剪贴板历史"),
+                        isOn: Binding(
+                            get: { clipboardHistoryMonitor.isEnabled },
+                            set: { clipboardHistoryMonitor.setEnabled($0) }
+                        )
+                    )
+                    .labelsHidden()
+                }
+                settingsActionRow(
+                    L10n.tr("双击或按 Enter 可复制历史内容，Command + Enter 可复制并粘贴到之前的应用。")
+                ) {
+                    Button(L10n.tr("打开剪贴板历史")) {
+                        ClipboardHistoryPanelController.shared.show()
+                    }
+                }
+                hotKeyRow(.clipboardHistory)
+            }
+            .onboardingGuideTarget(.clipboardHistory)
+
+            settingsSection(L10n.tr("本地存储")) {
+                settingsControlRow(
+                    L10n.tr("已保存记录"),
+                    detail: L10n.tr("达到 100 条或 256 MB 后，会自动从最早的记录开始清理。")
+                ) {
+                    Text(
+                        L10n.tr(
+                            "%d 条 · %@",
+                            clipboardHistoryMonitor.storageSummary.itemCount,
+                            ByteCountFormatter.string(
+                                fromByteCount: clipboardHistoryMonitor.storageSummary.byteCount,
+                                countStyle: .file
+                            )
+                        )
+                    )
+                    .foregroundStyle(.secondary)
+                }
+                settingsActionRow(
+                    L10n.tr("删除后无法恢复，不会影响当前系统剪贴板中的内容。")
+                ) {
+                    Button(L10n.tr("清空全部记录"), role: .destructive) {
+                        showClearClipboardConfirmation = true
+                    }
+                    .disabled(clipboardHistoryMonitor.storageSummary.itemCount == 0)
+                }
+                if let message = clipboardHistoryMonitor.lastErrorMessage {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            settingsSection(L10n.tr("忽略应用")) {
+                settingsActionRow(
+                    L10n.tr("从这些应用复制的内容不会进入历史。PEEK 不会默认排除任何应用。")
+                ) {
+                    Button(L10n.tr("添加应用…")) { chooseIgnoredClipboardApplication() }
+                }
+                ForEach(clipboardHistoryMonitor.ignoredApplications) { application in
+                    HStack(spacing: 12) {
+                        Image(systemName: "app.dashed")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(application.displayName)
+                            Text(application.bundleIdentifier)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button(L10n.tr("移除")) {
+                            clipboardHistoryMonitor.removeIgnoredApplication(application)
+                        }
+                    }
+                }
+            }
+
+            settingsSection(L10n.tr("隐私")) {
+                Label(
+                    L10n.tr("历史内容只保存在 PEEK 的沙盒目录，不会上传网络，也不会存入 Keychain。"),
+                    systemImage: "lock.shield.fill"
+                )
+                .foregroundStyle(.secondary)
+                Text(L10n.tr("剪贴板可能包含密码或私密信息；处理敏感内容前可以暂停记录，或把对应应用加入忽略列表。"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -788,6 +930,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            .onboardingGuideTarget(.translationUsage)
 
             settingsSection(L10n.tr("快捷键")) {
                 hotKeyRow(.translation)
@@ -941,11 +1084,12 @@ struct SettingsView: View {
     }
 
     private var capturePage: some View {
-        settingsPage(
-            title: L10n.tr("截图与 OCR"),
-            subtitle: L10n.tr("权限、剪贴板输出与滚动截图"),
-            systemImage: "viewfinder.circle.fill"
-        ) {
+        ScrollViewReader { proxy in
+            settingsPage(
+                title: L10n.tr("截图与 OCR"),
+                subtitle: L10n.tr("权限、剪贴板输出与滚动截图"),
+                systemImage: "viewfinder.circle.fill"
+            ) {
             settingsSection { readinessBanner }
 
             settingsSection(L10n.tr("系统权限")) {
@@ -956,6 +1100,8 @@ struct SettingsView: View {
                     buttonTitle: L10n.tr("打开屏幕录制设置"),
                     action: screenshotService.openScreenRecordingSettings
                 )
+                .id(OnboardingGuideTarget.capturePermission)
+                .onboardingGuideTarget(.capturePermission)
                 permissionRow(
                     title: L10n.tr("自动滚动控制"),
                     detail: L10n.tr("允许向确认的目标窗口发送滚轮事件"),
@@ -975,7 +1121,7 @@ struct SettingsView: View {
                 if let permissionMessage {
                     Label(permissionMessage, systemImage: "info.circle")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -989,6 +1135,8 @@ struct SettingsView: View {
                     Toggle(L10n.tr("自动识别当前窗口的滚动区"), isOn: $autoDetectScrollTarget)
                         .labelsHidden()
                 }
+                .id(OnboardingGuideTarget.scrollingCapture)
+                .onboardingGuideTarget(.scrollingCapture)
                 Text(autoDetectScrollTarget
                     ? L10n.tr("鼠标位于可信滚动容器时预选该区域，其他位置预选整窗；手工调整后以用户选区为准。")
                     : L10n.tr("关闭后每次从自由选区开始。"))
@@ -1022,7 +1170,7 @@ struct SettingsView: View {
                             .labelsHidden()
                         }
                     }
-                    Text(L10n.tr("实际步长按选区高度 35% 计算，并受该像素上限约束；任何情况下不超过选区高度 45%。"))
+                    Text(L10n.tr("实际步长按选区高度 25% 计算，并受该像素上限约束；任何情况下不超过选区高度 45%。"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 } else {
@@ -1050,9 +1198,23 @@ struct SettingsView: View {
                     Text(L10n.tr("自动识别中文与英文"))
                         .foregroundStyle(.secondary)
                 }
+                .id(OnboardingGuideTarget.recognition)
+                .onboardingGuideTarget(.recognition)
                 Label(L10n.tr("OCR 使用 macOS Vision 在本机处理，不上传图片或识别结果。"), systemImage: "lock.shield")
                 Text(L10n.tr("受保护窗口和 DRM 内容由系统禁止捕获；PEEK 不会尝试绕过。"))
                     .foregroundStyle(.secondary)
+            }
+            }
+            .onChange(of: onboardingTarget) { target in
+                guard showOnboardingGuide,
+                      target == .capturePermission
+                        || target == .scrollingCapture
+                        || target == .recognition else {
+                    return
+                }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(target, anchor: .center)
+                }
             }
         }
     }
@@ -1075,6 +1237,7 @@ struct SettingsView: View {
                     .frame(width: 260, alignment: .trailing)
                 }
             }
+            .onboardingGuideTarget(.appearanceTheme)
 
             settingsSection(L10n.tr("搜索结果")) {
                 settingsControlRow(L10n.tr("结果密度")) {
@@ -1117,11 +1280,12 @@ struct SettingsView: View {
     }
 
     private var aboutPage: some View {
-        settingsPage(
-            title: L10n.tr("关于 PEEK"),
-            subtitle: L10n.tr("本地优先的 macOS 文件查找与截图工具"),
-            systemImage: "info.circle.fill"
-        ) {
+        ScrollViewReader { proxy in
+            settingsPage(
+                title: L10n.tr("关于 PEEK"),
+                subtitle: L10n.tr("本地优先的 macOS 文件查找与截图工具"),
+                systemImage: "info.circle.fill"
+            ) {
             settingsSection {
                 HStack(spacing: 16) {
                     Image(nsImage: NSApp.applicationIconImage)
@@ -1146,13 +1310,17 @@ struct SettingsView: View {
 
             settingsSection(L10n.tr("隐私与支持")) {
                 settingsActionRow(L10n.tr("了解 PEEK 如何处理数据、权限和第三方服务")) {
-                    if let privacyPolicyURL = URL(
-                        string: "https://github.com/ShawnShoper/peek/blob/master/PRIVACY.md"
-                    ) {
-                        Link(L10n.tr("隐私政策"), destination: privacyPolicyURL)
-                            .buttonStyle(.bordered)
-                    }
+                    Button(L10n.tr("隐私政策")) { showPrivacyPolicy = true }
+                        .buttonStyle(.bordered)
                 }
+                .id(OnboardingGuideTarget.privacyPolicy)
+                .onboardingGuideTarget(.privacyPolicy)
+                settingsActionRow(L10n.tr("再次查看 PEEK 的核心功能与操作指引")) {
+                    Button(L10n.tr("重新查看新手教程")) { replayOnboarding() }
+                        .buttonStyle(.bordered)
+                }
+                .id(OnboardingGuideTarget.replayTutorial)
+                .onboardingGuideTarget(.replayTutorial)
                 settingsActionRow(L10n.tr("报告问题或获取使用帮助")) {
                     if let supportURL = URL(
                         string: "https://github.com/ShawnShoper/peek/issues"
@@ -1164,8 +1332,36 @@ struct SettingsView: View {
             }
 
             settingsSection(L10n.tr("诊断")) {
-                settingsActionRow(L10n.tr("不包含文件内容、截图或搜索词")) {
-                    Button(L10n.tr("复制版本与索引信息")) { copyDiagnostics() }
+                ForEach(PEEKHealthDiagnostics.checks(for: diagnosticsSnapshot)) { check in
+                    healthDiagnosticRow(check)
+                }
+                Divider()
+                settingsActionRow(L10n.tr("不包含文件路径、内容、截图、搜索词或密钥")) {
+                    HStack(spacing: 8) {
+                        Button(L10n.tr("复制诊断信息")) { copyDiagnostics() }
+                        Button(L10n.tr("导出脱敏诊断报告…")) { exportDiagnostics() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                if let diagnosticExportMessage {
+                    Label(
+                        diagnosticExportMessage,
+                        systemImage: diagnosticExportMessageIsError
+                            ? "exclamationmark.triangle.fill"
+                            : "checkmark.circle.fill"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(diagnosticExportMessageIsError ? .orange : .green)
+                }
+            }
+            }
+            .onChange(of: onboardingTarget) { target in
+                guard showOnboardingGuide,
+                      target == .privacyPolicy || target == .replayTutorial else {
+                    return
+                }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(target, anchor: .center)
                 }
             }
         }
@@ -1353,6 +1549,50 @@ struct SettingsView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(isGranted ? .green : .orange)
             if !isGranted { Button(buttonTitle, action: action) }
+        }
+    }
+
+    private func healthDiagnosticRow(_ check: PEEKHealthCheck) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: healthIcon(for: check.severity))
+                .foregroundStyle(healthColor(for: check.severity))
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(check.title).fontWeight(.medium)
+                Text(check.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(healthTitle(for: check.severity))
+                .font(.caption.weight(.medium))
+                .foregroundStyle(healthColor(for: check.severity))
+        }
+        .padding(.vertical, 3)
+    }
+
+    private func healthIcon(for severity: PEEKHealthSeverity) -> String {
+        switch severity {
+        case .healthy: return "checkmark.circle.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .error: return "xmark.octagon.fill"
+        }
+    }
+
+    private func healthColor(for severity: PEEKHealthSeverity) -> Color {
+        switch severity {
+        case .healthy: return .green
+        case .warning: return .orange
+        case .error: return .red
+        }
+    }
+
+    private func healthTitle(for severity: PEEKHealthSeverity) -> String {
+        switch severity {
+        case .healthy: return L10n.tr("正常")
+        case .warning: return L10n.tr("需注意")
+        case .error: return L10n.tr("不可用")
         }
     }
 
@@ -1553,12 +1793,6 @@ struct SettingsView: View {
         return .waiting
     }
 
-    private var selectedDocumentDirectory: DocumentDirectoryPresentation? {
-        let rows = documentDirectoryPresentations
-        guard let selectedDocumentDirectoryID else { return rows.first }
-        return rows.first { $0.id == selectedDocumentDirectoryID } ?? rows.first
-    }
-
     private var documentAuthorizedCount: Int {
         documentDirectoryPresentations.filter {
             $0.permission == .authorized || $0.permission == .included
@@ -1699,87 +1933,6 @@ struct SettingsView: View {
         .padding(.horizontal, 12)
         .frame(height: 70)
         .accessibilityElement(children: .contain)
-    }
-
-    private func documentDirectoryInspector(
-        _ directory: DocumentDirectoryPresentation
-    ) -> some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 8) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: directory.url.path))
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 72, height: 72)
-                Text(directory.title)
-                    .font(.title2.weight(.semibold))
-                Text(directory.displayPath)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                Label(
-                    directory.permission.title,
-                    systemImage: directory.permission.systemImage
-                )
-                .font(.callout.weight(.medium))
-                .foregroundStyle(directory.permission.color)
-            }
-            .padding(.top, 30)
-            .padding(.horizontal, 18)
-
-            Divider().padding(.vertical, 18)
-
-            VStack(spacing: 12) {
-                inspectorValueRow(L10n.tr("索引状态"), value: directory.indexState.title)
-                inspectorValueRow(L10n.tr("范围"), value: L10n.tr("包含子文件夹"))
-                if case .completed(let itemCount) = directory.indexState {
-                    inspectorValueRow(
-                        L10n.tr("已索引"),
-                        value: L10n.tr("%lld 项", Int64(itemCount))
-                    )
-                }
-            }
-            .padding(.horizontal, 18)
-
-            Divider().padding(.vertical, 18)
-
-            VStack(spacing: 10) {
-                if directory.permission == .pending
-                    || directory.permission == .reauthorizationRequired {
-                    Button(
-                        directory.permission == .pending ? L10n.tr("授权目录") : L10n.tr("重新授权目录")
-                    ) {
-                        authorizeDocumentDirectory(directory)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .frame(maxWidth: .infinity)
-                } else {
-                    Button(L10n.tr("在访达中显示")) {
-                        NSWorkspace.shared.activateFileViewerSelecting([directory.url])
-                    }
-                    .buttonStyle(.bordered)
-                    .frame(maxWidth: .infinity)
-                }
-                Button(L10n.tr("移除目录"), role: .destructive) {
-                    removeDocumentDirectory(directory)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.red)
-            }
-            .padding(.horizontal, 18)
-
-            Spacer(minLength: 20)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func inspectorValueRow(_ label: String, value: String) -> some View {
-        HStack {
-            Text(label).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).fontWeight(.medium)
-        }
-        .font(.callout)
     }
 
     private func selectFirstDocumentDirectoryIfNeeded() {
@@ -2053,41 +2206,6 @@ struct SettingsView: View {
         }
     }
 
-    private var indexPhaseTitle: String {
-        guard let phase = indexMetadata?.phase else { return L10n.tr("正在读取索引状态") }
-        switch phase {
-        case .idle: return L10n.tr("索引尚未建立")
-        case .indexingApplications: return L10n.tr("正在建立应用索引")
-        case .indexingFiles: return L10n.tr("正在维护用户文件索引")
-        case .ready: return L10n.tr("本地索引已就绪")
-        case .limited: return L10n.tr("索引已达到容量上限")
-        }
-    }
-
-    private var indexPhaseDetail: String {
-        guard let metadata = indexMetadata else { return L10n.tr("请稍候…") }
-        switch metadata.phase {
-        case .idle: return L10n.tr("后台索引会持续低占用运行，查询不会触发扫描。")
-        case .indexingApplications: return L10n.tr("应用目录完成一个即提交一个，可立即用于查询。")
-        case .indexingFiles:
-            if let progress = initialIndexProgress,
-               progress.discoveredItems > 0 {
-                return L10n.tr(
-                    "已索引 %lld / 已发现 %lld 项；发现总数会随扫描继续增加。",
-                    Int64(progress.indexedItems),
-                    Int64(progress.discoveredItems)
-                )
-            }
-            return L10n.tr("当前查询继续使用最近一次完整提交的结果。")
-        case .ready:
-            return L10n.tr(
-                "已提交 %lld 项本地结果。",
-                Int64(metadata.statistics.indexedItems)
-            )
-        case .limited: return L10n.tr("已提交结果达到 30 万项上限，部分内容可能不可见。")
-        }
-    }
-
     private var indexPhaseIcon: String {
         switch indexMetadata?.phase {
         case .idle, .none: return "clock"
@@ -2095,19 +2213,6 @@ struct SettingsView: View {
         case .ready: return "checkmark.circle.fill"
         case .limited: return "exclamationmark.triangle.fill"
         }
-    }
-
-    private var indexPhaseColor: Color {
-        switch indexMetadata?.phase {
-        case .ready: return .green
-        case .limited: return .orange
-        default: return .blue
-        }
-    }
-
-    private var formattedDatabaseSize: String {
-        guard let indexDatabaseSize else { return "-" }
-        return ByteCountFormatter.string(fromByteCount: indexDatabaseSize, countStyle: .file)
     }
 
     private var formattedLastIndexDate: String {
@@ -2120,9 +2225,13 @@ struct SettingsView: View {
             .shared.snapshot()
         indexMetadata = await FileSearchIndexRuntime.shared.metadata()
         rootIndexStatuses = await FileSearchIndexRuntime.shared.rootStatuses()
-        indexDatabaseSize = (try? FileSearchIndexStore.defaultDatabaseURL.resourceValues(
-            forKeys: [.fileSizeKey]
-        ))?.fileSize.map(Int64.init)
+    }
+
+    private var shouldRefreshIndexStatus: Bool {
+        PEEKSettingsIndexRefreshPolicy.shouldRefresh(
+            windowIsVisible: windowVisibility.isVisible,
+            destination: selectedPane
+        )
     }
 
     private func refreshPermissionState() {
@@ -2131,6 +2240,13 @@ struct SettingsView: View {
     }
 
     private func applyPendingSettingsRoute() {
+        if let destination = routeCoordinator.consumePendingDestination() {
+            navigate(to: destination)
+            return
+        }
+
+        // Consume the legacy preference once so an update cannot strand a
+        // document-search route saved by an older PEEK build.
         guard UserDefaults.standard.bool(
             forKey: PEEKPreferenceKey.openDocumentSearchSettings
         ) else {
@@ -2140,6 +2256,64 @@ struct SettingsView: View {
             forKey: PEEKPreferenceKey.openDocumentSearchSettings
         )
         showDocumentSearchSettings()
+    }
+
+    private func navigate(to destination: PEEKSettingsDestination) {
+        selectedPane = destination
+        if destination == .search {
+            selectedSearchPane = .documents
+        }
+    }
+
+    private func presentPendingOnboardingIfNeeded() {
+        guard PEEKFirstLaunchOnboardingPolicy.consumePendingPresentation() else {
+            return
+        }
+        onboardingTarget = .settingsTabs
+        selectedPane = .general
+        setOnboardingVisible(true)
+    }
+
+    private func replayOnboarding() {
+        PEEKFirstLaunchOnboardingPolicy.requestReplay()
+        presentPendingOnboardingIfNeeded()
+    }
+
+    private func authorizeDocumentsFromOnboarding() {
+        // NSOpenPanel is only shown after the user presses the guide action.
+        // Multiple selection lets a first-time user authorize several default
+        // folders without leaving the tutorial.
+        chooseIndexFolders()
+    }
+
+    private func completeOnboarding() {
+        PEEKFirstLaunchOnboardingPolicy.markCompleted()
+        setOnboardingVisible(false)
+    }
+
+    private func setOnboardingVisible(_ isVisible: Bool) {
+        if reduceMotion {
+            showOnboardingGuide = isVisible
+        } else {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showOnboardingGuide = isVisible
+            }
+        }
+    }
+
+    private func navigateOnboarding(_ destination: OnboardingGuideDestination) {
+        switch destination {
+        case .general: selectedPane = .general
+        case .search:
+            selectedPane = .search
+            selectedSearchPane = .documents
+        case .clipboard: selectedPane = .clipboard
+        case .shortcuts: selectedPane = .shortcuts
+        case .translation: selectedPane = .translation
+        case .capture: selectedPane = .capture
+        case .appearance: selectedPane = .appearance
+        case .about: selectedPane = .about
+        }
     }
 
     private func showDocumentSearchSettings() {
@@ -2226,6 +2400,28 @@ struct SettingsView: View {
         case .ocr: return "text.viewfinder"
         case .search: return "magnifyingglass"
         case .translation: return "character.book.closed"
+        case .clipboardHistory: return "clipboard"
+        }
+    }
+
+    private func chooseIgnoredClipboardApplication() {
+        let panel = NSOpenPanel()
+        panel.title = L10n.tr("选择要忽略的应用")
+        panel.message = L10n.tr("从所选应用复制的内容不会保存到 PEEK 剪贴板历史。")
+        panel.prompt = L10n.tr("添加")
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try clipboardHistoryMonitor.addIgnoredApplication(at: url)
+            } catch {
+                hotKeyMessage = error.localizedDescription
+                NSSound.beep()
+            }
         }
     }
 
@@ -2352,17 +2548,96 @@ struct SettingsView: View {
         restoreDefaultHotKeys()
     }
 
+    private var diagnosticsSnapshot: PEEKDiagnosticsSnapshot {
+        let statuses = Dictionary(uniqueKeysWithValues:
+            ScreenshotGlobalHotKeyAction.allCases.map { action in
+                let value: String
+                if hotKeyManager.shortcut(for: action) == nil {
+                    value = "disabled"
+                } else if let state = hotKeyManager.registrationStates[action] {
+                    switch state {
+                    case .success: value = "registered"
+                    case .systemConflict: value = "system-conflict"
+                    case .failure(let status): value = "failed-osstatus-\(status)"
+                    }
+                } else {
+                    value = "checking"
+                }
+                return (action.diagnosticName, value)
+            }
+        )
+        let failedHotKeys = hotKeyManager.registrationStates.values.filter {
+            if case .success = $0 { return false }
+            return true
+        }.count
+        let displays = NSScreen.screens.enumerated().map { index, screen in
+            let width = Int(screen.frame.width.rounded())
+            let height = Int(screen.frame.height.rounded())
+            let scale = String(format: "%.1f", screen.backingScaleFactor)
+            return "display-\(index + 1):\(width)x\(height)@\(scale)x"
+        }
+#if arch(arm64)
+        let architecture = "arm64"
+#elseif arch(x86_64)
+        let architecture = "x86_64"
+#else
+        let architecture = "unknown"
+#endif
+        return PEEKDiagnosticsSnapshot(
+            generatedAt: Date(),
+            version: versionLabel,
+            bundleIdentifier: Bundle.main.bundleIdentifier ?? "-",
+            systemVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            architecture: architecture,
+            displayDescriptions: displays,
+            screenRecordingGranted: screenRecordingGranted,
+            accessibilityGranted: accessibilityGranted,
+            hotKeyStatuses: statuses,
+            hotKeyFailureCount: failedHotKeys,
+            indexPhase: indexMetadata?.phase.rawValue ?? "unknown",
+            indexedItemCount: indexMetadata?.statistics.indexedItems ?? 0,
+            committedRootCount: indexMetadata?.committedRootCount ?? 0,
+            indexingRootCount: indexMetadata?.indexingRootCount ?? 0,
+            inaccessibleLocationCount: indexMetadata?.statistics.inaccessibleLocations ?? 0,
+            authorizedDocumentRootCount: documentAuthorizedCount,
+            configuredDocumentRootCount: documentDirectoryPresentations.count,
+            clipboardHistoryEnabled: clipboardHistoryMonitor.isEnabled,
+            clipboardItemCount: clipboardHistoryMonitor.storageSummary.itemCount,
+            clipboardByteCount: clipboardHistoryMonitor.storageSummary.byteCount
+        )
+    }
+
     private func copyDiagnostics() {
-        let metadata = indexMetadata
-        let lines = [
-            "PEEK \(versionLabel)",
-            "Bundle: \(Bundle.main.bundleIdentifier ?? "-")",
-            "Index phase: \(metadata?.phase.rawValue ?? "unknown")",
-            "Index items: \(metadata?.statistics.indexedItems ?? 0)",
-            "Committed roots: \(metadata?.committedRootCount ?? 0)",
-            "Database: \(FileSearchIndexStore.defaultDatabaseURL.path)"
-        ]
+        let report = PEEKHealthDiagnostics.report(for: diagnosticsSnapshot)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        NSPasteboard.general.setString(report, forType: .string)
+        diagnosticExportMessage = L10n.tr("诊断信息已复制")
+        diagnosticExportMessageIsError = false
+    }
+
+    private func exportDiagnostics() {
+        let report = PEEKHealthDiagnostics.report(for: diagnosticsSnapshot)
+        let panel = NSSavePanel()
+        panel.title = L10n.tr("导出脱敏诊断报告")
+        panel.nameFieldStringValue = "PEEK-Diagnostics.txt"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        Task {
+            do {
+                try await Task.detached(priority: .utility) {
+                    try report.write(to: url, atomically: true, encoding: .utf8)
+                }.value
+                diagnosticExportMessage = L10n.tr("诊断报告已导出")
+                diagnosticExportMessageIsError = false
+            } catch {
+                diagnosticExportMessage = L10n.tr(
+                    "无法导出诊断报告：%@",
+                    error.localizedDescription
+                )
+                diagnosticExportMessageIsError = true
+            }
+        }
     }
 }

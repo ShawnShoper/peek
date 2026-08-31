@@ -9,6 +9,22 @@ protocol ScreenImageCapturing: Sendable {
         logicalFrame: CGRect
     ) async throws -> CGImage
     func capture(rect: CGRect) async throws -> CGImage
+    func capture(
+        rect: CGRect,
+        excludingCurrentApplication: Bool
+    ) async throws -> CGImage
+}
+
+extension ScreenImageCapturing {
+    /// Lightweight test/backward-compatible fallback. The production
+    /// ScreenCaptureKit backend overrides this requirement so PEEK's own
+    /// non-interactive capture indicator never enters a scrolling frame.
+    func capture(
+        rect: CGRect,
+        excludingCurrentApplication: Bool
+    ) async throws -> CGImage {
+        try await capture(rect: rect)
+    }
 }
 
 enum ScreenImageCaptureError: LocalizedError {
@@ -876,7 +892,10 @@ struct QuartzScrollFrameCapturer: ScrollFrameCapturing {
             throw ScrollCaptureError.screenRecordingPermissionDenied
         }
         do {
-            return try await screenCapturer.capture(rect: rect)
+            return try await screenCapturer.capture(
+                rect: rect,
+                excludingCurrentApplication: true
+            )
         } catch let error as ScrollCaptureError {
             throw error
         } catch {

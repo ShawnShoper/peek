@@ -189,69 +189,6 @@ struct SearchPanelView: View {
         .help(viewModel.selectedCategory.title)
     }
 
-    private var keyboardHint: some View {
-        HStack(spacing: 7) {
-            Text(L10n.tr("⌃空格 呼出"))
-            Text("·")
-            Text(L10n.tr("↑↓ 选择"))
-            Text("·")
-            Text(L10n.tr("↩ 打开"))
-        }
-        .font(.caption)
-        .foregroundStyle(.tertiary)
-        .fixedSize()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(L10n.tr("快捷键：Control 空格呼出，上下箭头选择，回车打开"))
-    }
-
-    private func categoryButton(_ category: SearchPanelCategory) -> some View {
-        let isSelected = viewModel.selectedCategory == category
-        return Button {
-            viewModel.selectedCategory = category
-            searchFieldFocused = true
-        } label: {
-            Text(category.title)
-                .font(.caption.weight(isSelected ? .semibold : .medium))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(isSelected
-                            ? Color.accentColor
-                            : Color.primary.opacity(0.075))
-                )
-                .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.86))
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-
-    private var hiddenFilesButton: some View {
-        Button {
-            viewModel.includesHiddenFiles.toggle()
-            searchFieldFocused = true
-        } label: {
-            Label(
-                L10n.tr("隐藏文件"),
-                systemImage: viewModel.includesHiddenFiles ? "eye.fill" : "eye.slash"
-            )
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(viewModel.includesHiddenFiles
-                        ? Color.accentColor.opacity(0.82)
-                        : Color.primary.opacity(0.075))
-            )
-            .foregroundStyle(viewModel.includesHiddenFiles
-                ? Color.white
-                : Color.primary.opacity(0.76))
-        }
-        .buttonStyle(.plain)
-        .accessibilityValue(viewModel.includesHiddenFiles ? L10n.tr("已显示") : L10n.tr("已隐藏"))
-    }
-
     private var resultList: some View {
         Group {
             if viewModel.results.isEmpty, !viewModel.isSearching {

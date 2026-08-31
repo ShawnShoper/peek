@@ -20,6 +20,12 @@ struct MenuBarMenuView: View {
         }
 
         Button {
+            ClipboardHistoryPanelController.shared.toggle()
+        } label: {
+            clipboardHistoryLabel
+        }
+
+        Button {
             Task { await screenshotService.captureRegion() }
         } label: {
             screenshotLabel(
@@ -31,15 +37,19 @@ struct MenuBarMenuView: View {
         .disabled(screenshotService.isCapturing)
 
         Button {
-            Task { await screenshotService.captureScrolling() }
+            if screenshotService.isScrolling {
+                screenshotService.stopScrollingCapture()
+            } else {
+                Task { await screenshotService.captureScrolling() }
+            }
         } label: {
             screenshotLabel(
-                screenshotService.isScrolling ? L10n.tr("正在滚动截图…") : L10n.tr("滚动截图"),
+                screenshotService.isScrolling ? L10n.tr("停止并拼接") : L10n.tr("滚动截图"),
                 systemImage: "rectangle.stack.badge.plus",
                 action: .scrolling
             )
         }
-        .disabled(screenshotService.isCapturing)
+        .disabled(screenshotService.isCapturing && !screenshotService.isScrolling)
 
         Button {
             Task { await screenshotService.captureAndRecognizeText() }
@@ -120,6 +130,19 @@ struct MenuBarMenuView: View {
         return Label(
             shortcut.map { "\(title)    \($0)" } ?? title,
             systemImage: "character.book.closed"
+        )
+    }
+
+    private var clipboardHistoryLabel: some View {
+        let action = ScreenshotGlobalHotKeyAction.clipboardHistory
+        let shortcut = hotKeyManager.shortcut(for: action)?.displayString
+        let state = hotKeyManager.registrationStates[action]
+        let title = state == .systemConflict
+            ? L10n.tr("剪贴板历史（快捷键冲突，可在设置中修改）")
+            : L10n.tr("剪贴板历史")
+        return Label(
+            shortcut.map { "\(title)    \($0)" } ?? title,
+            systemImage: "clipboard"
         )
     }
 

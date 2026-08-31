@@ -7,19 +7,107 @@ enum AppBrand {
     static let menuBarIconAssetName = "PEEKMenuBarIcon"
 }
 
-extension Notification.Name {
-    static let peekOpenDocumentSearchSettings = Notification.Name(
-        "PEEK.openDocumentSearchSettings"
-    )
+enum PEEKSettingsDestination: String, CaseIterable, Identifiable, Sendable {
+    case general
+    case search
+    case clipboard
+    case shortcuts
+    case translation
+    case capture
+    case appearance
+    case about
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: return L10n.tr("通用")
+        case .search: return L10n.tr("搜索")
+        case .clipboard: return L10n.tr("剪贴板")
+        case .shortcuts: return L10n.tr("快捷键")
+        case .translation: return L10n.tr("翻译")
+        case .capture: return L10n.tr("截图")
+        case .appearance: return L10n.tr("外观")
+        case .about: return L10n.tr("关于")
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .general: return "gearshape"
+        case .search: return "magnifyingglass"
+        case .clipboard: return "clipboard"
+        case .shortcuts: return "keyboard"
+        case .translation: return "character.book.closed"
+        case .capture: return "viewfinder.circle"
+        case .appearance: return "paintpalette"
+        case .about: return "info.circle"
+        }
+    }
+}
+
+/// Keeps a settings destination until the cached SwiftUI settings graph has
+/// consumed it. This works for both an already-open window and the first
+/// presentation, without relying on a notification posted after a fixed delay.
+@MainActor
+final class PEEKSettingsRouteCoordinator: ObservableObject {
+    static let shared = PEEKSettingsRouteCoordinator()
+
+    @Published private(set) var revision: UInt64 = 0
+    private var pendingDestination: PEEKSettingsDestination?
+
+    func request(_ destination: PEEKSettingsDestination) {
+        pendingDestination = destination
+        revision &+= 1
+        if revision == 0 {
+            revision = 1
+        }
+    }
+
+    func consumePendingDestination() -> PEEKSettingsDestination? {
+        defer { pendingDestination = nil }
+        return pendingDestination
+    }
+}
+
+/// Mirrors whether the retained settings window is actually on screen. The
+/// settings view uses this signal to stop index polling while it is hidden or
+/// minimized instead of keeping a permanent background timer alive.
+@MainActor
+final class PEEKSettingsWindowVisibility: ObservableObject {
+    static let shared = PEEKSettingsWindowVisibility()
+
+    @Published private(set) var isVisible = false
+
+    func update(_ isVisible: Bool) {
+        guard self.isVisible != isVisible else { return }
+        self.isVisible = isVisible
+    }
+}
+
+@MainActor
+private final class PEEKSettingsWindowDelegate: NSObject, NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        PEEKSettingsWindowVisibility.shared.update(false)
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        PEEKSettingsWindowVisibility.shared.update(false)
+    }
+
+    func windowDidDeminiaturize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        PEEKSettingsWindowVisibility.shared.update(window.isVisible)
+    }
 }
 
 @MainActor
 enum PEEKSettingsWindowPresenter {
     static let windowIdentifier = NSUserInterfaceItemIdentifier("PEEK.settings")
-    private static let focusRetryDelays: [TimeInterval] = [0, 0.08, 0.2]
     private static var presentationGeneration: UInt64 = 0
     private static var contentFactory: (() -> AnyView)?
     private static var windowController: NSWindowController?
+    private static let windowDelegate = PEEKSettingsWindowDelegate()
 
     static func configure(screenshotService: ScreenshotService) {
         contentFactory = {
@@ -41,12 +129,16 @@ enum PEEKSettingsWindowPresenter {
             guard let controller = settingsWindowController() else { return }
             NSApp.activate(ignoringOtherApps: true)
             controller.showWindow(nil)
-            focusRetryDelays.forEach { delay in
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                    focusSettingsWindowIfCurrent(generation)
-                }
-            }
+            focusSettingsWindowIfCurrent(generation)
+            // Settings displays clipboard storage usage even when history is
+            // paused, so load its metadata only after the window is requested.
+            ClipboardHistoryMonitor.shared.reloadIfNeeded()
         }
+    }
+
+    static func show(destination: PEEKSettingsDestination) {
+        PEEKSettingsRouteCoordinator.shared.request(destination)
+        show()
     }
 
     static func isSettingsWindow(_ window: NSWindow) -> Bool {
@@ -58,8 +150,8 @@ enum PEEKSettingsWindowPresenter {
     /// actions still terminate the application normally.
     @discardableResult
     static func closeIfVisible(in windows: [NSWindow] = NSApp.windows) -> Bool {
-        // Cancel delayed focus retries first so a just-hidden Settings window
-        // cannot be ordered front again a few milliseconds after Command-Q.
+        // Invalidate a presentation already queued for the next run loop so a
+        // just-hidden Settings window cannot be ordered front again.
         invalidatePendingPresentation()
         let visibleSettingsWindows = windows.filter {
             isSettingsWindow($0) && ($0.isVisible || $0.isMiniaturized)
@@ -67,6 +159,7 @@ enum PEEKSettingsWindowPresenter {
         guard !visibleSettingsWindows.isEmpty else { return false }
 
         visibleSettingsWindows.forEach { $0.orderOut(nil) }
+        PEEKSettingsWindowVisibility.shared.update(false)
         return true
     }
 
@@ -88,8 +181,8 @@ enum PEEKSettingsWindowPresenter {
     }
 
     /// Brings the owned settings window back even when Command-Q previously hid its
-    /// existing NSWindow with orderOut. The generation check prevents delayed
-    /// retries from an older presentation attempt from reopening it.
+    /// existing NSWindow with orderOut. The generation check prevents an older
+    /// queued presentation attempt from reopening it.
     @discardableResult
     static func focusSettingsWindowIfCurrent(
         _ generation: UInt64,
@@ -107,6 +200,7 @@ enum PEEKSettingsWindowPresenter {
         if activateApplication {
             NSApp.activate(ignoringOtherApps: true)
         }
+        PEEKSettingsWindowVisibility.shared.update(true)
         return true
     }
 
@@ -124,6 +218,7 @@ enum PEEKSettingsWindowPresenter {
         window.minSize = NSSize(width: 980, height: 640)
         window.isReleasedWhenClosed = false
         window.isRestorable = false
+        window.delegate = windowDelegate
         window.collectionBehavior.insert(.moveToActiveSpace)
         window.setFrameAutosaveName("PEEK.SettingsWindow")
         window.center()
@@ -169,6 +264,7 @@ struct PEEKApp: App {
         _screenshotService = StateObject(wrappedValue: service)
         self.searchProvider = searchProvider
         PEEKSettingsWindowPresenter.configure(screenshotService: service)
+        PEEKBuiltInToolLauncher.shared.configure(screenshotService: service)
         ScreenshotGlobalHotKeyManager.shared.start { action, diagnosticSession in
             ScreenshotCaptureDiagnostics.record(
                 "action_handler_started",
@@ -206,6 +302,8 @@ struct PEEKApp: App {
                 SearchPanelController.shared.toggle(provider: searchProvider)
             case .translation:
                 TranslationPanelController.shared.toggle()
+            case .clipboardHistory:
+                ClipboardHistoryPanelController.shared.toggle()
             }
         }
     }
@@ -227,6 +325,53 @@ struct PEEKApp: App {
     }
 }
 
+/// Central action dispatcher for commands opened from PEEK search. Screenshot
+/// actions wait until the search panel is hidden so it cannot enter the capture.
+@MainActor
+final class PEEKBuiltInToolLauncher {
+    static let shared = PEEKBuiltInToolLauncher()
+
+    private weak var screenshotService: ScreenshotService?
+
+    private init() {}
+
+    func configure(screenshotService: ScreenshotService) {
+        self.screenshotService = screenshotService
+    }
+
+    func open(_ behavior: SearchPanelLaunchBehavior) {
+        switch behavior {
+        case .fileURL:
+            SearchPanelController.shared.close()
+        case .peekTranslation:
+            SearchPanelController.shared.close()
+            TranslationPanelController.shared.show()
+        case .peekClipboardHistory:
+            SearchPanelController.shared.close()
+            ClipboardHistoryPanelController.shared.show()
+        case .peekSettings(let destination):
+            SearchPanelController.shared.close()
+            PEEKSettingsWindowPresenter.show(destination: destination)
+        case .peekRegionCapture, .peekScrollingCapture, .peekOCRCapture:
+            guard let screenshotService else { return }
+            SearchPanelController.shared.closeThenPerform {
+                Task { @MainActor in
+                    switch behavior {
+                    case .peekRegionCapture:
+                        await screenshotService.captureRegion()
+                    case .peekScrollingCapture:
+                        await screenshotService.captureScrolling()
+                    case .peekOCRCapture:
+                        await screenshotService.captureAndRecognizeText()
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+    }
+}
+
 @MainActor
 final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     private let instanceLock = SingleInstanceLock()
@@ -236,6 +381,8 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     private var settingsQuitShortcutMonitor: Any?
 #if DEBUG
     private let screenshotToolbarPreviewController = ScreenshotEditorController()
+    private let screenshotSelectionPreviewCoordinator = ScreenshotCaptureCoordinator()
+    private var screenshotSelectionPreviewTask: Task<Void, Never>?
 #endif
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -263,13 +410,18 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
         installScreenCaptureMetadataLifecycleObservers()
         refreshScreenCaptureMetadata(invalidateFirst: false)
         FileSearchIndexRuntime.shared.start()
+        ClipboardHistoryMonitor.shared.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             SearchPanelController.shared.prepare(
                 provider: FileSearchPanelProvider.shared
             )
         }
 #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--show-screenshot-toolbar-for-ui-testing") {
+        if ProcessInfo.processInfo.arguments.contains("--show-screenshot-selection-for-ui-testing") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                self.showScreenshotSelectionPreview()
+            }
+        } else if ProcessInfo.processInfo.arguments.contains("--show-screenshot-toolbar-for-ui-testing") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 self.showScreenshotToolbarPreview()
             }
@@ -288,19 +440,49 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 TranslationPanelController.shared.show(previewMode: true)
             }
+        } else if ProcessInfo.processInfo.arguments.contains("--show-onboarding-for-ui-testing") {
+            PEEKFirstLaunchOnboardingPolicy.requestReplay()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                PEEKSettingsWindowPresenter.show()
+            }
         } else if ProcessInfo.processInfo.arguments.contains("--show-settings-for-ui-testing") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 PEEKSettingsWindowPresenter.show()
             }
         } else {
-            scheduleFirstLaunchDocumentAuthorizationPrompt()
+            scheduleInitialExperience()
         }
 #else
-        scheduleFirstLaunchDocumentAuthorizationPrompt()
+        scheduleInitialExperience()
 #endif
     }
 
 #if DEBUG
+    private func showScreenshotSelectionPreview() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        let selectionSize = CGSize(
+            width: min(920, screen.frame.width * 0.55),
+            height: min(560, screen.frame.height * 0.48)
+        )
+        let selectionRect = CGRect(
+            x: screen.frame.midX - selectionSize.width / 2,
+            y: screen.frame.midY - selectionSize.height / 2,
+            width: selectionSize.width,
+            height: selectionSize.height
+        ).integral
+
+        screenshotSelectionPreviewTask?.cancel()
+        screenshotSelectionPreviewTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = try? await screenshotSelectionPreviewCoordinator.captureRegion(
+                requestPermissionIfNeeded: false,
+                presentationDelayNanoseconds: 0,
+                initialSelectionRect: selectionRect,
+                initialSelectionHint: L10n.tr("拖动选区可移动，拖动边角可缩放")
+            )
+        }
+    }
+
     private func showScreenshotToolbarPreview() {
         guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
         let safeFrame = screen.visibleFrame.insetBy(dx: 48, dy: 80)
@@ -374,6 +556,7 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             name: NSApplication.didFinishRestoringWindowsNotification,
             object: NSApp
         )
+        ClipboardHistoryMonitor.shared.stop()
         FileSearchIndexRuntime.shared.stop()
         SearchPanelController.shared.destroy()
         TranslationPanelController.shared.destroy()
@@ -498,10 +681,32 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func hideAutomaticallyRestoredWindows() {
+        var didHideSettings = false
         for window in NSApp.windows
         where window.isVisible && PEEKSettingsWindowPresenter.isSettingsWindow(window) {
             window.orderOut(nil)
+            didHideSettings = true
         }
+        if didHideSettings {
+            PEEKSettingsWindowVisibility.shared.update(false)
+        }
+    }
+
+    private func scheduleInitialExperience() {
+        guard !scheduleFirstLaunchOnboarding() else { return }
+        scheduleFirstLaunchDocumentAuthorizationPrompt()
+    }
+
+    @discardableResult
+    private func scheduleFirstLaunchOnboarding() -> Bool {
+        guard PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded() else {
+            return false
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            PEEKSettingsWindowPresenter.show()
+        }
+        return true
     }
 
     private func scheduleFirstLaunchDocumentAuthorizationPrompt() {
@@ -534,17 +739,7 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openDocumentSearchSettings() {
-        UserDefaults.standard.set(
-            true,
-            forKey: PEEKPreferenceKey.openDocumentSearchSettings
-        )
-        PEEKSettingsWindowPresenter.show()
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(
-                name: .peekOpenDocumentSearchSettings,
-                object: nil
-            )
-        }
+        PEEKSettingsWindowPresenter.show(destination: .search)
     }
 }
 

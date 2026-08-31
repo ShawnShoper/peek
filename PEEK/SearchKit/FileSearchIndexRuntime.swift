@@ -1,18 +1,69 @@
 import Foundation
 import OSLog
 
+/// Bounded backoff for an explicit per-folder refresh that is waiting behind
+/// another index pass. The old fixed 350 ms poll could live forever after the
+/// settings window closed and wake the coordinator several times per second.
+struct FileSearchRootRefreshRetryPolicy: Equatable, Sendable {
+    var maximumWait: TimeInterval
+    var initialDelay: TimeInterval
+    var maximumDelay: TimeInterval
+
+    init(
+        maximumWait: TimeInterval = 5 * 60,
+        initialDelay: TimeInterval = 0.35,
+        maximumDelay: TimeInterval = 2
+    ) {
+        self.maximumWait = Self.boundedFinite(
+            maximumWait,
+            fallback: 5 * 60,
+            range: 0 ... 30 * 60
+        )
+        self.initialDelay = Self.boundedFinite(
+            initialDelay,
+            fallback: 0.35,
+            range: 0.05 ... 5
+        )
+        self.maximumDelay = Self.boundedFinite(
+            maximumDelay,
+            fallback: 2,
+            range: self.initialDelay ... 10
+        )
+    }
+
+    static let standard = FileSearchRootRefreshRetryPolicy()
+
+    func shouldRetry(elapsed: TimeInterval) -> Bool {
+        elapsed < maximumWait
+    }
+
+    func delay(afterDeferredAttempt attempt: Int) -> TimeInterval {
+        guard attempt > 0 else { return initialDelay }
+        return min(initialDelay * pow(2, Double(attempt)), maximumDelay)
+    }
+
+    private static func boundedFinite(
+        _ value: TimeInterval,
+        fallback: TimeInterval,
+        range: ClosedRange<TimeInterval>
+    ) -> TimeInterval {
+        guard value.isFinite else { return min(max(fallback, range.lowerBound), range.upperBound) }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
 /// Application-lifetime owner for the persistent background file index.
 /// Search queries never call this type; only app lifecycle and explicit
 /// interactive-activity signals reach the coordinator.
 @MainActor
 protocol FileSearchIndexActivityControlling: AnyObject {
     func setSearchPanelActive(_ isActive: Bool)
-    /// Installs the capture blocker before the caller starts reading pixels.
-    /// Awaiting this method confirms only that the blocker is visible to the
-    /// indexer; it never waits for an active filesystem operation to finish.
-    func beginCaptureActivity() async
-    /// Queues release behind the matching begin operation. This method stays
-    /// synchronous so capture cleanup can safely call it from `defer`.
+    /// Signals that foreground capture is starting without placing screenshot
+    /// startup behind any existing indexing activity task. Screenshot latency
+    /// and cleanup must never depend on the background indexer's queue.
+    func beginCaptureActivity()
+    /// Releases the matching blocker. Begin/end ordering is preserved on a
+    /// dedicated fire-and-forget queue that cannot hold up screenshot state.
     func endCaptureActivity()
     func setOCRActive(_ isActive: Bool)
     func setFileOperationActive(_ isActive: Bool)
@@ -31,6 +82,7 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     private let coordinator: FileSearchIndexCoordinator<FileSearchIndexStore>
     private var lifecycleTask: Task<Void, Never>?
     private var activityTask: Task<Void, Never>?
+    private var captureActivityTask: Task<Void, Never>?
 
     private init() {
         let store = FileSearchIndexStore()
@@ -93,17 +145,12 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
         }
     }
 
-    func beginCaptureActivity() async {
-        let task = enqueueActivity { coordinator in
-            await coordinator.setCaptureActive(true)
-        }
-        await task.value
+    func beginCaptureActivity() {
+        enqueueCaptureActivity(true)
     }
 
     func endCaptureActivity() {
-        enqueueActivity { coordinator in
-            await coordinator.setCaptureActive(false)
-        }
+        enqueueCaptureActivity(false)
     }
 
     func setOCRActive(_ isActive: Bool) {
@@ -121,19 +168,42 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     /// Runs only from an explicit settings action. Search queries remain
     /// read-only and never enter this path.
     func rebuildIndexNow() async -> FileSearchBackgroundIndexRunResult {
-        _ = await lifecycleTask?.value
+        guard !Task.isCancelled else { return .deferred }
         return await coordinator.rebuildNow()
     }
 
     /// Queues a single configured root behind any active background pass.
     /// Search queries never call this API.
-    func rebuildRootWhenAvailable(_ url: URL) async -> FileSearchBackgroundIndexRunResult {
-        _ = await lifecycleTask?.value
+    func rebuildRootWhenAvailable(
+        _ url: URL,
+        retryPolicy: FileSearchRootRefreshRetryPolicy = .standard
+    ) async -> FileSearchBackgroundIndexRunResult {
+        // Do not await the lifecycle queue here: it can contain a complete
+        // background pass. The coordinator reports `.deferred` while busy,
+        // allowing this method's cancellation-aware deadline to cover the
+        // entire user request instead of starting only after that pass ends.
         let path = url.standardizedFileURL.path
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var deferredAttempt = 0
         while !Task.isCancelled {
             let result = await coordinator.rebuildRootNow(path: path)
             guard case .deferred = result else { return result }
-            try? await Task<Never, Never>.sleep(nanoseconds: 350_000_000)
+            let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+            guard retryPolicy.shouldRetry(elapsed: elapsed) else {
+                Self.logger.warning(
+                    "Root refresh queue expired after \(elapsed, privacy: .public) seconds"
+                )
+                return .deferred
+            }
+            let delay = retryPolicy.delay(afterDeferredAttempt: deferredAttempt)
+            deferredAttempt += 1
+            do {
+                try await Task<Never, Never>.sleep(
+                    nanoseconds: UInt64(delay * 1_000_000_000)
+                )
+            } catch {
+                return .deferred
+            }
         }
         return .deferred
     }
@@ -184,7 +254,9 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
                     try await store.markDirty(root)
                 }
             } catch {
-                return
+                Self.logger.error(
+                    "Authorized root reconciliation failed: \(error.localizedDescription, privacy: .private)"
+                )
             }
         }
     }
@@ -237,6 +309,20 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
         }
         activityTask = task
         return task
+    }
+
+    /// Capture uses its own direct activity-gate queue. A stale search/OCR/file
+    /// operation signal may delay background-index bookkeeping, but it can no
+    /// longer prevent the screenshot overlay from appearing or being cancelled.
+    private func enqueueCaptureActivity(_ isActive: Bool) {
+        let precedingTask = captureActivityTask
+        let activityGate = FileSearchActivityGate.shared
+        let task = Task {
+            _ = await precedingTask?.value
+            guard !Task.isCancelled else { return }
+            await activityGate.setActivity(isActive, blocker: .capture)
+        }
+        captureActivityTask = task
     }
 
     private static func makeRootProvider(

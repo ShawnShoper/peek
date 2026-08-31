@@ -79,12 +79,24 @@ enum SearchPanelFileAction: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct SearchPanelActionFeedback: Equatable, Sendable {
+    enum FileSystemMutation: Equatable, Sendable {
+        case none
+        case copied
+        case moved
+    }
+
     let message: String
     let updatedURL: URL?
+    let fileSystemMutation: FileSystemMutation
 
-    init(_ message: String, updatedURL: URL? = nil) {
+    init(
+        _ message: String,
+        updatedURL: URL? = nil,
+        fileSystemMutation: FileSystemMutation = .none
+    ) {
         self.message = message
         self.updatedURL = updatedURL
+        self.fileSystemMutation = fileSystemMutation
     }
 }
 
@@ -116,6 +128,35 @@ protocol SearchPanelActionHandling: AnyObject {
     ) async throws -> SearchPanelActionFeedback
 }
 
+@MainActor
+protocol SearchPanelApplicationLaunching: AnyObject {
+    func openApplication(at url: URL) async throws
+}
+
+@MainActor
+final class DefaultSearchPanelApplicationLauncher: SearchPanelApplicationLaunching {
+    func openApplication(at url: URL) async throws {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = true
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Void, Error>) in
+            NSWorkspace.shared.openApplication(
+                at: url,
+                configuration: configuration
+            ) { application, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if application != nil {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: CocoaError(.fileNoSuchFile))
+                }
+            }
+        }
+    }
+}
+
 extension SearchPanelActionHandling {
     func capability(
         for action: SearchPanelFileAction,
@@ -136,6 +177,15 @@ extension SearchPanelActionHandling {
 /// existing destination is never overwritten without a dedicated conflict UI.
 @MainActor
 final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
+    private let applicationLauncher: any SearchPanelApplicationLaunching
+
+    init(
+        applicationLauncher: any SearchPanelApplicationLaunching =
+            DefaultSearchPanelApplicationLauncher()
+    ) {
+        self.applicationLauncher = applicationLauncher
+    }
+
     func capabilities(
         for item: SearchPanelItem
     ) async -> [SearchPanelFileAction: SearchPanelActionCapability] {
@@ -254,10 +304,8 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
                 )
             }
             switch item.launchBehavior {
-            case .peekTranslation:
-                TranslationPanelController.shared.show()
-            case .fileURL:
-                break
+            case .fileURL: break
+            default: PEEKBuiltInToolLauncher.shared.open(item.launchBehavior)
             }
             return SearchPanelActionFeedback(L10n.tr("已打开 %@", item.displayName))
         }
@@ -268,8 +316,13 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
 
         switch action {
         case .open:
-            guard NSWorkspace.shared.open(item.url) else {
-                throw CocoaError(.fileNoSuchFile)
+            if item.category == .applications,
+               item.url.pathExtension.caseInsensitiveCompare("app") == .orderedSame {
+                try await applicationLauncher.openApplication(at: item.url)
+            } else {
+                guard NSWorkspace.shared.open(item.url) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
             }
             return SearchPanelActionFeedback(L10n.tr("已打开 %@", item.displayName))
 
@@ -304,14 +357,30 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
                 isDirectory: item.isDirectory
             )
             try validateDestinationFolder(folder, source: item)
-            try await Self.runFileOperation(
+            let outcome = try await Self.runFileOperation(
                 source: item.url,
                 destination: destination,
                 shouldMove: true
             )
+            let message: String
+            switch outcome {
+            case .moved:
+                message = L10n.tr("已移动到 %@", folder.lastPathComponent)
+            case .copiedAcrossVolumes:
+                message = L10n.tr(
+                    "已安全复制到 %@；源项目位于另一磁盘或卷信息不可用，未自动删除",
+                    folder.lastPathComponent
+                )
+            case .copied:
+                message = L10n.tr("已复制到 %@", folder.lastPathComponent)
+            }
+            let mutation: SearchPanelActionFeedback.FileSystemMutation = outcome == .moved
+                ? .moved
+                : .copied
             return SearchPanelActionFeedback(
-                L10n.tr("已移动到 %@", folder.lastPathComponent),
-                updatedURL: destination
+                message,
+                updatedURL: destination,
+                fileSystemMutation: mutation
             )
 
         case .copyTo:
@@ -322,14 +391,15 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
                 isDirectory: item.isDirectory
             )
             try validateDestinationFolder(folder, source: item)
-            try await Self.runFileOperation(
+            _ = try await Self.runFileOperation(
                 source: item.url,
                 destination: destination,
                 shouldMove: false
             )
             return SearchPanelActionFeedback(
                 L10n.tr("已复制到 %@", folder.lastPathComponent),
-                updatedURL: destination
+                updatedURL: destination,
+                fileSystemMutation: .copied
             )
 
         case .airDrop:
@@ -376,22 +446,97 @@ final class DefaultSearchPanelActionHandler: SearchPanelActionHandling {
         }
     }
 
-    private nonisolated static func runFileOperation(
+    struct FileOperationHooks: Sendable {
+        let afterStagingCopy: (@Sendable () -> Void)?
+        let sameVolumeOverride: Bool?
+
+        init(
+            afterStagingCopy: (@Sendable () -> Void)? = nil,
+            sameVolumeOverride: Bool? = nil
+        ) {
+            self.afterStagingCopy = afterStagingCopy
+            self.sameVolumeOverride = sameVolumeOverride
+        }
+
+        static let none = FileOperationHooks()
+    }
+
+    enum FileOperationOutcome: Equatable, Sendable {
+        case copied
+        case moved
+        case copiedAcrossVolumes
+    }
+
+    /// Same-volume moves use the filesystem's atomic rename so an actively
+    /// changing file or directory cannot be copied and then deleted from under a
+    /// writer. Cross-volume moves cannot provide that guarantee; PEEK therefore
+    /// publishes a complete copy and deliberately preserves the source.
+    nonisolated static func runFileOperation(
         source: URL,
         destination: URL,
-        shouldMove: Bool
-    ) async throws {
-        try await Task.detached(priority: .userInitiated) {
+        shouldMove: Bool,
+        hooks: FileOperationHooks = .none
+    ) async throws -> FileOperationOutcome {
+        let worker = Task.detached(priority: .userInitiated) {
             let fileManager = FileManager.default
             guard !fileManager.fileExists(atPath: destination.path) else {
                 throw SearchPanelActionError.destinationExists(destination.lastPathComponent)
             }
-            if shouldMove {
+
+            let sameVolume = hooks.sameVolumeOverride ?? {
+                guard let sourceVolume = volumeNumber(at: source, fileManager: fileManager),
+                      let destinationVolume = volumeNumber(
+                        at: destination.deletingLastPathComponent(),
+                        fileManager: fileManager
+                      ) else {
+                    return false
+                }
+                return sourceVolume == destinationVolume
+            }()
+
+            if shouldMove, sameVolume {
+                try Task.checkCancellation()
                 try fileManager.moveItem(at: source, to: destination)
-            } else {
-                try fileManager.copyItem(at: source, to: destination)
+                return FileOperationOutcome.moved
             }
-        }.value
+
+            let stagingURL = destination.deletingLastPathComponent()
+                .appendingPathComponent(
+                    "PEEK-\(UUID().uuidString).partial",
+                    isDirectory: false
+                )
+            defer {
+                if fileManager.fileExists(atPath: stagingURL.path) {
+                    try? fileManager.removeItem(at: stagingURL)
+                }
+            }
+
+            try Task.checkCancellation()
+            try fileManager.copyItem(at: source, to: stagingURL)
+            hooks.afterStagingCopy?()
+            try Task.checkCancellation()
+            guard !fileManager.fileExists(atPath: destination.path) else {
+                throw SearchPanelActionError.destinationExists(destination.lastPathComponent)
+            }
+            try fileManager.moveItem(at: stagingURL, to: destination)
+            return shouldMove ? .copiedAcrossVolumes : .copied
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+
+    private nonisolated static func volumeNumber(
+        at url: URL,
+        fileManager: FileManager
+    ) -> UInt64? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let number = attributes[.systemNumber] as? NSNumber else {
+            return nil
+        }
+        return number.uint64Value
     }
 
     private nonisolated static func isProtectedSystemItem(_ url: URL) -> Bool {

@@ -172,6 +172,7 @@ final class ScreenshotCaptureCoordinator {
         let continuation: CheckedContinuation<ScreenshotCaptureResult?, Error>
         var watchdog: Task<Void, Never>?
         var inlineEditorStarted: Bool
+        var inlineEditorSessionID: UUID?
     }
 
     private static let sessionTimeoutNanoseconds: UInt64 = 60_000_000_000
@@ -179,9 +180,32 @@ final class ScreenshotCaptureCoordinator {
     private var activeSession: ActiveSession?
     private var activeRequestToken: ScreenshotCaptureRequestToken?
     private let inlineEditorController = ScreenshotEditorController()
+    private let captureDesktop: @MainActor @Sendable () async throws -> ScreenshotFrozenDesktop
+    private let hasScreenRecordingPermission: @MainActor @Sendable () -> Bool
+    private let requestScreenRecordingPermission: @MainActor @Sendable () -> Bool
+
+    init(
+        captureDesktop: @escaping @MainActor @Sendable () async throws -> ScreenshotFrozenDesktop = {
+            try await ScreenshotFrozenDesktop.capture()
+        },
+        hasScreenRecordingPermission: @escaping @MainActor @Sendable () -> Bool = {
+            CGPreflightScreenCaptureAccess()
+        },
+        requestScreenRecordingPermission: @escaping @MainActor @Sendable () -> Bool = {
+            CGRequestScreenCaptureAccess()
+        }
+    ) {
+        self.captureDesktop = captureDesktop
+        self.hasScreenRecordingPermission = hasScreenRecordingPermission
+        self.requestScreenRecordingPermission = requestScreenRecordingPermission
+    }
 
     var isCapturing: Bool {
         activeRequestToken != nil || activeSession != nil
+    }
+
+    var hasPresentedOverlay: Bool {
+        activeSession != nil
     }
 
     func captureRegion(
@@ -213,14 +237,16 @@ final class ScreenshotCaptureCoordinator {
         requestPermissionIfNeeded: Bool = true,
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds,
+        initialSelectionRect: CGRect? = nil,
+        initialSelectionHint: String? = nil,
         requestToken: ScreenshotCaptureRequestToken? = nil,
         onAction: ((ScreenshotEditorAction) -> Void)? = nil
     ) async throws -> ScreenshotCaptureResult? {
         try await captureRegion(
             requestPermissionIfNeeded: requestPermissionIfNeeded,
             presentationDelayNanoseconds: presentationDelayNanoseconds,
-            initialSelectionRect: nil,
-            initialSelectionHint: nil,
+            initialSelectionRect: initialSelectionRect,
+            initialSelectionHint: initialSelectionHint,
             automaticHoverWindowRect: nil,
             automaticHoverSelectionRects: [],
             requestToken: requestToken,
@@ -267,7 +293,7 @@ final class ScreenshotCaptureCoordinator {
             try requestToken.checkCancellation()
 
             let permissionStartedAt = ScreenshotCaptureDiagnostics.nowNanoseconds()
-            let hasPermission = CGPreflightScreenCaptureAccess()
+            let hasPermission = hasScreenRecordingPermission()
             ScreenshotCaptureDiagnostics.record(
                 hasPermission ? "permission_granted" : "permission_missing",
                 session: diagnosticSession,
@@ -276,7 +302,7 @@ final class ScreenshotCaptureCoordinator {
             try requestToken.checkCancellation()
             guard hasPermission else {
                 if requestPermissionIfNeeded {
-                    let permissionWasGranted = CGRequestScreenCaptureAccess()
+                    let permissionWasGranted = requestScreenRecordingPermission()
                     try requestToken.checkCancellation()
                     if permissionWasGranted {
                         // TCC permission changes are not reliable for a process that
@@ -306,7 +332,7 @@ final class ScreenshotCaptureCoordinator {
             )
             let desktop: ScreenshotFrozenDesktop
             do {
-                desktop = try await ScreenshotFrozenDesktop.capture()
+                desktop = try await captureDesktop()
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -373,7 +399,13 @@ final class ScreenshotCaptureCoordinator {
 
     func cancelCapture() {
         activeRequestToken?.cancel()
-        guard let sessionID = activeSession?.id else { return }
+        guard let sessionID = activeSession?.id else {
+            // ScreenCaptureKit preparation is outside our control and may not
+            // return promptly. Release coordinator ownership immediately so a
+            // cancelled preparation can never block every later screenshot.
+            activeRequestToken = nil
+            return
+        }
         complete(sessionID: sessionID, with: .success(nil))
     }
 
@@ -432,6 +464,11 @@ final class ScreenshotCaptureCoordinator {
         model.onChange = { [views] in
             views.forEach { $0.needsDisplay = true }
         }
+        model.onCursorChange = { [views] in
+            views.forEach { view in
+                view.window?.invalidateCursorRects(for: view)
+            }
+        }
         model.onCancel = { [weak self] in
             self?.complete(sessionID: sessionID, with: .success(nil))
         }
@@ -455,8 +492,29 @@ final class ScreenshotCaptureCoordinator {
                     onAction: onAction
                 )
             }
-            model.onSelectionReady = beginInlineEditing
-            model.onFinish = beginInlineEditing
+            model.onSelectionPreview = { [weak self] selection in
+                guard let self,
+                      let editorID = self.activeSession?.inlineEditorSessionID else {
+                    return
+                }
+                self.inlineEditorController.previewInlineSelection(
+                    sessionID: editorID,
+                    rect: selection
+                )
+            }
+            let acceptSelection: (CGRect) -> Void = { [weak self] selection in
+                guard let self else { return }
+                if let editorID = self.activeSession?.inlineEditorSessionID {
+                    self.inlineEditorController.commitInlineSelection(
+                        sessionID: editorID,
+                        rect: selection
+                    )
+                } else {
+                    beginInlineEditing(selection)
+                }
+            }
+            model.onSelectionReady = acceptSelection
+            model.onFinish = acceptSelection
         }
 
         activeSession = ActiveSession(
@@ -466,7 +524,8 @@ final class ScreenshotCaptureCoordinator {
             panels: panels,
             continuation: continuation,
             watchdog: nil,
-            inlineEditorStarted: false
+            inlineEditorStarted: false,
+            inlineEditorSessionID: nil
         )
 
         ScreenshotCaptureDiagnostics.record(
@@ -576,7 +635,7 @@ final class ScreenshotCaptureCoordinator {
                 return leftArea < rightArea
             }
             let screenFrame = owningDisplay?.screenFrame ?? desktop.desktopBounds
-            inlineEditorController.editInline(
+            let editorID = inlineEditorController.editInline(
                 image: image,
                 selectionRect: selection,
                 screenFrame: screenFrame,
@@ -589,6 +648,9 @@ final class ScreenshotCaptureCoordinator {
                 },
                 onSelectionChanged: { rect in
                     model.updateSelectionDuringEditing(rect)
+                },
+                onSelectionInteractionChanged: { enabled in
+                    model.setSelectionInteractionEnabled(enabled)
                 },
                 onAction: onAction
             ) { [weak self] editedImage, finalSelectionRect in
@@ -612,6 +674,8 @@ final class ScreenshotCaptureCoordinator {
                     )
                 )
             }
+            guard activeSession?.id == sessionID else { return }
+            activeSession?.inlineEditorSessionID = editorID
         } catch {
             NSSound.beep()
             complete(sessionID: sessionID, with: .failure(error))
@@ -627,7 +691,9 @@ final class ScreenshotCaptureCoordinator {
 
         session.watchdog?.cancel()
         session.model.onChange = nil
+        session.model.onCursorChange = nil
         session.model.onCancel = nil
+        session.model.onSelectionPreview = nil
         session.model.onSelectionReady = nil
         session.model.onFinish = nil
         inlineEditorController.closeAll()

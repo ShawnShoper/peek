@@ -1,7 +1,7 @@
 # PEEK 隐私政策 / Privacy Policy
 
-最后更新：2026 年 8 月 24 日
-Last updated: August 24, 2026
+最后更新：2026 年 8 月 28 日
+Last updated: August 28, 2026
 
 PEEK 是一款 macOS 菜单栏工具，提供应用与文件查找、截图、OCR、二维码识别和翻译功能。本政策说明 PEEK 如何处理你的数据与系统权限。
 
@@ -29,6 +29,16 @@ PEEK builds a local index for system application folders and folders that you ex
 
 To improve local ranking, PEEK may store how often an app is opened through PEEK. Search settings, authorized folders, security-scoped bookmarks, exclusions, shortcuts, and some interface state are also stored locally. Index progress and logs may show the local path currently being processed in Settings; this information is not uploaded automatically.
 
+### 剪贴板历史 / Clipboard history
+
+启用剪贴板历史后，PEEK 会在后台观察系统剪贴板变化，并把支持的文字、富文本、图片、网址以及文件或文件夹引用保存在应用沙盒内。历史最多保留 100 条并受 256 MB 本地空间上限保护；单条超过 32 MB 的内容不会保存。你可以暂停记录、排除指定应用、删除单条记录或清空全部记录。
+
+当你在剪贴板历史中选择网址记录时，PEEK 只在本地解析网址并显示离线链接卡片，不会连接目标网站。只有当你主动选择“在浏览器中打开”后，网址才会交给外部浏览器。
+
+When Clipboard History is enabled, PEEK observes system clipboard changes in the background and stores supported text, rich text, images, web addresses, and file or folder references inside the app sandbox. It keeps at most 100 items with a 256 MB local storage limit, and does not save individual items larger than 32 MB. You can pause recording, exclude chosen apps, delete an item, or clear all history.
+
+When you select a web address in Clipboard History, PEEK parses it locally and displays an offline link card without contacting the destination. The URL is handed to your external browser only after you choose Open in Browser.
+
 ### 截图、OCR 与二维码 / Screenshots, OCR, and QR codes
 
 截图像素、标注、OCR 和二维码识别均使用 macOS 系统能力在本机处理。结果只会在你主动选择时复制到系统剪贴板、保存到你指定的位置、钉在屏幕上，或交给其他应用打开。PEEK 不会自动上传这些内容。
@@ -41,9 +51,9 @@ If you choose to open a URL found in a QR code, macOS passes it to the appropria
 
 ### Apple 本地翻译 / Apple on-device translation
 
-在支持的 macOS 版本上，Apple 翻译使用系统管理的本地语言模型。PEEK 不会把使用此功能输入的正文发送给百度、Google 或 PEEK 自有服务器。语言包的下载和管理由 macOS 与 Apple 负责。
+在支持的 macOS 版本上，Apple 翻译使用系统管理的本地语言模型。仅使用 Apple 本地翻译时，PEEK 不会把正文发送给百度、Google 或 PEEK 自有服务器；语言包的下载和管理由 macOS 与 Apple 负责。如果你同时启用了云翻译服务，只有在你主动提交翻译时，同一段正文才会按下一节的说明发送给相应服务商。
 
-On supported macOS versions, Apple translation uses language models managed by the system. PEEK does not send text entered for this feature to Baidu, Google, or a PEEK-operated server. Language-pack downloads and management are handled by macOS and Apple.
+On supported macOS versions, Apple translation uses language models managed by the system. When you use only Apple on-device translation, PEEK does not send the text to Baidu, Google, or a PEEK-operated server. Language-pack downloads and management are handled by macOS and Apple. If you also enable cloud translation, the same text is sent to the applicable provider only when you actively submit a translation, as described in the next section.
 
 ## 3. 可选云翻译 / Optional cloud translation
 
@@ -67,9 +77,9 @@ When enabled, PEEK sends the text, source language (when specified), target lang
 
 Cloud translation requests do not pass through a PEEK-operated server, and PEEK does not create a cloud translation history. The provider receives the text, credentials or signature needed to service the request, and ordinary network information. The provider may process or retain that data under its own terms and privacy policy. Before enabling a provider, review its policy and make sure you are authorized to send the text.
 
-PEEK 不会出售云翻译数据，也不会授权服务商将这些数据用于广告或跨应用跟踪。第三方服务只用于完成你主动提交的翻译请求，并应依据其公开政策和适用法律提供与本政策一致的保护。如果服务商的政策发生实质变化，PEEK 会重新评估该集成并更新本政策或移除相关功能。
+PEEK 不会出售云翻译数据，也不会授权服务商将这些数据用于广告或跨应用跟踪。第三方服务只用于完成你主动提交的翻译请求。如果服务商的政策发生实质变化，PEEK 会重新评估该集成并更新本政策或移除相关功能。
 
-PEEK does not sell cloud-translation data or authorize providers to use it for advertising or cross-app tracking. A provider is used only to fulfill a translation request that you submit and is expected to protect the data consistently with this policy, its published policy, and applicable law. If a provider materially changes its practices, PEEK will reassess the integration and update this policy or remove the feature.
+PEEK does not sell cloud-translation data or authorize providers to use it for advertising or cross-app tracking. A provider is used only to fulfill a translation request that you submit. If a provider materially changes its practices, PEEK will reassess the integration and update this policy or remove the feature.
 
 ## 4. API 凭据 / API credentials
 
@@ -83,17 +93,17 @@ PEEK 只在相应功能需要时请求以下权限：
 
 - **文件与文件夹**：读取你通过系统文件选择器明确授权的位置，并为其建立本地索引；文件移动、复制或保存只在你主动执行时发生。
 - **屏幕录制**：读取屏幕像素，用于区域截图、滚动截图、OCR 截图和相关预览。
-- **辅助功能 / Post Event**：在你启动滚动截图时识别滚动区域并发送滚动事件；不会用于后台记录键盘输入。
-- **网络访问**：仅用于你启用的百度或 Google 云翻译，以及你主动打开的外部链接。
-- **剪贴板**：在你选择粘贴、复制或完成截图等操作时读取或写入相关内容。
+- **辅助功能 / Post Event**：在你启动滚动截图时识别滚动区域并发送滚动事件；当你主动选择“复制并粘贴”时向此前使用的应用发送一次粘贴快捷键。不会用于后台记录键盘输入。
+- **网络访问**：用于你启用的百度或 Google 云翻译，以及你主动选择在外部浏览器打开的链接。剪贴板链接卡片本身不联网。
+- **剪贴板**：启用剪贴板历史时读取支持的内容并保存在本机；在你选择粘贴、复制或完成截图等操作时写入相关内容。
 
 PEEK requests the following permissions only when needed for a feature:
 
 - **Files and folders:** Reads locations you explicitly authorize through the system file picker and builds a local index. Moving, copying, or saving files occurs only when you request it.
 - **Screen Recording:** Reads screen pixels for region capture, scrolling capture, OCR capture, and related previews.
-- **Accessibility / Post Event:** Identifies scrollable areas and sends scrolling events when you start scrolling capture. It is not used to record keyboard input in the background.
-- **Network access:** Used only for Baidu or Google cloud translation that you enable and for external links that you choose to open.
-- **Clipboard:** Reads or writes relevant content when you choose actions such as Paste, Copy, or completing a screenshot.
+- **Accessibility / Post Event:** Identifies scrollable areas and sends scrolling events when you start scrolling capture. When you actively choose Copy and Paste, it sends one paste shortcut to the app you were previously using. It is not used to record keyboard input in the background.
+- **Network access:** Used for Baidu or Google cloud translation that you enable and links you explicitly open in an external browser. Clipboard link cards do not use the network.
+- **Clipboard:** Reads supported content locally while Clipboard History is enabled, and writes relevant content when you choose actions such as Paste, Copy, or completing a screenshot.
 
 受保护窗口、DRM 内容和 macOS 禁止读取的文件不会被绕过。PEEK 不修改、删除或规避 macOS 的隐私权限数据库。
 
@@ -105,7 +115,7 @@ PEEK does not bypass protected windows, DRM content, files blocked by macOS, or 
 - 从 PEEK 的搜索设置中删除授权目录后，该目录会停止参与搜索，相关索引记录会在本机清理流程中移除。
 - 你可以在 PEEK 设置中关闭云翻译并删除保存的凭据。建议在卸载 PEEK 前先删除凭据，因为 macOS 可能在应用卸载后继续保留钥匙串项目。
 - 你可以在“系统设置 > 隐私与安全性”中随时撤销屏幕录制、辅助功能和文件访问权限。
-- 系统剪贴板中的内容由 macOS 管理；你导出的文件由你自行管理和删除。
+- 系统当前剪贴板由 macOS 管理；PEEK 保存的历史可以在“设置 > 剪贴板”中暂停、排除应用或清空。
 - PEEK 不在自有服务器保留云翻译正文。服务商的数据保留与删除规则由其各自政策决定，请直接向相应服务商行使相关权利。
 - 如需清除全部本机数据，请先退出 PEEK，删除已保存的云翻译凭据，然后移除 PEEK 及其由 macOS 管理的应用数据。
 
@@ -113,15 +123,15 @@ PEEK does not bypass protected windows, DRM content, files blocked by macOS, or 
 - Removing an authorized folder from PEEK Search settings stops it from participating in search, and related index records are removed by the local cleanup process.
 - You can disable a cloud provider and delete its saved credentials in PEEK Settings. Remove credentials before uninstalling PEEK because macOS may preserve Keychain items after an app is removed.
 - You can revoke Screen Recording, Accessibility, and file access at any time in **System Settings > Privacy & Security**.
-- Clipboard content is managed by macOS. Files that you export remain under your control and can be deleted by you.
+- The current system clipboard is managed by macOS. PEEK's saved history can be paused, filtered by app, or cleared in **Settings > Clipboard**.
 - PEEK does not retain cloud-translation text on a PEEK-operated server. Provider retention and deletion are governed by the provider's own policy; contact that provider to exercise applicable rights.
 - To remove all local data, quit PEEK, delete saved cloud-translation credentials, and then remove PEEK and its macOS-managed app data.
 
 ## 7. 诊断信息 / Diagnostics
 
-PEEK 不集成第三方崩溃上报或用户行为分析服务。应用和 macOS 可能在本机保存运行日志。PEEK 的可复制诊断信息不应包含文件正文、截图、搜索词或 API 密钥；你仍应在主动提交问题前检查准备分享的内容。
+PEEK 不集成第三方崩溃上报或用户行为分析服务。应用和 macOS 可能在本机保存运行日志。PEEK 的可复制诊断信息包含版本、索引状态和使用 `~` 隐去账户名的本地索引数据库路径；不包含文件正文、截图、搜索词或 API 密钥。你仍应在主动提交问题前检查准备分享的内容。
 
-PEEK does not integrate third-party crash reporting or behavioral analytics services. The app and macOS may keep operational logs locally. PEEK's copyable diagnostics are designed not to include document contents, screenshots, search terms, or API keys, but you should still review anything before sharing it in a support request.
+PEEK does not integrate third-party crash reporting or behavioral analytics services. The app and macOS may keep operational logs locally. PEEK's copyable diagnostics include the version, index status, and the local index database path with the account name abbreviated as `~`; they do not include document contents, screenshots, search terms, or API keys. You should still review anything before sharing it in a support request.
 
 ## 8. 儿童隐私 / Children's privacy
 

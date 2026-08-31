@@ -56,8 +56,12 @@ actor FileSearchCPUBudget {
         let elapsedCPU = max(nowCPU - baselineCPUTime, 0)
         measuredFraction = elapsedCPU / elapsedWall
 
-        let requiredWall = elapsedCPU / targetFraction
-        var remainingDelay = max(requiredWall - elapsedWall, 0)
+        var remainingDelay = Self.requiredThrottleDelay(
+            elapsedWall: elapsedWall,
+            elapsedCPU: elapsedCPU,
+            targetFraction: targetFraction,
+            windowDuration: windowDuration
+        )
         while remainingDelay > 0 {
             try Task.checkCancellation()
             let slice = min(remainingDelay, 1)
@@ -75,6 +79,27 @@ actor FileSearchCPUBudget {
             baselineCPUTime = Self.processCPUTime()
             measuredFraction = 0
         }
+    }
+
+    /// Returns only the delay remaining in the current accounting window.
+    /// CPU already spent cannot be "paid back" beyond that boundary: carrying
+    /// an oversized batch into later windows can otherwise pause indexing for
+    /// several minutes and make a healthy background pass look stuck.
+    nonisolated static func requiredThrottleDelay(
+        elapsedWall: TimeInterval,
+        elapsedCPU: TimeInterval,
+        targetFraction: Double,
+        windowDuration: TimeInterval
+    ) -> TimeInterval {
+        let safeElapsedWall = max(elapsedWall, 0)
+        let safeElapsedCPU = max(elapsedCPU, 0)
+        let safeTarget = max(targetFraction, 0.000_001)
+        let remainingForTarget = max(
+            safeElapsedCPU / safeTarget - safeElapsedWall,
+            0
+        )
+        let remainingInWindow = max(windowDuration - safeElapsedWall, 0)
+        return min(remainingForTarget, remainingInWindow)
     }
 
     private nonisolated static func processCPUTime() -> TimeInterval {

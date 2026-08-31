@@ -3,6 +3,8 @@ import Foundation
 
 @MainActor
 final class ScreenshotService: ObservableObject {
+    private static let capturePreparationTimeoutNanoseconds: UInt64 = 8_000_000_000
+
     private struct PreparedScrollTarget {
         let canAutomaticallyScroll: Bool
         let recognizedRegion: ScrollCaptureTarget?
@@ -14,14 +16,17 @@ final class ScreenshotService: ObservableObject {
         let captureRect: CGRect
         let modeDescription: String
         let configuredPixelLimit: Int
-        let actualScrollAmount: Int?
+        /// Pixel delta sent in the wheel event. The target application may
+        /// consume less; image overlap remains the source of truth for the
+        /// observed content displacement.
+        let requestedScrollAmount: Int?
         let targetApplicationName: String?
         let targetWindowID: CGWindowID?
         let automaticTargetValidated: Bool
 
         func updating(
             captureRect: CGRect? = nil,
-            actualScrollAmount: Int? = nil,
+            requestedScrollAmount: Int? = nil,
             automaticTargetValidated: Bool? = nil
         ) -> ScrollAttemptContext {
             ScrollAttemptContext(
@@ -29,7 +34,7 @@ final class ScreenshotService: ObservableObject {
                 captureRect: captureRect ?? self.captureRect,
                 modeDescription: modeDescription,
                 configuredPixelLimit: configuredPixelLimit,
-                actualScrollAmount: actualScrollAmount ?? self.actualScrollAmount,
+                requestedScrollAmount: requestedScrollAmount ?? self.requestedScrollAmount,
                 targetApplicationName: targetApplicationName,
                 targetWindowID: targetWindowID,
                 automaticTargetValidated: automaticTargetValidated
@@ -51,13 +56,13 @@ final class ScreenshotService: ObservableObject {
     @Published private(set) var isRecognizingText = false
     @Published private(set) var lastMessage: String?
 
-    private let captureCoordinator = ScreenshotCaptureCoordinator()
+    private let captureCoordinator: ScreenshotCaptureCoordinator
     private let editorController = ScreenshotEditorController()
     private let ocrService = PEEKOCRService()
     private let qrCodeService = PEEKQRCodeService()
-    private let scrollHUD = ScrollCaptureHUDController()
     private let scrollTargetResolver = ScrollCaptureTargetResolver()
     private let indexActivityController: any FileSearchIndexActivityControlling
+    private let capturePreparationTimeoutNanoseconds: UInt64
     private var scrollSession: ScrollCaptureSession?
     private var pendingScrollRect: CGRect?
     private var originalFrontmostApplication: NSRunningApplication?
@@ -67,14 +72,30 @@ final class ScreenshotService: ObservableObject {
     private var editorActionOccurred = false
     private var shouldReactivateOriginalApplication = true
     private var activeCaptureRequest: ScreenshotCaptureRequestToken?
+    private var capturePreparationWatchdog: Task<Void, Never>?
+    /// The eight-second watchdog covers only permission/freeze/overlay setup.
+    /// Selection, scrolling, OCR and editing are user work and must never be
+    /// cancelled by the preparation timer after their overlay has completed.
+    private var capturePreparationCompleted = false
     private var scrollAttemptContext: ScrollAttemptContext?
     private var pendingScrollAmountOverride: Int?
+    /// Recovery choices are scoped to the next attempt. They must never
+    /// rewrite the user's persistent automatic/manual preference.
+    private var pendingScrollAutomaticOverride: Bool?
 
     init(
         indexActivityController: any FileSearchIndexActivityControlling =
-            FileSearchIndexRuntime.shared
+            FileSearchIndexRuntime.shared,
+        captureCoordinator: ScreenshotCaptureCoordinator = ScreenshotCaptureCoordinator(),
+        capturePreparationTimeoutNanoseconds: UInt64 =
+            ScreenshotService.capturePreparationTimeoutNanoseconds
     ) {
         self.indexActivityController = indexActivityController
+        self.captureCoordinator = captureCoordinator
+        self.capturePreparationTimeoutNanoseconds = max(
+            1_000_000,
+            capturePreparationTimeoutNanoseconds
+        )
     }
 
     /// 启动时冻结一次桌面；选区与编辑始终引用同一份不可变画面。
@@ -82,7 +103,7 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard let captureRequest = await beginCapture(
+        guard let captureRequest = beginCapture(
             message: L10n.tr("拖动选择区域；可移动或缩放，双击或 Enter 后截图")
         ) else { return }
         defer { endCapture(request: captureRequest) }
@@ -120,6 +141,7 @@ final class ScreenshotService: ObservableObject {
                     }
                 }
             ) != nil else {
+                guard !captureRequest.isCancelled else { return }
                 if let selectionRect = pendingScrollRect {
                     pendingScrollRect = nil
                     DispatchQueue.main.async { [weak self] in
@@ -136,6 +158,7 @@ final class ScreenshotService: ObservableObject {
                 }
                 return
             }
+            completeCapturePreparation()
 
             // Inline Done/double-click has already written the rendered image
             // to the pasteboard. Default capture never creates a history file;
@@ -152,7 +175,7 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard let captureRequest = await beginCapture(
+        guard let captureRequest = beginCapture(
             message: L10n.tr("请选择要连续滚动的内容区域")
         ) else {
             return
@@ -163,9 +186,12 @@ final class ScreenshotService: ObservableObject {
         // without rewriting the user's persistent pixel ceiling.
         let automaticAmountOverride = pendingScrollAmountOverride
         pendingScrollAmountOverride = nil
+        let automaticModeOverride = pendingScrollAutomaticOverride
+        pendingScrollAutomaticOverride = nil
 
         do {
             if let initialSelectionRect {
+                completeCapturePreparation()
                 let selectedWindow = scrollTargetResolver.resolveWindow(
                     containingAppKitPoint: CGPoint(
                         x: initialSelectionRect.midX,
@@ -178,7 +204,8 @@ final class ScreenshotService: ObservableObject {
                 }
                 try await performScrollCapture(
                     selectionRect: initialSelectionRect,
-                    automaticAmountOverride: automaticAmountOverride
+                    automaticAmountOverride: automaticAmountOverride,
+                    automaticModeOverride: automaticModeOverride
                 )
                 return
             }
@@ -238,9 +265,11 @@ final class ScreenshotService: ObservableObject {
                 automaticHoverSelectionRects: detectedWindowTarget?.hoverSelectionRects ?? [],
                 requestToken: captureRequest
             ) else {
+                guard !captureRequest.isCancelled else { return }
                 lastMessage = L10n.tr("已取消滚动截图")
                 return
             }
+            completeCapturePreparation()
             try checkCaptureCancellation()
 
             if let detectedTarget,
@@ -272,7 +301,8 @@ final class ScreenshotService: ObservableObject {
             }
             try await performScrollCapture(
                 selectionRect: capture.selectionRect,
-                automaticAmountOverride: automaticAmountOverride
+                automaticAmountOverride: automaticAmountOverride,
+                automaticModeOverride: automaticModeOverride
             )
         } catch is CancellationError {
             lastMessage = L10n.tr("已取消滚动截图")
@@ -313,7 +343,7 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard let captureRequest = await beginCapture(
+        guard let captureRequest = beginCapture(
             message: L10n.tr("请选择需要 OCR 的区域")
         ) else {
             return
@@ -325,9 +355,11 @@ final class ScreenshotService: ObservableObject {
                 presentationDelayNanoseconds: presentationDelayNanoseconds,
                 requestToken: captureRequest
             ) else {
+                guard !captureRequest.isCancelled else { return }
                 lastMessage = L10n.tr("已取消 OCR")
                 return
             }
+            completeCapturePreparation()
             shouldReactivateOriginalApplication = false
             await recognizeText(in: capture.image, title: L10n.tr("截图 OCR"))
         } catch {
@@ -341,13 +373,17 @@ final class ScreenshotService: ObservableObject {
     }
 
     func cancelActiveCapture() {
-        activeCaptureRequest?.cancel()
+        let request = activeCaptureRequest
+        request?.cancel()
         captureCoordinator.cancelCapture()
         if let scrollSession {
             Task { await scrollSession.cancel() }
         }
         editorController.closeAll()
-        scrollHUD.close()
+        if let request {
+            endCapture(request: request)
+            lastMessage = L10n.tr("已取消截图")
+        }
     }
 
     func openScreenRecordingSettings() {
@@ -358,7 +394,7 @@ final class ScreenshotService: ObservableObject {
         openPrivacySettings(anchor: "Privacy_Accessibility")
     }
 
-    private func beginCapture(message: String) async -> ScreenshotCaptureRequestToken? {
+    private func beginCapture(message: String) -> ScreenshotCaptureRequestToken? {
         guard !isCapturing else {
             lastMessage = L10n.tr("已有截图任务正在进行；按 Esc 可取消")
             return nil
@@ -370,13 +406,15 @@ final class ScreenshotService: ObservableObject {
         scrollCaptureTarget = nil
         scrollWindowAnchor = nil
         scrollAttemptContext = nil
+        capturePreparationCompleted = false
         shouldReactivateOriginalApplication = true
         isCapturing = true
         lastMessage = message
-        // Confirm the blocker is installed, but never wait for the indexer to
-        // finish its current synchronous metadata read. Capture keeps the
-        // higher user-initiated priority and starts as soon as the gate updates.
-        await indexActivityController.beginCaptureActivity()
+        // Capture is user-initiated work and must start independently of the
+        // background indexer's activity queue. The blocker is delivered in
+        // order on a dedicated fire-and-forget path.
+        indexActivityController.beginCaptureActivity()
+        armCapturePreparationWatchdog(for: request)
         do {
             try request.checkCancellation()
         } catch {
@@ -391,7 +429,9 @@ final class ScreenshotService: ObservableObject {
         let originalApplication = originalFrontmostApplication
         let shouldReactivate = shouldReactivateOriginalApplication
         activeCaptureRequest = nil
-        scrollHUD.close()
+        capturePreparationWatchdog?.cancel()
+        capturePreparationWatchdog = nil
+        capturePreparationCompleted = false
         isCapturing = false
         isScrolling = false
         indexActivityController.endCaptureActivity()
@@ -408,6 +448,53 @@ final class ScreenshotService: ObservableObject {
            !originalApplication.isTerminated {
             originalApplication.activate(options: [.activateIgnoringOtherApps])
         }
+    }
+
+    /// The selection watchdog starts only after an overlay exists. This
+    /// independent watchdog covers the earlier index-signal, permission and
+    /// ScreenCaptureKit freeze phases so the menu can never remain stuck in
+    /// “capturing” indefinitely.
+    private func armCapturePreparationWatchdog(
+        for request: ScreenshotCaptureRequestToken
+    ) {
+        capturePreparationWatchdog?.cancel()
+        let diagnosticSession = ScreenshotCaptureDiagnostics.currentSession
+        let timeoutNanoseconds = capturePreparationTimeoutNanoseconds
+        capturePreparationWatchdog = Task { @MainActor [weak self, weak request] in
+            do {
+                try await Task.sleep(
+                    nanoseconds: timeoutNanoseconds
+                )
+            } catch {
+                return
+            }
+            guard let self,
+                  let request,
+                  self.activeCaptureRequest === request,
+                  !self.capturePreparationCompleted,
+                  !self.captureCoordinator.hasPresentedOverlay else {
+                return
+            }
+            request.cancel()
+            self.captureCoordinator.cancelCapture()
+            self.endCapture(request: request)
+            self.lastMessage = ScreenshotCaptureError.preparationTimedOut.localizedDescription
+            if let diagnosticSession {
+                ScreenshotCaptureDiagnostics.record(
+                    "capture_preparation_timed_out",
+                    session: diagnosticSession
+                )
+            }
+        }
+    }
+
+    /// Ends only the pre-overlay watchdog. The capture request itself remains
+    /// active until scrolling/editing finishes or the user cancels it.
+    private func completeCapturePreparation() {
+        guard !capturePreparationCompleted else { return }
+        capturePreparationCompleted = true
+        capturePreparationWatchdog?.cancel()
+        capturePreparationWatchdog = nil
     }
 
     private func handleCaptureFailure(_ error: Error, operation: String) {
@@ -501,11 +588,15 @@ final class ScreenshotService: ObservableObject {
 
     private func performScrollCapture(
         selectionRect: CGRect,
-        automaticAmountOverride: Int?
+        automaticAmountOverride: Int?,
+        automaticModeOverride: Bool?
     ) async throws {
+        completeCapturePreparation()
         lastMessage = L10n.tr("正在准备滚动截图…")
-        let useAutomatic = UserDefaults.standard.object(forKey: "screenshot.scrollAutomatic") == nil
-            || UserDefaults.standard.bool(forKey: "screenshot.scrollAutomatic")
+        let useAutomatic = ScrollCapturePreferenceResolver.automaticScrollingEnabled(
+            defaults: .standard,
+            attemptOverride: automaticModeOverride
+        )
         let persistedConfiguredAmount = UserDefaults.standard.integer(
             forKey: "screenshot.scrollAmount"
         ).nonZeroOr(700)
@@ -517,7 +608,7 @@ final class ScreenshotService: ObservableObject {
             captureRect: selectionRect,
             modeDescription: useAutomatic ? L10n.tr("自动滚动") : L10n.tr("手动滚动"),
             configuredPixelLimit: persistedConfiguredAmount,
-            actualScrollAmount: nil,
+            requestedScrollAmount: nil,
             targetApplicationName: scrollTargetApplication?.localizedName,
             targetWindowID: scrollWindowAnchor?.windowID,
             automaticTargetValidated: false
@@ -546,14 +637,14 @@ final class ScreenshotService: ObservableObject {
             configuredAmount: requestedAmount,
             captureHeight: captureRect.height
         )
-        let actualScrollAmount: Int? = if case .automatic(let automatic) = mode {
+        let requestedScrollAmount: Int? = if case .automatic(let automatic) = mode {
             Int(automatic.amount)
         } else {
             nil
         }
         scrollAttemptContext = scrollAttemptContext?.updating(
             captureRect: captureRect,
-            actualScrollAmount: actualScrollAmount,
+            requestedScrollAmount: requestedScrollAmount,
             automaticTargetValidated: preparedTarget.canAutomaticallyScroll
         )
 
@@ -583,22 +674,25 @@ final class ScreenshotService: ObservableObject {
         scrollSession = session
         isScrolling = true
         try checkCaptureCancellation()
-        scrollHUD.show(
-            mode: mode,
-            selectionRect: captureRect,
-            onStop: { [weak self] in self?.stopScrollingCapture() },
-            onCancel: { [weak self] in self?.cancelActiveCapture() }
-        )
-
         let result = try await session.start { [weak self] progress in
             Task { @MainActor in
-                self?.scrollHUD.update(progress)
                 self?.lastMessage = progress.message
             }
         }
-        scrollHUD.close()
         isScrolling = false
         scrollSession = nil
+        if result.stopReason == .alignmentStopped {
+            // A validated prefix is useful, but it is not the bottom of the
+            // page. Route it through the existing explicit partial-result
+            // choice instead of opening a truncated image as if capture had
+            // completed successfully.
+            throw ScrollCapturePartialFailure(
+                underlying: .unreliableScrollRegion(
+                    frame: result.acceptedFrameCount + 1
+                ),
+                partialResult: result
+            )
+        }
         let image = NSImage(cgImage: result.image, size: .zero)
         pendingScrollRect = nil
         guard let edited = await edit(image, sourceSelectionRect: captureRect) else {
@@ -897,7 +991,6 @@ final class ScreenshotService: ObservableObject {
             return .cancel
         }
         shouldReactivateOriginalApplication = false
-        scrollHUD.close()
         isScrolling = false
         scrollSession = nil
         if partialResult != nil || isRecoverableScrollFailure(captureError) {
@@ -951,7 +1044,7 @@ final class ScreenshotService: ObservableObject {
         )
 
         var actions: [ScrollRecoveryAction] = []
-        if context?.actualScrollAmount != nil {
+        if context?.requestedScrollAmount != nil {
             alert.addButton(withTitle: L10n.tr("减小步长并重新框选"))
             actions.append(.retryWithReducedStep)
         }
@@ -1013,8 +1106,8 @@ final class ScreenshotService: ObservableObject {
             lines.append(L10n.tr("设置的像素上限：%d", context.configuredPixelLimit))
             lines.append(
                 L10n.tr(
-                    "本次实际步长：%@",
-                    context.actualScrollAmount.map(String.init) ?? L10n.tr("不适用/尚未开始")
+                    "本次发送滚动量：%@",
+                    context.requestedScrollAmount.map(String.init) ?? L10n.tr("不适用/尚未开始")
                 )
             )
             lines.append(
@@ -1036,6 +1129,22 @@ final class ScreenshotService: ObservableObject {
                 shouldAutoDetectScrollTarget ? L10n.tr("开启") : L10n.tr("关闭")
             )
         )
+        let capabilities = ScrollCaptureRuntimeCapabilities.current
+        let targetInspectionDescription: String
+        switch capabilities.targetInspectionMode {
+        case .accessibility:
+            targetInspectionDescription = L10n.tr("辅助功能滚动区")
+        case .visualCompatibility:
+            switch capabilities.appSandboxState {
+            case .enabled:
+                targetInspectionDescription = L10n.tr("视觉兼容模式（App Sandbox）")
+            case .disabled:
+                targetInspectionDescription = L10n.tr("视觉兼容模式")
+            case .unknown:
+                targetInspectionDescription = L10n.tr("视觉兼容模式（运行环境未确认）")
+            }
+        }
+        lines.append(L10n.tr("滚动定位方式：%@", targetInspectionDescription))
         lines.append(
             L10n.tr(
                 "Post Event 权限：%@",
@@ -1054,7 +1163,7 @@ final class ScreenshotService: ObservableObject {
     private func scheduleScrollRecovery(_ action: ScrollRecoveryAction) {
         let reducedAmount: Int?
         if case .retryWithReducedStep = action,
-           let currentAmount = scrollAttemptContext?.actualScrollAmount {
+           let currentAmount = scrollAttemptContext?.requestedScrollAmount {
             reducedAmount = max(1, currentAmount / 2)
         } else {
             reducedAmount = nil
@@ -1076,7 +1185,9 @@ final class ScreenshotService: ObservableObject {
             case .reselect:
                 self.lastMessage = L10n.tr("请重新框选纯滚动正文区域")
             case .switchToManual:
-                UserDefaults.standard.set(false, forKey: "screenshot.scrollAutomatic")
+                // This is a recovery strategy for one attempt, not a settings
+                // change. Persisting it made every later capture appear broken.
+                self.pendingScrollAutomaticOverride = false
                 self.lastMessage = L10n.tr("已切换为手动滚动，请重新框选")
             case .savePartial(_), .cancel:
                 return
@@ -1096,47 +1207,6 @@ final class ScreenshotService: ObservableObject {
             && abs(lhs.height - rhs.height) <= tolerance
     }
 
-    /// Resolve the topmost non-PEEK application below the selection's
-    /// center while our own windows are hidden. Quartz window bounds use a
-    /// top-left origin, unlike the AppKit selection rectangle.
-    private static func applicationBehindSelection(_ selectionRect: CGRect) -> NSRunningApplication? {
-        guard let windowInfo = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[String: Any]] else {
-            return nil
-        }
-
-        let referenceTop = NSScreen.screens.first?.frame.maxY ?? selectionRect.maxY
-        let quartzPoint = CGPoint(
-            x: selectionRect.midX,
-            y: referenceTop - selectionRect.midY
-        )
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-
-        for info in windowInfo {
-            guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-                  (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value != 0,
-                  (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1 > 0.01,
-                  let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
-                  ownerPID.int32Value != currentPID,
-                  let rawBounds = info[kCGWindowBounds as String],
-                  rawBounds is NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: rawBounds as! CFDictionary),
-                  bounds.width >= 1,
-                  bounds.height >= 1,
-                  bounds.contains(quartzPoint) else {
-                continue
-            }
-
-            let application = NSRunningApplication(processIdentifier: ownerPID.int32Value)
-            if application?.activationPolicy != .prohibited,
-               application?.isTerminated == false {
-                return application
-            }
-        }
-        return nil
-    }
 }
 
 private extension Int {

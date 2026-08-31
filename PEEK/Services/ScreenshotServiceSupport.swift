@@ -8,7 +8,10 @@ enum ScrollCaptureModeResolver {
     /// Keep enough shared content between adjacent frames for low-texture or
     /// animated pages. The pixel setting remains a user-configured ceiling;
     /// it is never treated as a minimum.
-    private static let preferredSelectionRatio: CGFloat = 0.35
+    // A smaller normal transaction leaves generous shared content for native
+    // lists, web views with floating controls and high-DPI displays. More
+    // frames are cheaper than losing the document tail to an ambiguous match.
+    private static let preferredSelectionRatio: CGFloat = 0.25
     private static let hardMaximumSelectionRatio: CGFloat = 0.45
 
     static func resolve(
@@ -49,6 +52,25 @@ enum ScrollCaptureModeResolver {
                 consecutiveDuplicateLimit: 2
             )
         )
+    }
+}
+
+/// Resolves the user's persistent scroll mode while allowing recovery to
+/// override one attempt without silently changing later captures.
+enum ScrollCapturePreferenceResolver {
+    static let automaticScrollingKey = "screenshot.scrollAutomatic"
+
+    static func automaticScrollingEnabled(
+        defaults: UserDefaults,
+        attemptOverride: Bool?
+    ) -> Bool {
+        if let attemptOverride {
+            return attemptOverride
+        }
+        guard defaults.object(forKey: automaticScrollingKey) != nil else {
+            return true
+        }
+        return defaults.bool(forKey: automaticScrollingKey)
     }
 }
 

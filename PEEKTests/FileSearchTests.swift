@@ -4,6 +4,100 @@ import XCTest
 @testable import PEEK
 
 final class FileSearchTests: XCTestCase {
+    func testRootRefreshRetryPolicyUsesBoundedExponentialBackoff() {
+        let policy = FileSearchRootRefreshRetryPolicy(
+            maximumWait: 10,
+            initialDelay: 0.25,
+            maximumDelay: 1
+        )
+
+        XCTAssertEqual(policy.delay(afterDeferredAttempt: 0), 0.25)
+        XCTAssertEqual(policy.delay(afterDeferredAttempt: 1), 0.5)
+        XCTAssertEqual(policy.delay(afterDeferredAttempt: 2), 1)
+        XCTAssertEqual(policy.delay(afterDeferredAttempt: 12), 1)
+        XCTAssertTrue(policy.shouldRetry(elapsed: 9.99))
+        XCTAssertFalse(policy.shouldRetry(elapsed: 10))
+    }
+
+    func testRootRefreshRetryPolicyRejectsNonFiniteAndExtremeInputs() {
+        let policy = FileSearchRootRefreshRetryPolicy(
+            maximumWait: .infinity,
+            initialDelay: .nan,
+            maximumDelay: .infinity
+        )
+
+        XCTAssertEqual(policy.maximumWait, 5 * 60)
+        XCTAssertEqual(policy.initialDelay, 0.35)
+        XCTAssertEqual(policy.maximumDelay, 2)
+        XCTAssertTrue(policy.delay(afterDeferredAttempt: 1_000).isFinite)
+        XCTAssertLessThanOrEqual(policy.delay(afterDeferredAttempt: 1_000), 10)
+    }
+
+    @MainActor
+    func testBuiltInCommandsMatchChinesePinyinAndEnglishQueries() throws {
+        let cases: [(query: String, behavior: SearchPanelLaunchBehavior)] = [
+            ("剪贴板", .peekClipboardHistory),
+            ("jiantieban", .peekClipboardHistory),
+            ("scrolling screenshot", .peekScrollingCapture),
+            ("ocr", .peekOCRCapture),
+            ("kuaijiejian", .peekSettings(.shortcuts)),
+            ("appearance", .peekSettings(.appearance))
+        ]
+
+        for testCase in cases {
+            let items = PEEKBuiltInSearchRegistration.items(
+                matching: testCase.query,
+                category: .all
+            )
+            XCTAssertTrue(
+                items.contains { $0.launchBehavior == testCase.behavior },
+                "query=\(testCase.query)"
+            )
+        }
+        XCTAssertTrue(
+            PEEKBuiltInSearchRegistration.items(matching: "", category: .all).isEmpty
+        )
+        XCTAssertTrue(
+            PEEKBuiltInSearchRegistration.items(matching: "OCR", category: .files).isEmpty
+        )
+    }
+
+    func testHealthDiagnosticsReportContainsOnlyRedactedRuntimeFacts() {
+        let snapshot = PEEKDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 0),
+            version: "0.3.0 (3)",
+            bundleIdentifier: "com.shawnshoper.peek",
+            systemVersion: "macOS Test",
+            architecture: "arm64",
+            displayDescriptions: ["display-1:1512x982@2.0x"],
+            screenRecordingGranted: true,
+            accessibilityGranted: false,
+            hotKeyStatuses: ["search": "registered"],
+            hotKeyFailureCount: 0,
+            indexPhase: FileSearchIndexPhase.ready.rawValue,
+            indexedItemCount: 42,
+            committedRootCount: 2,
+            indexingRootCount: 0,
+            inaccessibleLocationCount: 0,
+            authorizedDocumentRootCount: 3,
+            configuredDocumentRootCount: 4,
+            clipboardHistoryEnabled: true,
+            clipboardItemCount: 7,
+            clipboardByteCount: 512
+        )
+
+        let checks = PEEKHealthDiagnostics.checks(for: snapshot)
+        XCTAssertEqual(checks.first { $0.id == "capture" }?.severity, .healthy)
+        XCTAssertEqual(checks.first { $0.id == "scrolling" }?.severity, .warning)
+        XCTAssertEqual(checks.first { $0.id == "directories" }?.severity, .warning)
+
+        let report = PEEKHealthDiagnostics.report(for: snapshot)
+        XCTAssertTrue(report.contains("Index items: 42"))
+        XCTAssertTrue(report.contains("Clipboard records: 7"))
+        XCTAssertFalse(report.contains("/Users/"))
+        XCTAssertFalse(report.localizedCaseInsensitiveContains("api key"))
+    }
+
     @MainActor
     func testTranslationSubAppMatchesChinesePinyinAndEnglishQueries() {
         for query in ["翻译", "fanyi", "fy", "translate", "PEEK Translate"] {
@@ -374,6 +468,10 @@ final class FileSearchTests: XCTestCase {
             decoded.translation,
             ScreenshotGlobalHotKeyAction.translation.defaultShortcut
         )
+        XCTAssertEqual(
+            decoded.clipboardHistory,
+            ScreenshotGlobalHotKeyAction.clipboardHistory.defaultShortcut
+        )
     }
 
     func testInitialApplicationIndexProgressProvidesReadableETAAndFraction() {
@@ -437,6 +535,130 @@ final class FileSearchTests: XCTestCase {
         _ = try await context.service.indexMetadata()
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: context.databaseURL.path))
+    }
+
+    func testSingleCharacterQueryUsesBoundedIndexedPrefixPolicy() {
+        XCTAssertTrue(FileSearchIndexStore.shouldUseBoundedPrefixQuery(
+            compactQuery: "j"
+        ))
+        XCTAssertTrue(FileSearchIndexStore.shouldUseBoundedPrefixQuery(
+            compactQuery: "计"
+        ))
+        XCTAssertFalse(FileSearchIndexStore.shouldUseBoundedPrefixQuery(
+            compactQuery: ""
+        ))
+        XCTAssertFalse(FileSearchIndexStore.shouldUseBoundedPrefixQuery(
+            compactQuery: "js"
+        ))
+    }
+
+    func testSQLiteStartupFailureIsRetryableOnTheSameStore() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "PEEK-RetryableIndexStartup-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let databaseURL = directory.appendingPathComponent("SearchIndex.sqlite3")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: databaseURL,
+            withIntermediateDirectories: true
+        )
+        let store = FileSearchIndexStore(databaseURL: databaseURL)
+
+        do {
+            _ = try await store.metadata()
+            XCTFail("a directory at the database path must fail")
+        } catch {
+            XCTAssertFalse(error is CancellationError)
+        }
+
+        try FileManager.default.removeItem(at: databaseURL)
+        let recovered = try await store.metadata()
+        XCTAssertEqual(recovered.committedRootCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: databaseURL.path))
+    }
+
+    func testOneCharacterPrefixStillMatchesChineseNameAndPinyin() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        let root = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        let generation = try await context.service.beginRootGeneration(rootURL: root)
+        try await context.service.upsert(
+            items: [item(
+                path: "/Applications/Calculator.app",
+                name: "计算器",
+                kind: .application,
+                searchAliases: ["Calculator"]
+            )],
+            generation: generation
+        )
+        try await context.service.commitRootGeneration(generation)
+
+        for query in ["计", "j", "c", "a"] {
+            let snapshot = await context.service.currentSnapshot(
+                for: FileSearchRequest(query: query)
+            )
+            XCTAssertEqual(snapshot.results.first?.item.displayName, "计算器")
+        }
+    }
+
+    func testSQLiteProgressHandlerInterruptsAnActiveFuzzyQuery() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        _ = try await context.service.indexMetadata()
+        try seedLargeCommittedIndex(at: context.databaseURL, itemCount: 40_000)
+        let store = FileSearchIndexStore(
+            databaseURL: context.databaseURL,
+            queryTimeLimit: 1
+        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let task = Task {
+            try await store.query(FileSearchRequest(
+                query: "zz-not-present",
+                category: .files,
+                limit: 80
+            ))
+        }
+        try await Task<Never, Never>.sleep(nanoseconds: 10_000_000)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("the active SQLite query should be interrupted")
+        } catch is CancellationError {
+            // Expected: cancellation crosses sqlite3_step through the progress handler.
+        }
+        XCTAssertLessThan(
+            ProcessInfo.processInfo.systemUptime - startedAt,
+            1,
+            "cancelled fuzzy scans must not keep the search actor occupied"
+        )
+    }
+
+    func testLargeUncancelledFuzzyQueryHonorsWallClockBudget() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        _ = try await context.service.indexMetadata()
+        try seedLargeCommittedIndex(at: context.databaseURL, itemCount: 40_000)
+        let store = FileSearchIndexStore(
+            databaseURL: context.databaseURL,
+            queryTimeLimit: 0.03
+        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
+
+        let result = try await store.query(FileSearchRequest(
+            query: "zz-not-present",
+            category: .files,
+            limit: 80
+        ))
+
+        XCTAssertTrue(result.results.isEmpty)
+        XCTAssertEqual(result.metadata.statistics.indexedFiles, 40_000)
+        XCTAssertLessThan(
+            ProcessInfo.processInfo.systemUptime - startedAt,
+            0.5,
+            "a no-hit fuzzy scan must yield before it can stall the search UI"
+        )
     }
 
     func testSQLiteQueryFailureIsExplicitInsteadOfLookingLikeEmptyIndex() async throws {
@@ -824,6 +1046,16 @@ final class FileSearchTests: XCTestCase {
         XCTAssertEqual(try journalMode(at: context.databaseURL), "wal")
     }
 
+    func testSQLiteWriterUsesFileTempStorageAndBoundedCache() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+
+        let store = FileSearchIndexStore(databaseURL: context.databaseURL)
+        let configuration = try await store.writerStorageConfiguration()
+        XCTAssertEqual(configuration.tempStore, 1, "SQLITE_TEMP_STORE_FILE")
+        XCTAssertEqual(configuration.cacheSize, -16_384, "negative cache_size is KiB")
+    }
+
     func testMetadataReflectsCommittedStatisticsNotStagingRows() async throws {
         let context = makeContext()
         defer { try? FileManager.default.removeItem(at: context.directory) }
@@ -1017,6 +1249,7 @@ final class FileSearchTests: XCTestCase {
         XCTAssertLessThan(indexer.targetCPUFraction, 0.01)
         XCTAssertLessThanOrEqual(indexer.initialTargetCPUFraction, 0.05)
         XCTAssertGreaterThanOrEqual(indexer.initialTargetCPUFraction, 0.01)
+        XCTAssertEqual(indexer.initialMicroBatchSize, 64)
         XCTAssertGreaterThan(indexer.initialMicroBatchSize, indexer.microBatchSize)
         XCTAssertGreaterThan(
             indexer.initialMaximumEntriesPerSecond,
@@ -1264,6 +1497,29 @@ final class FileSearchTests: XCTestCase {
         XCTAssertEqual(fastBatchSize, 512)
     }
 
+    func testCPUBudgetNeverCarriesDebtPastCurrentAccountingWindow() {
+        XCTAssertEqual(
+            FileSearchCPUBudget.requiredThrottleDelay(
+                elapsedWall: 1,
+                elapsedCPU: 2.48,
+                targetFraction: 0.006,
+                windowDuration: 60
+            ),
+            59,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            FileSearchCPUBudget.requiredThrottleDelay(
+                elapsedWall: 10,
+                elapsedCPU: 0.1,
+                targetFraction: 0.05,
+                windowDuration: 60
+            ),
+            0,
+            accuracy: 0.000_001
+        )
+    }
+
     func testCommitPreservesDirtyWriteRecordedAfterGenerationBegan() async throws {
         let context = makeContext()
         defer { try? FileManager.default.removeItem(at: context.directory) }
@@ -1445,6 +1701,8 @@ final class FileSearchTests: XCTestCase {
         XCTAssertEqual(result, .noChanges)
         let cleanupCalls = await sink.orphanCleanupCallCount()
         XCTAssertEqual(cleanupCalls, 13)
+        let maximumCleanupLimit = await sink.maximumRequestedCleanupLimit()
+        XCTAssertEqual(maximumCleanupLimit, 256)
     }
 
     func testSearchPanelPreferencesUseDefaultsAndClampStoredLimit() throws {
@@ -1830,7 +2088,7 @@ final class FileSearchTests: XCTestCase {
             dirtyPaths.map(\.standardizedFileURL.path),
             ["/legacy-authorized"]
         )
-        XCTAssertEqual(try userVersion(at: databaseURL), 6)
+        XCTAssertEqual(try userVersion(at: databaseURL), 7)
     }
 
     func testV4MigrationRebuildsApplicationRootsButKeepsDocumentsQueryable() async throws {
@@ -1866,7 +2124,7 @@ final class FileSearchTests: XCTestCase {
             dirtyPaths.map(\.standardizedFileURL.path),
             ["/System/Applications"]
         )
-        XCTAssertEqual(try userVersion(at: databaseURL), 6)
+        XCTAssertEqual(try userVersion(at: databaseURL), 7)
     }
 
     private func makeContext() -> (
@@ -1874,15 +2132,31 @@ final class FileSearchTests: XCTestCase {
         databaseURL: URL,
         service: FileSearchService
     ) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+        let fixtureDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "PEEK-SQLiteIndexTests-\(UUID().uuidString)",
             isDirectory: true
         )
-        let databaseURL = directory.appendingPathComponent("SearchIndex.sqlite3")
+        // Keep files created by individual tests separate from the SQLite files.
+        // Existing per-test cleanup may remove the workspace before local variables
+        // are released; the database is removed only after its service is closed.
+        let directory = fixtureDirectory.appendingPathComponent(
+            "Workspace",
+            isDirectory: true
+        )
+        let databaseURL = fixtureDirectory
+            .appendingPathComponent("Database", isDirectory: true)
+            .appendingPathComponent("SearchIndex.sqlite3")
+        let service = FileSearchService(
+            store: FileSearchIndexStore(databaseURL: databaseURL)
+        )
+        addTeardownBlock { [service, fixtureDirectory] in
+            await service.shutdown()
+            try? FileManager.default.removeItem(at: fixtureDirectory)
+        }
         return (
             directory,
             databaseURL,
-            FileSearchService(store: FileSearchIndexStore(databaseURL: databaseURL))
+            service
         )
     }
 
@@ -1966,6 +2240,61 @@ final class FileSearchTests: XCTestCase {
             throw FileSearchIndexStoreError.unavailable("user_version 为空")
         }
         return sqlite3_column_int(statement, 0)
+    }
+
+    private func seedLargeCommittedIndex(
+        at databaseURL: URL,
+        itemCount: Int
+    ) throws {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(
+            databaseURL.path,
+            &database,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        ) == SQLITE_OK, let database else {
+            throw FileSearchIndexStoreError.unavailable("无法打开大索引测试数据库")
+        }
+        defer { sqlite3_close_v2(database) }
+        let boundedCount = max(1, min(itemCount, 200_000))
+        let sql = """
+        BEGIN IMMEDIATE;
+        INSERT OR REPLACE INTO roots(
+            root_path, active_generation, staging_generation, last_success,
+            indexed_applications, indexed_files, indexed_folders
+        ) VALUES('/cancel-root', 1, NULL, 1, 0, \(boundedCount), 0);
+        WITH RECURSIVE sequence(value) AS (
+            SELECT 1
+            UNION ALL
+            SELECT value + 1 FROM sequence WHERE value < \(boundedCount)
+        )
+        INSERT INTO entries(
+            root_path, generation, path, display_name, kind,
+            type_description, is_hidden, file_size, created_at,
+            modified_at, last_opened_at, application_version,
+            normalized_name, normalized_path, compact_pinyin,
+            pinyin_initials, word_initials, normalized_aliases,
+            compact_alias_pinyin, alias_pinyin_initials, alias_word_initials
+        )
+        SELECT
+            '/cancel-root', 1,
+            printf('/cancel-root/document-%06d.txt', value),
+            printf('document-%06d.txt', value),
+            1, 'file', 0, NULL, NULL, NULL, NULL, NULL,
+            printf('document-%06d.txt', value),
+            printf('/cancel-root/document-%06d.txt', value),
+            printf('document%06d', value), 'd', 'd', '', '', '', ''
+        FROM sequence;
+        COMMIT;
+        """
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(database, sql, nil, nil, &errorMessage)
+        guard result == SQLITE_OK else {
+            let message = errorMessage.map { String(cString: $0) }
+                ?? String(cString: sqlite3_errmsg(database))
+            sqlite3_free(errorMessage)
+            throw FileSearchIndexStoreError.sqlite(message: message, code: result)
+        }
     }
 
     private func createLegacyV2Index(at databaseURL: URL) throws {
@@ -2574,7 +2903,7 @@ final class SearchPanelViewModelTests: XCTestCase {
         )
     }
 
-    func testSuccessfulApplicationOpenUpdatesUsageBeforePanelCloses() async throws {
+    func testApplicationOpenClosesPanelBeforeAsynchronousLaunchCompletes() async throws {
         let suiteName = "PEEK-ApplicationUsage-Open-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
@@ -2594,9 +2923,12 @@ final class SearchPanelViewModelTests: XCTestCase {
                 continuation.finish()
             }
         }
+        let launcher = SearchPanelDeferredApplicationLauncher()
         let viewModel = SearchPanelViewModel(
             provider: provider,
-            actionHandler: SearchPanelTestActionHandler(),
+            actionHandler: DefaultSearchPanelActionHandler(
+                applicationLauncher: launcher
+            ),
             applicationUsageTracker: store
         )
         defer { viewModel.shutdown() }
@@ -2609,8 +2941,15 @@ final class SearchPanelViewModelTests: XCTestCase {
                 && viewModel.capability(for: .open).isEnabled
         }
         viewModel.perform(.open)
+        XCTAssertTrue(didClose)
+        XCTAssertNil(store.usage(for: application.url))
+        try await waitUntil { launcher.requestedURLs == [application.url] }
+        XCTAssertTrue(viewModel.isPerformingAction)
+
+        launcher.finishSuccessfully()
         try await waitUntil {
-            didClose && store.usage(for: application.url)?.openCount == 1
+            !viewModel.isPerformingAction
+                && store.usage(for: application.url)?.openCount == 1
         }
     }
 
@@ -2870,6 +3209,24 @@ private final class SearchPanelTestActionHandler: SearchPanelActionHandling {
 }
 
 @MainActor
+private final class SearchPanelDeferredApplicationLauncher: SearchPanelApplicationLaunching {
+    private(set) var requestedURLs: [URL] = []
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func openApplication(at url: URL) async throws {
+        requestedURLs.append(url)
+        try await withCheckedThrowingContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func finishSuccessfully() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
 private final class SearchPanelRecordingActionHandler: SearchPanelActionHandling {
     private(set) var performedItemIDs: [SearchPanelItem.ID] = []
 
@@ -2951,8 +3308,8 @@ private actor CancellingBackgroundIndexSink: FileSearchBackgroundIndexSink {
     func purgeObsoleteEntries(
         for token: FileSearchRootGeneration,
         limit: Int
-    ) throws -> Bool { false }
-    func purgeOrphanedEntries(limit: Int) throws -> Bool { false }
+    ) throws -> Int { 0 }
+    func purgeOrphanedEntries(limit: Int) throws -> Int { 0 }
 
     func counts() -> (begin: Int, abort: Int, commit: Int) {
         (beginCount, abortCount, commitCount)
@@ -2962,6 +3319,7 @@ private actor CancellingBackgroundIndexSink: FileSearchBackgroundIndexSink {
 private actor MultiBatchCleanupSink: FileSearchBackgroundIndexSink {
     private var remainingBatches: Int
     private var cleanupCalls = 0
+    private var requestedCleanupLimits: [Int] = []
 
     init(remainingBatches: Int) {
         self.remainingBatches = remainingBatches
@@ -2994,14 +3352,16 @@ private actor MultiBatchCleanupSink: FileSearchBackgroundIndexSink {
     func purgeObsoleteEntries(
         for token: FileSearchRootGeneration,
         limit: Int
-    ) throws -> Bool { false }
-    func purgeOrphanedEntries(limit: Int) throws -> Bool {
+    ) throws -> Int { 0 }
+    func purgeOrphanedEntries(limit: Int) throws -> Int {
         cleanupCalls += 1
-        guard remainingBatches > 0 else { return false }
+        requestedCleanupLimits.append(limit)
+        guard remainingBatches > 0 else { return 0 }
         remainingBatches -= 1
-        return true
+        return limit
     }
     func orphanCleanupCallCount() -> Int { cleanupCalls }
+    func maximumRequestedCleanupLimit() -> Int { requestedCleanupLimits.max() ?? 0 }
 }
 
 final class PEEKLocalizationTests: XCTestCase {

@@ -84,8 +84,8 @@ protocol FileSearchBackgroundIndexSink: Sendable {
     func purgeObsoleteEntries(
         for token: FileSearchRootGeneration,
         limit: Int
-    ) async throws -> Bool
-    func purgeOrphanedEntries(limit: Int) async throws -> Bool
+    ) async throws -> Int
+    func purgeOrphanedEntries(limit: Int) async throws -> Int
 }
 
 extension FileSearchIndexStore: FileSearchBackgroundIndexSink {
@@ -111,7 +111,7 @@ struct FileSearchBackgroundIndexerConfiguration: Sendable {
         maximumIndexedItems: Int = 300_000,
         microBatchSize: Int = 24,
         targetCPUFraction: Double = 0.006,
-        initialMicroBatchSize: Int = 256,
+        initialMicroBatchSize: Int = 64,
         initialTargetCPUFraction: Double = 0.05,
         incrementalMaximumEntriesPerSecond: Double = 160,
         initialMaximumEntriesPerSecond: Double = 2_500,
@@ -123,7 +123,7 @@ struct FileSearchBackgroundIndexerConfiguration: Sendable {
         self.maximumIndexedItems = max(1_000, maximumIndexedItems)
         self.microBatchSize = min(max(microBatchSize, 16), 32)
         self.targetCPUFraction = min(max(targetCPUFraction, 0.001), 0.009)
-        self.initialMicroBatchSize = min(max(initialMicroBatchSize, 64), 512)
+        self.initialMicroBatchSize = min(max(initialMicroBatchSize, 32), 512)
         self.initialTargetCPUFraction = min(
             max(initialTargetCPUFraction, 0.01),
             0.05

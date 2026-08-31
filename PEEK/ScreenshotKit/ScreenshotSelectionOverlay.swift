@@ -94,7 +94,7 @@ func screenshotConstrainedSelectionMove(
     return CGRect(origin: origin, size: original.size)
 }
 
-enum ScreenshotResizeHandle: CaseIterable {
+enum ScreenshotResizeHandle: CaseIterable, Hashable {
     case northWest
     case north
     case northEast
@@ -103,6 +103,251 @@ enum ScreenshotResizeHandle: CaseIterable {
     case south
     case southWest
     case west
+}
+
+enum ScreenshotSelectionCursorKind: Equatable {
+    case precision
+    case move
+    case resize(ScreenshotResizeHandle)
+    case standard
+}
+
+func screenshotSelectionHandlePoint(
+    for handle: ScreenshotResizeHandle,
+    in rect: CGRect
+) -> CGPoint {
+    let rect = rect.standardized
+    switch handle {
+    case .northWest: return CGPoint(x: rect.minX, y: rect.maxY)
+    case .north: return CGPoint(x: rect.midX, y: rect.maxY)
+    case .northEast: return CGPoint(x: rect.maxX, y: rect.maxY)
+    case .east: return CGPoint(x: rect.maxX, y: rect.midY)
+    case .southEast: return CGPoint(x: rect.maxX, y: rect.minY)
+    case .south: return CGPoint(x: rect.midX, y: rect.minY)
+    case .southWest: return CGPoint(x: rect.minX, y: rect.minY)
+    case .west: return CGPoint(x: rect.minX, y: rect.midY)
+    }
+}
+
+func screenshotSelectionResizeHandle(
+    at point: CGPoint,
+    in rect: CGRect,
+    hitRadius: CGFloat = 9
+) -> ScreenshotResizeHandle? {
+    let rect = rect.standardized
+    let corners: [ScreenshotResizeHandle] = [
+        .northWest, .northEast, .southEast, .southWest
+    ]
+    if let corner = corners.first(where: {
+        let anchor = screenshotSelectionHandlePoint(for: $0, in: rect)
+        return hypot(anchor.x - point.x, anchor.y - point.y) <= hitRadius
+    }) {
+        return corner
+    }
+
+    let expandedX = (rect.minX - hitRadius) ... (rect.maxX + hitRadius)
+    let expandedY = (rect.minY - hitRadius) ... (rect.maxY + hitRadius)
+    if expandedX.contains(point.x) {
+        if abs(point.y - rect.maxY) <= hitRadius { return .north }
+        if abs(point.y - rect.minY) <= hitRadius { return .south }
+    }
+    if expandedY.contains(point.y) {
+        if abs(point.x - rect.maxX) <= hitRadius { return .east }
+        if abs(point.x - rect.minX) <= hitRadius { return .west }
+    }
+    return nil
+}
+
+func screenshotResizedSelection(
+    original: CGRect,
+    handle: ScreenshotResizeHandle,
+    targetPoint: CGPoint,
+    bounds: CGRect,
+    minimumSize: CGSize = CGSize(width: 8, height: 8)
+) -> CGRect {
+    let original = original.standardized
+    var minX = original.minX
+    var maxX = original.maxX
+    var minY = original.minY
+    var maxY = original.maxY
+
+    switch handle {
+    case .northWest:
+        minX = targetPoint.x
+        maxY = targetPoint.y
+    case .north:
+        maxY = targetPoint.y
+    case .northEast:
+        maxX = targetPoint.x
+        maxY = targetPoint.y
+    case .east:
+        maxX = targetPoint.x
+    case .southEast:
+        maxX = targetPoint.x
+        minY = targetPoint.y
+    case .south:
+        minY = targetPoint.y
+    case .southWest:
+        minX = targetPoint.x
+        minY = targetPoint.y
+    case .west:
+        minX = targetPoint.x
+    }
+
+    let horizontalAnchor = handle == .west || handle == .northWest || handle == .southWest
+        ? original.maxX
+        : original.minX
+    let verticalAnchor = handle == .south || handle == .southEast || handle == .southWest
+        ? original.maxY
+        : original.minY
+
+    if abs(maxX - minX) < minimumSize.width {
+        if horizontalAnchor == original.maxX {
+            minX = maxX - minimumSize.width
+        } else {
+            maxX = minX + minimumSize.width
+        }
+    }
+    if abs(maxY - minY) < minimumSize.height {
+        if verticalAnchor == original.maxY {
+            minY = maxY - minimumSize.height
+        } else {
+            maxY = minY + minimumSize.height
+        }
+    }
+
+    let resized = CGRect(
+        x: min(minX, maxX),
+        y: min(minY, maxY),
+        width: abs(maxX - minX),
+        height: abs(maxY - minY)
+    )
+    return resized.intersection(bounds.standardized)
+}
+
+@MainActor
+func makeScreenshotPrecisionCursorImage() -> NSImage {
+    let size = CGSize(width: 24, height: 24)
+    let image = NSImage(size: size, flipped: false) { rect in
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let path = NSBezierPath()
+        path.lineCapStyle = .round
+        path.move(to: CGPoint(x: center.x, y: 2))
+        path.line(to: CGPoint(x: center.x, y: 8))
+        path.move(to: CGPoint(x: center.x, y: 16))
+        path.line(to: CGPoint(x: center.x, y: 22))
+        path.move(to: CGPoint(x: 2, y: center.y))
+        path.line(to: CGPoint(x: 8, y: center.y))
+        path.move(to: CGPoint(x: 16, y: center.y))
+        path.line(to: CGPoint(x: 22, y: center.y))
+
+        NSColor.white.withAlphaComponent(0.98).setStroke()
+        path.lineWidth = 4.5
+        path.stroke()
+        NSColor.black.withAlphaComponent(0.94).setStroke()
+        path.lineWidth = 1.75
+        path.stroke()
+
+        let outerDot = NSBezierPath(ovalIn: CGRect(
+            x: center.x - 3.25,
+            y: center.y - 3.25,
+            width: 6.5,
+            height: 6.5
+        ))
+        NSColor.white.withAlphaComponent(0.98).setFill()
+        outerDot.fill()
+        let centerDot = NSBezierPath(ovalIn: CGRect(
+            x: center.x - 2.1,
+            y: center.y - 2.1,
+            width: 4.2,
+            height: 4.2
+        ))
+        NSColor.systemBlue.setFill()
+        centerDot.fill()
+        return true
+    }
+    image.isTemplate = false
+    return image
+}
+
+@MainActor
+func makeScreenshotResizeCursorImage(handle: ScreenshotResizeHandle) -> NSImage {
+    let size = CGSize(width: 24, height: 24)
+    let image = NSImage(size: size, flipped: false) { rect in
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let vector: CGVector
+        switch handle {
+        case .north, .south:
+            vector = CGVector(dx: 0, dy: 1)
+        case .east, .west:
+            vector = CGVector(dx: 1, dy: 0)
+        case .northWest, .southEast:
+            vector = CGVector(dx: -0.707, dy: 0.707)
+        case .northEast, .southWest:
+            vector = CGVector(dx: 0.707, dy: 0.707)
+        }
+
+        let endpointDistance: CGFloat = 9
+        let arrowLength: CGFloat = 4
+        let arrowSpread: CGFloat = 3.5
+        let start = CGPoint(
+            x: center.x - vector.dx * endpointDistance,
+            y: center.y - vector.dy * endpointDistance
+        )
+        let end = CGPoint(
+            x: center.x + vector.dx * endpointDistance,
+            y: center.y + vector.dy * endpointDistance
+        )
+        let perpendicular = CGVector(dx: -vector.dy, dy: vector.dx)
+        let path = NSBezierPath()
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.move(to: start)
+        path.line(to: end)
+        for (tip, direction) in [(start, CGFloat(1)), (end, CGFloat(-1))] {
+            path.move(to: tip)
+            path.line(to: CGPoint(
+                x: tip.x + vector.dx * arrowLength * direction
+                    + perpendicular.dx * arrowSpread,
+                y: tip.y + vector.dy * arrowLength * direction
+                    + perpendicular.dy * arrowSpread
+            ))
+            path.move(to: tip)
+            path.line(to: CGPoint(
+                x: tip.x + vector.dx * arrowLength * direction
+                    - perpendicular.dx * arrowSpread,
+                y: tip.y + vector.dy * arrowLength * direction
+                    - perpendicular.dy * arrowSpread
+            ))
+        }
+
+        NSColor.white.withAlphaComponent(0.98).setStroke()
+        path.lineWidth = 5
+        path.stroke()
+        NSColor.black.withAlphaComponent(0.94).setStroke()
+        path.lineWidth = 2
+        path.stroke()
+
+        let outerDot = NSBezierPath(ovalIn: CGRect(
+            x: center.x - 3.25,
+            y: center.y - 3.25,
+            width: 6.5,
+            height: 6.5
+        ))
+        NSColor.white.withAlphaComponent(0.98).setFill()
+        outerDot.fill()
+        let centerDot = NSBezierPath(ovalIn: CGRect(
+            x: center.x - 2.1,
+            y: center.y - 2.1,
+            width: 4.2,
+            height: 4.2
+        ))
+        NSColor.systemBlue.setFill()
+        centerDot.fill()
+        return true
+    }
+    image.isTemplate = false
+    return image
 }
 
 /// Validates an optional initial selection without requiring a live desktop
@@ -168,6 +413,8 @@ final class ScreenshotSelectionModel {
 
     let desktop: ScreenshotDesktopGeometry
     var onChange: (() -> Void)?
+    var onCursorChange: (() -> Void)?
+    var onSelectionPreview: ((CGRect) -> Void)?
     var onSelectionReady: ((CGRect) -> Void)?
     var onFinish: ((CGRect) -> Void)?
     var onCancel: (() -> Void)?
@@ -178,6 +425,7 @@ final class ScreenshotSelectionModel {
     private(set) var pointerLocation: CGPoint?
     private(set) var didModifyInitialSelection = false
     private(set) var isEditing = false
+    private var inlineEditorActive = false
     private let hadInitialSelection: Bool
     private let automaticHoverWindowRect: CGRect?
     private let automaticHoverSelectionRects: [CGRect]
@@ -291,17 +539,6 @@ final class ScreenshotSelectionModel {
                 onChange?()
                 return
             }
-            // An automatic window/AX preselection is only a suggestion. A
-            // normal drag anywhere else must immediately draw the user's own
-            // rectangle, including when the suggested rect fills the window.
-            // Handles remain directly resizable; after the first custom edit,
-            // dragging inside the resulting rect moves it as usual.
-            if automaticHoverSelectionEnabled {
-                let candidate = selectionRect
-                dragOperation = .pendingCreate(start: point, candidate: candidate)
-                onChange?()
-                return
-            }
             if selectionRect.contains(point) {
                 disableAutomaticHoverSelection()
                 selectionHint = nil
@@ -319,6 +556,7 @@ final class ScreenshotSelectionModel {
         guard !isEditing else { return }
         pointerLocation = point
         guard let dragOperation else { return }
+        var didChangeSelection = false
         switch dragOperation {
         case let .pendingCreate(start, candidate):
             guard screenshotSelectionGestureIsDrag(from: start, to: point) else {
@@ -334,6 +572,7 @@ final class ScreenshotSelectionModel {
             selectionRect = normalizedRect(from: start, to: point)
                 .intersection(desktop.desktopBounds)
             hoveredWindowRect = nil
+            didChangeSelection = true
 
         case let .create(start, _):
             selectionHint = nil
@@ -342,6 +581,7 @@ final class ScreenshotSelectionModel {
             }
             selectionRect = normalizedRect(from: start, to: point)
                 .intersection(desktop.desktopBounds)
+            didChangeSelection = true
 
         case let .move(start, original):
             selectionHint = nil
@@ -353,6 +593,7 @@ final class ScreenshotSelectionModel {
                 dy: point.y - start.y
             )
             selectionRect = constrainedMove(proposed)
+            didChangeSelection = true
 
         case let .resize(handle, original):
             selectionHint = nil
@@ -360,6 +601,10 @@ final class ScreenshotSelectionModel {
                 didModifyInitialSelection = true
             }
             selectionRect = resizedRect(original, handle: handle, to: point)
+            didChangeSelection = true
+        }
+        if didChangeSelection, let selectionRect {
+            onSelectionPreview?(selectionRect)
         }
         onChange?()
     }
@@ -412,6 +657,10 @@ final class ScreenshotSelectionModel {
             didModifyInitialSelection = true
         }
         self.selectionRect = constrainedMove(selectionRect.offsetBy(dx: dx, dy: dy))
+        if let selectionRect = self.selectionRect {
+            onSelectionPreview?(selectionRect)
+            onSelectionReady?(selectionRect)
+        }
         onChange?()
     }
 
@@ -431,10 +680,27 @@ final class ScreenshotSelectionModel {
 
     func beginEditing() {
         guard selectionRect != nil else { return }
-        isEditing = true
+        inlineEditorActive = true
+        isEditing = false
+        disableAutomaticHoverSelection()
         pointerLocation = nil
         hoveredWindowRect = nil
         dragOperation = nil
+        onCursorChange?()
+        onChange?()
+    }
+
+    /// The full-screen frozen overlay remains the owner of selection geometry
+    /// after the toolbar appears. Annotation tools temporarily suspend it;
+    /// returning to the select tool restores move, resize and outside reselect.
+    func setSelectionInteractionEnabled(_ enabled: Bool) {
+        guard inlineEditorActive else { return }
+        isEditing = !enabled
+        disableAutomaticHoverSelection()
+        pointerLocation = nil
+        hoveredWindowRect = nil
+        dragOperation = nil
+        onCursorChange?()
         onChange?()
     }
 
@@ -452,7 +718,7 @@ final class ScreenshotSelectionModel {
 
     @discardableResult
     private func applySelectionDuringEditing(_ rect: CGRect) -> Bool {
-        guard isEditing else { return false }
+        guard inlineEditorActive else { return false }
         let normalized = rect.standardized.intersection(desktop.desktopBounds)
         guard normalized.width >= Self.minimumSelectionSize.width,
               normalized.height >= Self.minimumSelectionSize.height else {
@@ -464,19 +730,35 @@ final class ScreenshotSelectionModel {
     }
 
     func resizeHandle(at point: CGPoint, in rect: CGRect) -> ScreenshotResizeHandle? {
-        let points: [(ScreenshotResizeHandle, CGPoint)] = [
-            (.northWest, CGPoint(x: rect.minX, y: rect.maxY)),
-            (.north, CGPoint(x: rect.midX, y: rect.maxY)),
-            (.northEast, CGPoint(x: rect.maxX, y: rect.maxY)),
-            (.east, CGPoint(x: rect.maxX, y: rect.midY)),
-            (.southEast, CGPoint(x: rect.maxX, y: rect.minY)),
-            (.south, CGPoint(x: rect.midX, y: rect.minY)),
-            (.southWest, CGPoint(x: rect.minX, y: rect.minY)),
-            (.west, CGPoint(x: rect.minX, y: rect.midY))
-        ]
-        return points.first {
-            hypot($0.1.x - point.x, $0.1.y - point.y) <= handleHitRadius
-        }?.0
+        screenshotSelectionResizeHandle(
+            at: point,
+            in: rect,
+            hitRadius: handleHitRadius
+        )
+    }
+
+    func cursorKind(at point: CGPoint) -> ScreenshotSelectionCursorKind {
+        guard !isEditing else { return .standard }
+
+        if let dragOperation {
+            switch dragOperation {
+            case .pendingCreate, .create:
+                return .precision
+            case .move:
+                return .move
+            case let .resize(handle, _):
+                return .resize(handle)
+            }
+        }
+
+        guard let selectionRect else { return .precision }
+        if let handle = resizeHandle(at: point, in: selectionRect) {
+            return .resize(handle)
+        }
+        if selectionRect.contains(point) {
+            return .move
+        }
+        return .precision
     }
 
     private func finish(_ rect: CGRect) {
@@ -523,63 +805,13 @@ final class ScreenshotSelectionModel {
         handle: ScreenshotResizeHandle,
         to point: CGPoint
     ) -> CGRect {
-        var minX = original.minX
-        var maxX = original.maxX
-        var minY = original.minY
-        var maxY = original.maxY
-
-        switch handle {
-        case .northWest:
-            minX = point.x
-            maxY = point.y
-        case .north:
-            maxY = point.y
-        case .northEast:
-            maxX = point.x
-            maxY = point.y
-        case .east:
-            maxX = point.x
-        case .southEast:
-            maxX = point.x
-            minY = point.y
-        case .south:
-            minY = point.y
-        case .southWest:
-            minX = point.x
-            minY = point.y
-        case .west:
-            minX = point.x
-        }
-
-        let horizontalAnchor = handle == .west || handle == .northWest || handle == .southWest
-            ? original.maxX
-            : original.minX
-        let verticalAnchor = handle == .south || handle == .southEast || handle == .southWest
-            ? original.maxY
-            : original.minY
-
-        if abs(maxX - minX) < Self.minimumSelectionSize.width {
-            if horizontalAnchor == original.maxX {
-                minX = maxX - Self.minimumSelectionSize.width
-            } else {
-                maxX = minX + Self.minimumSelectionSize.width
-            }
-        }
-        if abs(maxY - minY) < Self.minimumSelectionSize.height {
-            if verticalAnchor == original.maxY {
-                minY = maxY - Self.minimumSelectionSize.height
-            } else {
-                maxY = minY + Self.minimumSelectionSize.height
-            }
-        }
-
-        let resized = CGRect(
-            x: min(minX, maxX),
-            y: min(minY, maxY),
-            width: abs(maxX - minX),
-            height: abs(maxY - minY)
+        screenshotResizedSelection(
+            original: original,
+            handle: handle,
+            targetPoint: point,
+            bounds: desktop.desktopBounds,
+            minimumSize: Self.minimumSelectionSize
         )
-        return resized.intersection(desktop.desktopBounds)
     }
 
 }
@@ -634,7 +866,8 @@ final class ScreenshotSelectionOverlayView: NSView {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .crosshair)
+        let kind = model.pointerLocation.map(model.cursorKind(at:)) ?? .precision
+        addCursorRect(bounds, cursor: Self.cursor(for: kind))
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -675,30 +908,39 @@ final class ScreenshotSelectionOverlayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         guard !model.isEditing else { return }
-        model.updatePointer(globalPoint(for: event))
+        let point = globalPoint(for: event)
+        model.updatePointer(point)
+        updateCursor(at: point)
     }
 
     override func mouseExited(with event: NSEvent) {
         guard !model.isEditing else { return }
         model.pointerExited()
+        NSCursor.arrow.set()
     }
 
     override func mouseDown(with event: NSEvent) {
         guard !model.isEditing else { return }
         window?.makeFirstResponder(self)
-        model.mouseDown(at: globalPoint(for: event), clickCount: event.clickCount)
+        let point = globalPoint(for: event)
+        model.mouseDown(at: point, clickCount: event.clickCount)
+        updateCursor(at: point)
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard !model.isEditing else { return }
-        model.mouseDragged(to: globalPoint(for: event))
+        let point = globalPoint(for: event)
+        model.mouseDragged(to: point)
+        updateCursor(at: point)
     }
 
     override func mouseUp(with event: NSEvent) {
         guard !model.isEditing else { return }
-        if let colorPoint = model.mouseUp(at: globalPoint(for: event)) {
+        let point = globalPoint(for: event)
+        if let colorPoint = model.mouseUp(at: point) {
             copyPixelColor(at: colorPoint)
         }
+        updateCursor(at: point)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -732,6 +974,53 @@ final class ScreenshotSelectionOverlayView: NSView {
         guard let window else { return .zero }
         return window.convertPoint(toScreen: event.locationInWindow)
     }
+
+    private func updateCursor(at point: CGPoint) {
+        Self.cursor(for: model.cursorKind(at: point)).set()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    private static func cursor(for kind: ScreenshotSelectionCursorKind) -> NSCursor {
+        switch kind {
+        case .precision:
+            return precisionCursor
+        case .move:
+            return moveCursor
+        case let .resize(handle):
+            return resizeCursors[handle] ?? precisionCursor
+        case .standard:
+            return .arrow
+        }
+    }
+
+    private static let precisionCursor: NSCursor = {
+        let image = makeScreenshotPrecisionCursorImage()
+        return NSCursor(
+            image: image,
+            hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2)
+        )
+    }()
+
+    private static let moveCursor: NSCursor = {
+        let image = makeScreenshotFourWayMoveCursorImage()
+        return NSCursor(
+            image: image,
+            hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2)
+        )
+    }()
+
+    private static let resizeCursors: [ScreenshotResizeHandle: NSCursor] = {
+        Dictionary(uniqueKeysWithValues: ScreenshotResizeHandle.allCases.map { handle in
+            let image = makeScreenshotResizeCursorImage(handle: handle)
+            return (
+                handle,
+                NSCursor(
+                    image: image,
+                    hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2)
+                )
+            )
+        })
+    }()
 
     private func localRect(for globalRect: CGRect) -> CGRect {
         CGRect(

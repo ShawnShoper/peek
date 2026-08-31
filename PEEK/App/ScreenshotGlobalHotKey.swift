@@ -8,6 +8,7 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
     case ocr = 3
     case search = 4
     case translation = 5
+    case clipboardHistory = 6
 
     var id: UInt32 { rawValue }
 
@@ -18,6 +19,7 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
         case .ocr: return "ocr"
         case .search: return "search"
         case .translation: return "translation"
+        case .clipboardHistory: return "clipboardHistory"
         }
     }
 
@@ -33,6 +35,8 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
             return L10n.tr("文件查找")
         case .translation:
             return L10n.tr("翻译")
+        case .clipboardHistory:
+            return L10n.tr("剪贴板历史")
         }
     }
 
@@ -54,6 +58,11 @@ enum ScreenshotGlobalHotKeyAction: UInt32, CaseIterable, Codable, Identifiable, 
             return ScreenshotHotKey(
                 keyCode: UInt32(kVK_ANSI_T),
                 modifiers: modifiers
+            )
+        case .clipboardHistory:
+            return ScreenshotHotKey(
+                keyCode: UInt32(kVK_ANSI_V),
+                modifiers: UInt32(controlKey | optionKey | cmdKey)
             )
         }
     }
@@ -226,19 +235,22 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
     var ocr: ScreenshotHotKey?
     var search: ScreenshotHotKey?
     var translation: ScreenshotHotKey?
+    var clipboardHistory: ScreenshotHotKey?
 
     init(
         region: ScreenshotHotKey?,
         scrolling: ScreenshotHotKey?,
         ocr: ScreenshotHotKey?,
         search: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.search.defaultShortcut,
-        translation: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.translation.defaultShortcut
+        translation: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.translation.defaultShortcut,
+        clipboardHistory: ScreenshotHotKey? = ScreenshotGlobalHotKeyAction.clipboardHistory.defaultShortcut
     ) {
         self.region = region
         self.scrolling = scrolling
         self.ocr = ocr
         self.search = search
         self.translation = translation
+        self.clipboardHistory = clipboardHistory
     }
 
     static let defaults = ScreenshotHotKeyConfiguration(
@@ -246,7 +258,8 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
         scrolling: ScreenshotGlobalHotKeyAction.scrolling.defaultShortcut,
         ocr: ScreenshotGlobalHotKeyAction.ocr.defaultShortcut,
         search: ScreenshotGlobalHotKeyAction.search.defaultShortcut,
-        translation: ScreenshotGlobalHotKeyAction.translation.defaultShortcut
+        translation: ScreenshotGlobalHotKeyAction.translation.defaultShortcut,
+        clipboardHistory: ScreenshotGlobalHotKeyAction.clipboardHistory.defaultShortcut
     )
 
     subscript(action: ScreenshotGlobalHotKeyAction) -> ScreenshotHotKey? {
@@ -257,6 +270,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             case .ocr: return ocr
             case .search: return search
             case .translation: return translation
+            case .clipboardHistory: return clipboardHistory
             }
         }
         set {
@@ -266,6 +280,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             case .ocr: ocr = newValue
             case .search: search = newValue
             case .translation: translation = newValue
+            case .clipboardHistory: clipboardHistory = newValue
             }
         }
     }
@@ -276,6 +291,7 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
         case ocr
         case search
         case translation
+        case clipboardHistory
     }
 
     init(from decoder: Decoder) throws {
@@ -292,6 +308,10 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
         translation = container.contains(.translation)
             ? try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .translation)
             : ScreenshotGlobalHotKeyAction.translation.defaultShortcut
+        // Migrate configurations saved before clipboard history existed.
+        clipboardHistory = container.contains(.clipboardHistory)
+            ? try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .clipboardHistory)
+            : ScreenshotGlobalHotKeyAction.clipboardHistory.defaultShortcut
     }
 
     func encode(to encoder: Encoder) throws {
@@ -308,6 +328,11 @@ struct ScreenshotHotKeyConfiguration: Codable, Equatable, Sendable {
             try container.encode(translation, forKey: .translation)
         } else {
             try container.encodeNil(forKey: .translation)
+        }
+        if let clipboardHistory {
+            try container.encode(clipboardHistory, forKey: .clipboardHistory)
+        } else {
+            try container.encodeNil(forKey: .clipboardHistory)
         }
     }
 

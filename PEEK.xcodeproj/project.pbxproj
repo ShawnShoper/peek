@@ -19,7 +19,6 @@
 		B00000000000000000000023 /* ScreenshotAnnotations.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000023 /* ScreenshotAnnotations.swift */; };
 		B00000000000000000000024 /* ScreenshotEditorCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000024 /* ScreenshotEditorCanvas.swift */; };
 		B00000000000000000000025 /* ScreenshotEditorController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000025 /* ScreenshotEditorController.swift */; };
-		B00000000000000000000026 /* ScreenshotWorkflowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000026 /* ScreenshotWorkflowController.swift */; };
 		B00000000000000000000027 /* PEEKPinboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000027 /* PEEKPinboard.swift */; };
 		B00000000000000000000028 /* PEEKOCR.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000028 /* PEEKOCR.swift */; };
 		B00000000000000000000029 /* ScrollCaptureTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000029 /* ScrollCaptureTypes.swift */; };
@@ -29,7 +28,6 @@
 		B0000000000000000000002D /* ScrollFrameCapturer.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002D /* ScrollFrameCapturer.swift */; };
 		B0000000000000000000002E /* AutomaticScrollDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002E /* AutomaticScrollDriver.swift */; };
 		B0000000000000000000002F /* ScrollCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000002F /* ScrollCaptureSession.swift */; };
-		B00000000000000000000030 /* ScrollCaptureHUD.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000030 /* ScrollCaptureHUD.swift */; };
 		B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000031 /* ScreenshotKitTests.swift */; };
 		B00000000000000000000032 /* ScreenshotGlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */; };
 		B00000000000000000000033 /* HotKeyRecorderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000033 /* HotKeyRecorderView.swift */; };
@@ -69,6 +67,27 @@
 		B0000000000000000000005B /* TranslationCloudSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000005B /* TranslationCloudSupport.swift */; };
 		B0000000000000000000005C /* TranslationTextEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000005C /* TranslationTextEditor.swift */; };
 		B00000000000000000000071 /* HotKeyRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000071 /* HotKeyRecorderTests.swift */; };
+		B00000000000000000000072 /* PrivacyPolicyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000072 /* PrivacyPolicyView.swift */; };
+		B00000000000000000000073 /* PrivacyPolicy.zh-Hans.md in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000073 /* PrivacyPolicy.zh-Hans.md */; };
+		B00000000000000000000074 /* PrivacyPolicy.en.md in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000074 /* PrivacyPolicy.en.md */; };
+		B00000000000000000000075 /* OnboardingGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000075 /* OnboardingGuideView.swift */; };
+		B00000000000000000000076 /* OnboardingGuideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000076 /* OnboardingGuideTests.swift */; };
+		B00000000000000000000077 /* ScrollPositionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000077 /* ScrollPositionProbe.swift */; };
+		B00000000000000000000078 /* ClipboardHistoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000078 /* ClipboardHistoryModels.swift */; };
+		B00000000000000000000079 /* ClipboardHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000079 /* ClipboardHistoryStore.swift */; };
+		B0000000000000000000007A /* ClipboardHistoryMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007A /* ClipboardHistoryMonitor.swift */; };
+		B0000000000000000000007B /* ClipboardHistoryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007B /* ClipboardHistoryViewModel.swift */; };
+		B0000000000000000000007C /* ClipboardHistoryPanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007C /* ClipboardHistoryPanelController.swift */; };
+		B0000000000000000000007D /* ClipboardHistoryPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007D /* ClipboardHistoryPanelView.swift */; };
+		B0000000000000000000007E /* ClipboardHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007E /* ClipboardHistoryTests.swift */; };
+		B0000000000000000000007F /* ClipboardHistoryPreviewLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000007F /* ClipboardHistoryPreviewLoader.swift */; };
+		B00000000000000000000080 /* ClipboardHistoryLinkPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000080 /* ClipboardHistoryLinkPreviewView.swift */; };
+		B00000000000000000000081 /* PEEKHealthDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000081 /* PEEKHealthDiagnostics.swift */; };
+		B00000000000000000000082 /* PEEKBuiltInSearchRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000082 /* PEEKBuiltInSearchRegistration.swift */; };
+		B00000000000000000000083 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000083 /* PrivacyInfo.xcprivacy */; };
+		B00000000000000000000084 /* ScreenshotImageOutputPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000084 /* ScreenshotImageOutputPipeline.swift */; };
+		B00000000000000000000085 /* ScreenshotOutputPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000085 /* ScreenshotOutputPipelineTests.swift */; };
+		B00000000000000000000086 /* SearchCommercialReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000086 /* SearchCommercialReliabilityTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -95,7 +114,6 @@
 		F00000000000000000000023 /* ScreenshotAnnotations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotAnnotations.swift; sourceTree = "<group>"; };
 		F00000000000000000000024 /* ScreenshotEditorCanvas.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorCanvas.swift; sourceTree = "<group>"; };
 		F00000000000000000000025 /* ScreenshotEditorController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorController.swift; sourceTree = "<group>"; };
-		F00000000000000000000026 /* ScreenshotWorkflowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotWorkflowController.swift; sourceTree = "<group>"; };
 		F00000000000000000000027 /* PEEKPinboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKPinboard.swift; sourceTree = "<group>"; };
 		F00000000000000000000028 /* PEEKOCR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKOCR.swift; sourceTree = "<group>"; };
 		F00000000000000000000029 /* ScrollCaptureTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureTypes.swift; sourceTree = "<group>"; };
@@ -105,7 +123,6 @@
 		F0000000000000000000002D /* ScrollFrameCapturer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollFrameCapturer.swift; sourceTree = "<group>"; };
 		F0000000000000000000002E /* AutomaticScrollDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomaticScrollDriver.swift; sourceTree = "<group>"; };
 		F0000000000000000000002F /* ScrollCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureSession.swift; sourceTree = "<group>"; };
-		F00000000000000000000030 /* ScrollCaptureHUD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollCaptureHUD.swift; sourceTree = "<group>"; };
 		F00000000000000000000031 /* ScreenshotKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotKitTests.swift; sourceTree = "<group>"; };
 		F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotGlobalHotKey.swift; sourceTree = "<group>"; };
 		F00000000000000000000033 /* HotKeyRecorderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyRecorderView.swift; sourceTree = "<group>"; };
@@ -146,6 +163,27 @@
 		F0000000000000000000005B /* TranslationCloudSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationCloudSupport.swift; sourceTree = "<group>"; };
 		F0000000000000000000005C /* TranslationTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationTextEditor.swift; sourceTree = "<group>"; };
 		F00000000000000000000071 /* HotKeyRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotKeyRecorderTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000072 /* PrivacyPolicyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPolicyView.swift; sourceTree = "<group>"; };
+		F00000000000000000000073 /* PrivacyPolicy.zh-Hans.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "PrivacyPolicy.zh-Hans.md"; sourceTree = "<group>"; };
+		F00000000000000000000074 /* PrivacyPolicy.en.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PrivacyPolicy.en.md; sourceTree = "<group>"; };
+		F00000000000000000000075 /* OnboardingGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingGuideView.swift; sourceTree = "<group>"; };
+		F00000000000000000000076 /* OnboardingGuideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingGuideTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000077 /* ScrollPositionProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPositionProbe.swift; sourceTree = "<group>"; };
+		F00000000000000000000078 /* ClipboardHistoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryModels.swift; sourceTree = "<group>"; };
+		F00000000000000000000079 /* ClipboardHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryStore.swift; sourceTree = "<group>"; };
+		F0000000000000000000007A /* ClipboardHistoryMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryMonitor.swift; sourceTree = "<group>"; };
+		F0000000000000000000007B /* ClipboardHistoryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryViewModel.swift; sourceTree = "<group>"; };
+		F0000000000000000000007C /* ClipboardHistoryPanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryPanelController.swift; sourceTree = "<group>"; };
+		F0000000000000000000007D /* ClipboardHistoryPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryPanelView.swift; sourceTree = "<group>"; };
+		F0000000000000000000007E /* ClipboardHistoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryTests.swift; sourceTree = "<group>"; };
+		F0000000000000000000007F /* ClipboardHistoryPreviewLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryPreviewLoader.swift; sourceTree = "<group>"; };
+		F00000000000000000000080 /* ClipboardHistoryLinkPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryLinkPreviewView.swift; sourceTree = "<group>"; };
+		F00000000000000000000081 /* PEEKHealthDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKHealthDiagnostics.swift; sourceTree = "<group>"; };
+		F00000000000000000000082 /* PEEKBuiltInSearchRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKBuiltInSearchRegistration.swift; sourceTree = "<group>"; };
+		F00000000000000000000083 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		F00000000000000000000084 /* ScreenshotImageOutputPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotImageOutputPipeline.swift; sourceTree = "<group>"; };
+		F00000000000000000000085 /* ScreenshotOutputPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotOutputPipelineTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000086 /* SearchCommercialReliabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchCommercialReliabilityTests.swift; sourceTree = "<group>"; };
 		F10000000000000000000001 /* PEEK.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PEEK.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F10000000000000000000002 /* PEEKTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PEEKTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -189,6 +227,7 @@
 				A10000000000000000000004 /* Services */,
 				A10000000000000000000009 /* SearchKit */,
 				A1000000000000000000000A /* SearchUI */,
+				A1000000000000000000000C /* ClipboardKit */,
 				A10000000000000000000008 /* ScreenshotKit */,
 				A10000000000000000000006 /* Views */,
 				A10000000000000000000007 /* Resources */,
@@ -200,6 +239,7 @@
 			isa = PBXGroup;
 			children = (
 				F00000000000000000000001 /* PEEKApp.swift */,
+				F00000000000000000000081 /* PEEKHealthDiagnostics.swift */,
 				F00000000000000000000050 /* PEEKPreferences.swift */,
 				F00000000000000000000053 /* PEEKLocalization.swift */,
 				F00000000000000000000032 /* ScreenshotGlobalHotKey.swift */,
@@ -221,6 +261,8 @@
 			children = (
 				F00000000000000000000033 /* HotKeyRecorderView.swift */,
 				F00000000000000000000009 /* MenuBarMenuView.swift */,
+				F00000000000000000000075 /* OnboardingGuideView.swift */,
+				F00000000000000000000072 /* PrivacyPolicyView.swift */,
 				F0000000000000000000000E /* SettingsView.swift */,
 			);
 			path = Views;
@@ -233,6 +275,9 @@
 				F00000000000000000000010 /* Info.plist */,
 				F00000000000000000000054 /* Localizable.xcstrings */,
 				F00000000000000000000055 /* InfoPlist.xcstrings */,
+				F00000000000000000000083 /* PrivacyInfo.xcprivacy */,
+				F00000000000000000000073 /* PrivacyPolicy.zh-Hans.md */,
+				F00000000000000000000074 /* PrivacyPolicy.en.md */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -243,15 +288,15 @@
 				F00000000000000000000028 /* PEEKOCR.swift */,
 				F00000000000000000000051 /* PEEKQRCode.swift */,
 				F00000000000000000000027 /* PEEKPinboard.swift */,
-				F0000000000000000000002E /* AutomaticScrollDriver.swift */,
-				F00000000000000000000023 /* ScreenshotAnnotations.swift */,
+					F0000000000000000000002E /* AutomaticScrollDriver.swift */,
+					F00000000000000000000077 /* ScrollPositionProbe.swift */,
+					F00000000000000000000023 /* ScreenshotAnnotations.swift */,
 				F00000000000000000000021 /* ScreenshotCaptureCoordinator.swift */,
 				F00000000000000000000020 /* ScreenshotCaptureModels.swift */,
 				F00000000000000000000024 /* ScreenshotEditorCanvas.swift */,
 				F00000000000000000000025 /* ScreenshotEditorController.swift */,
+				F00000000000000000000084 /* ScreenshotImageOutputPipeline.swift */,
 				F00000000000000000000022 /* ScreenshotSelectionOverlay.swift */,
-				F00000000000000000000026 /* ScreenshotWorkflowController.swift */,
-				F00000000000000000000030 /* ScrollCaptureHUD.swift */,
 				F0000000000000000000002F /* ScrollCaptureSession.swift */,
 				F00000000000000000000034 /* ScrollCaptureTargetResolver.swift */,
 				F00000000000000000000029 /* ScrollCaptureTypes.swift */,
@@ -278,6 +323,7 @@
 				F00000000000000000000037 /* FileSearchMatcher.swift */,
 				F00000000000000000000036 /* FileSearchModels.swift */,
 				F00000000000000000000039 /* FileSearchPanelProvider.swift */,
+				F00000000000000000000082 /* PEEKBuiltInSearchRegistration.swift */,
 				F00000000000000000000038 /* FileSearchService.swift */,
 				F00000000000000000000056 /* SearchApplicationUsageStore.swift */,
 			);
@@ -310,12 +356,31 @@
 			path = PEEKTranslate;
 			sourceTree = "<group>";
 		};
+		A1000000000000000000000C /* ClipboardKit */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000078 /* ClipboardHistoryModels.swift */,
+				F00000000000000000000079 /* ClipboardHistoryStore.swift */,
+				F0000000000000000000007A /* ClipboardHistoryMonitor.swift */,
+				F0000000000000000000007B /* ClipboardHistoryViewModel.swift */,
+				F0000000000000000000007C /* ClipboardHistoryPanelController.swift */,
+				F0000000000000000000007D /* ClipboardHistoryPanelView.swift */,
+				F0000000000000000000007F /* ClipboardHistoryPreviewLoader.swift */,
+				F00000000000000000000080 /* ClipboardHistoryLinkPreviewView.swift */,
+			);
+			path = ClipboardKit;
+			sourceTree = "<group>";
+		};
 		A20000000000000000000001 /* PEEKTests */ = {
 			isa = PBXGroup;
 			children = (
 				F00000000000000000000040 /* FileSearchTests.swift */,
 				F00000000000000000000071 /* HotKeyRecorderTests.swift */,
+				F00000000000000000000076 /* OnboardingGuideTests.swift */,
+				F0000000000000000000007E /* ClipboardHistoryTests.swift */,
 				F00000000000000000000031 /* ScreenshotKitTests.swift */,
+				F00000000000000000000085 /* ScreenshotOutputPipelineTests.swift */,
+				F00000000000000000000086 /* SearchCommercialReliabilityTests.swift */,
 			);
 			path = PEEKTests;
 			sourceTree = "<group>";
@@ -423,6 +488,9 @@
 				B0000000000000000000000F /* Assets.xcassets in Resources */,
 				B00000000000000000000054 /* Localizable.xcstrings in Resources */,
 				B00000000000000000000055 /* InfoPlist.xcstrings in Resources */,
+				B00000000000000000000083 /* PrivacyInfo.xcprivacy in Resources */,
+				B00000000000000000000073 /* PrivacyPolicy.zh-Hans.md in Resources */,
+				B00000000000000000000074 /* PrivacyPolicy.en.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -441,6 +509,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000001 /* PEEKApp.swift in Sources */,
+				B00000000000000000000081 /* PEEKHealthDiagnostics.swift in Sources */,
 				B00000000000000000000050 /* PEEKPreferences.swift in Sources */,
 				B00000000000000000000053 /* PEEKLocalization.swift in Sources */,
 				B00000000000000000000032 /* ScreenshotGlobalHotKey.swift in Sources */,
@@ -449,13 +518,15 @@
 				B00000000000000000000033 /* HotKeyRecorderView.swift in Sources */,
 				B00000000000000000000009 /* MenuBarMenuView.swift in Sources */,
 				B0000000000000000000000E /* SettingsView.swift in Sources */,
+				B00000000000000000000075 /* OnboardingGuideView.swift in Sources */,
+				B00000000000000000000072 /* PrivacyPolicyView.swift in Sources */,
 				B00000000000000000000020 /* ScreenshotCaptureModels.swift in Sources */,
 				B00000000000000000000021 /* ScreenshotCaptureCoordinator.swift in Sources */,
 				B00000000000000000000022 /* ScreenshotSelectionOverlay.swift in Sources */,
 				B00000000000000000000023 /* ScreenshotAnnotations.swift in Sources */,
 				B00000000000000000000024 /* ScreenshotEditorCanvas.swift in Sources */,
 				B00000000000000000000025 /* ScreenshotEditorController.swift in Sources */,
-				B00000000000000000000026 /* ScreenshotWorkflowController.swift in Sources */,
+				B00000000000000000000084 /* ScreenshotImageOutputPipeline.swift in Sources */,
 				B00000000000000000000027 /* PEEKPinboard.swift in Sources */,
 				B00000000000000000000028 /* PEEKOCR.swift in Sources */,
 				B00000000000000000000051 /* PEEKQRCode.swift in Sources */,
@@ -465,14 +536,15 @@
 				B00000000000000000000035 /* ScrollMovingRegionDetector.swift in Sources */,
 				B0000000000000000000002C /* VerticalImageStitcher.swift in Sources */,
 				B0000000000000000000002D /* ScrollFrameCapturer.swift in Sources */,
-				B0000000000000000000002E /* AutomaticScrollDriver.swift in Sources */,
-				B0000000000000000000002F /* ScrollCaptureSession.swift in Sources */,
+					B0000000000000000000002E /* AutomaticScrollDriver.swift in Sources */,
+					B00000000000000000000077 /* ScrollPositionProbe.swift in Sources */,
+					B0000000000000000000002F /* ScrollCaptureSession.swift in Sources */,
 				B00000000000000000000034 /* ScrollCaptureTargetResolver.swift in Sources */,
-				B00000000000000000000030 /* ScrollCaptureHUD.swift in Sources */,
 				B00000000000000000000036 /* FileSearchModels.swift in Sources */,
 				B00000000000000000000037 /* FileSearchMatcher.swift in Sources */,
 				B00000000000000000000038 /* FileSearchService.swift in Sources */,
 				B00000000000000000000039 /* FileSearchPanelProvider.swift in Sources */,
+				B00000000000000000000082 /* PEEKBuiltInSearchRegistration.swift in Sources */,
 				B00000000000000000000056 /* SearchApplicationUsageStore.swift in Sources */,
 				B00000000000000000000041 /* FileSearchIndexStore.swift in Sources */,
 				B00000000000000000000042 /* FileSearchAuthorizedRootStore.swift in Sources */,
@@ -494,6 +566,14 @@
 				B0000000000000000000005A /* PEEKTranslateSearchRegistration.swift in Sources */,
 				B0000000000000000000005B /* TranslationCloudSupport.swift in Sources */,
 				B0000000000000000000005C /* TranslationTextEditor.swift in Sources */,
+				B00000000000000000000078 /* ClipboardHistoryModels.swift in Sources */,
+				B00000000000000000000079 /* ClipboardHistoryStore.swift in Sources */,
+				B0000000000000000000007A /* ClipboardHistoryMonitor.swift in Sources */,
+				B0000000000000000000007B /* ClipboardHistoryViewModel.swift in Sources */,
+				B0000000000000000000007C /* ClipboardHistoryPanelController.swift in Sources */,
+				B0000000000000000000007D /* ClipboardHistoryPanelView.swift in Sources */,
+				B0000000000000000000007F /* ClipboardHistoryPreviewLoader.swift in Sources */,
+				B00000000000000000000080 /* ClipboardHistoryLinkPreviewView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -503,7 +583,11 @@
 			files = (
 				B00000000000000000000040 /* FileSearchTests.swift in Sources */,
 				B00000000000000000000071 /* HotKeyRecorderTests.swift in Sources */,
+				B00000000000000000000076 /* OnboardingGuideTests.swift in Sources */,
+				B0000000000000000000007E /* ClipboardHistoryTests.swift in Sources */,
 				B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */,
+				B00000000000000000000085 /* ScreenshotOutputPipelineTests.swift in Sources */,
+				B00000000000000000000086 /* SearchCommercialReliabilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -571,15 +655,15 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = PEEK/PEEK.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 3;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = PEEK/Resources/Info.plist;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -602,12 +686,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 3;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 4DXU5FSLLY;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = PEEK/Resources/Info.plist;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

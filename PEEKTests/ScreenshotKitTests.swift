@@ -8,6 +8,135 @@ import XCTest
 @testable import PEEK
 
 final class ScreenshotKitTests: XCTestCase {
+    func testScrollCaptureRuntimeCapabilitiesUseVisualFallbackInSandbox() {
+        let capabilities = ScrollCaptureRuntimeCapabilities(
+            isAppSandboxEnabled: true,
+            isAccessibilityTrusted: true
+        )
+
+        XCTAssertFalse(capabilities.supportsCrossProcessAccessibilityInspection)
+        XCTAssertEqual(capabilities.targetInspectionMode, .visualCompatibility)
+    }
+
+    func testScrollCaptureRuntimeCapabilitiesRequireAccessibilityTrust() {
+        let unavailable = ScrollCaptureRuntimeCapabilities(
+            isAppSandboxEnabled: false,
+            isAccessibilityTrusted: false
+        )
+        let available = ScrollCaptureRuntimeCapabilities(
+            isAppSandboxEnabled: false,
+            isAccessibilityTrusted: true
+        )
+
+        XCTAssertFalse(unavailable.supportsCrossProcessAccessibilityInspection)
+        XCTAssertEqual(unavailable.targetInspectionMode, .visualCompatibility)
+        XCTAssertTrue(available.supportsCrossProcessAccessibilityInspection)
+        XCTAssertEqual(available.targetInspectionMode, .accessibility)
+    }
+
+    func testScrollCaptureRuntimeCapabilitiesFailClosedWhenSandboxStateIsUnknown() {
+        let capabilities = ScrollCaptureRuntimeCapabilities(
+            appSandboxState: .unknown,
+            isAccessibilityTrusted: true
+        )
+
+        XCTAssertFalse(capabilities.supportsCrossProcessAccessibilityInspection)
+        XCTAssertEqual(capabilities.targetInspectionMode, .visualCompatibility)
+    }
+
+    func testPrivacyPolicyLanguageUsesAppChoiceAndSupportedSystemFallback() {
+        XCTAssertEqual(
+            PrivacyPolicyLanguage.resolve(
+                appLanguage: .simplifiedChinese,
+                preferredLanguages: ["en-US"]
+            ),
+            .simplifiedChinese
+        )
+        XCTAssertEqual(
+            PrivacyPolicyLanguage.resolve(
+                appLanguage: .english,
+                preferredLanguages: ["zh-Hans"]
+            ),
+            .english
+        )
+        XCTAssertEqual(
+            PrivacyPolicyLanguage.resolve(
+                appLanguage: .system,
+                preferredLanguages: ["fr-FR", "zh-Hans"]
+            ),
+            .simplifiedChinese
+        )
+        XCTAssertEqual(
+            PrivacyPolicyLanguage.resolve(
+                appLanguage: .system,
+                preferredLanguages: ["de-DE", "en-GB"]
+            ),
+            .english
+        )
+    }
+
+    func testBundledPrivacyPoliciesAreLocalizedAndComplete() throws {
+        let testBundle = Bundle(for: type(of: self))
+        let hostAppURL = testBundle.bundleURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let hostAppBundle = try XCTUnwrap(Bundle(url: hostAppURL))
+        let chinese = try PrivacyPolicyDocument.load(
+            appLanguage: .simplifiedChinese,
+            preferredLanguages: ["en"],
+            bundle: hostAppBundle
+        )
+        let english = try PrivacyPolicyDocument.load(
+            appLanguage: .english,
+            preferredLanguages: ["zh-Hans"],
+            bundle: hostAppBundle
+        )
+
+        XCTAssertEqual(chinese.language, .simplifiedChinese)
+        XCTAssertEqual(english.language, .english)
+        XCTAssertTrue(chinese.blocks.contains(.heading(level: 1, text: "PEEK 隐私政策")))
+        XCTAssertTrue(english.blocks.contains(.heading(level: 1, text: "PEEK Privacy Policy")))
+
+        let chineseSections = chinese.blocks.filter {
+            if case .heading(level: 2, text: _) = $0 { return true }
+            return false
+        }
+        let englishSections = english.blocks.filter {
+            if case .heading(level: 2, text: _) = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(chineseSections.count, 10)
+        XCTAssertEqual(englishSections.count, 10)
+
+        let allText = (chinese.blocks + english.blocks).map { block -> String in
+            switch block {
+            case .heading(_, let text), .paragraph(let text), .bullet(let text):
+                return text
+            }
+        }.joined(separator: "\n")
+        XCTAssertFalse(allText.contains("github.com/ShawnShoper/peek/blob/master/PRIVACY.md"))
+    }
+
+    func testPrivacyPolicyMarkdownParserKeepsHeadingsParagraphsAndBullets() {
+        let blocks = PrivacyPolicyMarkdownParser.parse("""
+        # Title
+
+        A paragraph that
+        continues here.
+
+        - First item
+        - Second item
+        """)
+
+        XCTAssertEqual(blocks, [
+            .heading(level: 1, text: "Title"),
+            .paragraph("A paragraph that continues here."),
+            .bullet("First item"),
+            .bullet("Second item"),
+        ])
+    }
+
     @MainActor
     func testAppearanceModesApplyAndClearApplicationOverride() {
         let application = NSApplication.shared
@@ -79,25 +208,71 @@ final class ScreenshotKitTests: XCTestCase {
     }
 
     @MainActor
-    func testScreenshotServiceCancellationWhileAwaitingIndexGateEndsRequest() async {
-        let indexActivity = SuspendedCaptureIndexActivityController()
-        let service = ScreenshotService(indexActivityController: indexActivity)
+    func testScreenshotServiceDoesNotWaitForIndexActivityBeforeStartingCapture() async {
+        let indexActivity = RecordingCaptureIndexActivityController()
+        let coordinator = ScreenshotCaptureCoordinator(
+            captureDesktop: {
+                try await Task.sleep(nanoseconds: 100_000_000)
+                throw CancellationError()
+            },
+            hasScreenRecordingPermission: { true }
+        )
+        let service = ScreenshotService(
+            indexActivityController: indexActivity,
+            captureCoordinator: coordinator
+        )
         let captureTask = Task { @MainActor in
             await service.captureRegion(presentationDelayNanoseconds: 0)
         }
 
-        while !indexActivity.isBeginCaptureSuspended {
+        while indexActivity.beginCaptureCount == 0 {
             await Task.yield()
         }
         XCTAssertTrue(service.isCapturing)
 
         service.cancelActiveCapture()
-        indexActivity.resumeBeginCaptureActivity()
+        XCTAssertFalse(
+            service.isCapturing,
+            "Cancelling preparation must clear menu state immediately"
+        )
         await captureTask.value
 
         XCTAssertFalse(service.isCapturing)
         XCTAssertEqual(indexActivity.beginCaptureCount, 1)
         XCTAssertEqual(indexActivity.endCaptureCount, 1)
+    }
+
+    @MainActor
+    func testScreenshotServicePreparationWatchdogClearsStuckCaptureState() async {
+        let indexActivity = RecordingCaptureIndexActivityController()
+        let coordinator = ScreenshotCaptureCoordinator(captureDesktop: {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+            throw CancellationError()
+        }, hasScreenRecordingPermission: { true })
+        let service = ScreenshotService(
+            indexActivityController: indexActivity,
+            captureCoordinator: coordinator,
+            capturePreparationTimeoutNanoseconds: 20_000_000
+        )
+        let captureTask = Task { @MainActor in
+            await service.captureRegion(presentationDelayNanoseconds: 0)
+        }
+
+        while service.isCapturing == false {
+            await Task.yield()
+        }
+        while service.isCapturing {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertFalse(coordinator.isCapturing)
+        XCTAssertTrue(service.lastMessage?.contains("自动恢复") == true)
+        XCTAssertEqual(indexActivity.beginCaptureCount, 1)
+        XCTAssertEqual(indexActivity.endCaptureCount, 1)
+
+        captureTask.cancel()
+        await captureTask.value
+        XCTAssertFalse(service.isCapturing)
     }
 
     func testScreenshotDiagnosticSessionUsesMonotonicElapsedTime() {
@@ -313,6 +488,88 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertFalse(unrelatedWindow.isVisible)
     }
 
+    @MainActor
+    func testSettingsRouteCoordinatorRetainsNewestRouteUntilConsumed() {
+        let coordinator = PEEKSettingsRouteCoordinator()
+
+        coordinator.request(.search)
+        let firstRevision = coordinator.revision
+        coordinator.request(.translation)
+
+        XCTAssertGreaterThan(coordinator.revision, firstRevision)
+        XCTAssertEqual(coordinator.consumePendingDestination(), .translation)
+        XCTAssertNil(coordinator.consumePendingDestination())
+    }
+
+    func testSettingsIndexRefreshRunsOnlyForVisibleSearchSettings() {
+        XCTAssertTrue(
+            PEEKSettingsIndexRefreshPolicy.shouldRefresh(
+                windowIsVisible: true,
+                destination: .search
+            )
+        )
+        XCTAssertFalse(
+            PEEKSettingsIndexRefreshPolicy.shouldRefresh(
+                windowIsVisible: false,
+                destination: .search
+            )
+        )
+        XCTAssertFalse(
+            PEEKSettingsIndexRefreshPolicy.shouldRefresh(
+                windowIsVisible: true,
+                destination: .general
+            )
+        )
+    }
+
+    @MainActor
+    func testSearchPanelPresentationLeavesVisibleSettingsWindowOpen() async {
+        let settingsWindow = NSWindow(
+            contentRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.identifier = PEEKSettingsWindowPresenter.windowIdentifier
+        settingsWindow.orderFront(nil)
+
+        let controller = SearchPanelController()
+        let provider = AnySearchPanelProvider { _, _, _ in
+            AsyncThrowingStream { continuation in
+                continuation.finish()
+            }
+        }
+        controller.show(provider: provider)
+
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                continuation.resume()
+            }
+        }
+
+        XCTAssertTrue(settingsWindow.isVisible)
+        controller.destroy()
+        settingsWindow.close()
+    }
+
+    @MainActor
+    func testSearchPanelDismissalActionRunsOnNextMainEventLoopTurn() async {
+        let controller = SearchPanelController()
+        var events = ["scheduled"]
+
+        await withCheckedContinuation { continuation in
+            controller.closeThenPerform {
+                events.append("action")
+                continuation.resume()
+            }
+            events.append("returned")
+        }
+
+        XCTAssertEqual(events, ["scheduled", "returned", "action"])
+        controller.destroy()
+    }
+
     func testSettingsQuitShortcutMatchesOnlyPlainCommandQ() {
         XCTAssertTrue(
             PEEKSettingsQuitShortcutPolicy.matches(
@@ -520,6 +777,11 @@ final class ScreenshotKitTests: XCTestCase {
                 .errorDescription?
                 .contains("60 秒") == true
         )
+        XCTAssertTrue(
+            ScreenshotCaptureError.preparationTimedOut
+                .errorDescription?
+                .contains("自动恢复") == true
+        )
     }
 
     func testScreenCapturePixelDimensionsAdaptToEveryDisplayScale() {
@@ -544,6 +806,25 @@ final class ScreenshotKitTests: XCTestCase {
             ),
             ScreenCapturePixelDimensions(width: 1_202, height: 902)
         )
+    }
+
+    func testLongImageEditorKeepsToolbarBelowSystemTitleBar() {
+        XCTAssertTrue(ScreenshotEditorWindowLayout.styleMask.contains(.titled))
+        XCTAssertFalse(
+            ScreenshotEditorWindowLayout.styleMask.contains(.fullSizeContentView),
+            "The annotation bar must not be laid out underneath the title bar"
+        )
+    }
+
+    func testLongImageEditorFitsCurrentDisplayVisibleFrame() {
+        let compactDisplay = CGRect(x: 0, y: 0, width: 1_024, height: 700)
+        let contentSize = ScreenshotEditorWindowLayout.contentSize(for: compactDisplay)
+        let minimumSize = ScreenshotEditorWindowLayout.minimumSize(for: compactDisplay)
+
+        XCTAssertLessThanOrEqual(contentSize.width, compactDisplay.width - 48)
+        XCTAssertLessThanOrEqual(contentSize.height, compactDisplay.height - 96)
+        XCTAssertLessThanOrEqual(minimumSize.width, contentSize.width)
+        XCTAssertLessThanOrEqual(minimumSize.height, contentSize.height)
     }
 
     func testScreenCapturePixelDimensionsSafelyHandleInvalidScale() {
@@ -925,7 +1206,7 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertEqual(counter.value, 1)
     }
 
-    func testScrollFrameCapturerUsesInjectedModernBackend() async throws {
+    func testScrollFrameCapturerUsesInjectedModernBackendAndExcludesPEEKWindows() async throws {
         let expectedRect = CGRect(x: 120, y: 80, width: 64, height: 48)
         let expectedImage = try makeSolidPixelBuffer(
             width: 64,
@@ -944,6 +1225,8 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertEqual(result.height, expectedImage.height)
         let capturedRects = await backend.capturedRects()
         XCTAssertEqual(capturedRects, [expectedRect])
+        let exclusionFlags = await backend.currentApplicationExclusionFlags()
+        XCTAssertEqual(exclusionFlags, [true])
     }
 
     func testScrollFrameCapturerFailsBeforeBackendWhenPermissionDenied() async throws {
@@ -1477,6 +1760,70 @@ final class ScreenshotKitTests: XCTestCase {
             TranslationCloudClient.md5("2015063000000001apple143566028812345678"),
             "f89f9594663708c1605f3d736d01d2d4"
         )
+    }
+
+    func testGoogleTranslationRequestKeepsAPIKeyOutOfURL() throws {
+        let apiKey = "test-secret-key?with=url-sensitive-characters"
+        let request = try TranslationCloudRequestBuilder.googleTranslationV2(
+            text: "Hello, PEEK",
+            sourceIdentifier: "en-US",
+            targetIdentifier: "zh-Hans",
+            apiKey: apiKey
+        )
+
+        XCTAssertEqual(
+            request.url?.absoluteString,
+            "https://translation.googleapis.com/language/translate/v2"
+        )
+        XCTAssertNil(request.url?.query)
+        XCTAssertFalse(request.url?.absoluteString.contains(apiKey) == true)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-goog-api-key"), apiKey)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, 12)
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Content-Type"),
+            "application/json; charset=utf-8"
+        )
+
+        let bodyData = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodyData) as? [String: String]
+        )
+        XCTAssertEqual(body["q"], "Hello, PEEK")
+        XCTAssertEqual(body["source"], "en")
+        XCTAssertEqual(body["target"], "zh-CN")
+        XCTAssertEqual(body["format"], "text")
+        XCTAssertFalse(String(decoding: bodyData, as: UTF8.self).contains(apiKey))
+    }
+
+    func testGoogleTranslationRequestOmitsAutomaticSourceAndRejectsEmptyAPIKey() throws {
+        let request = try TranslationCloudRequestBuilder.googleTranslationV2(
+            text: "Hello",
+            sourceIdentifier: nil,
+            targetIdentifier: "de",
+            apiKey: "  google-key  "
+        )
+        let bodyData = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: bodyData) as? [String: String]
+        )
+
+        XCTAssertNil(body["source"])
+        XCTAssertEqual(body["target"], "de")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "x-goog-api-key"), "google-key")
+        XCTAssertThrowsError(
+            try TranslationCloudRequestBuilder.googleTranslationV2(
+                text: "Hello",
+                sourceIdentifier: nil,
+                targetIdentifier: "de",
+                apiKey: " \n "
+            )
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                TranslationCloudError.invalidConfiguration.localizedDescription
+            )
+        }
     }
 
     @available(macOS 15.0, *)
@@ -2032,6 +2379,136 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertTrue(screenshotInlineToolRequiresCapture(.text))
     }
 
+    @MainActor
+    func testSelectionCursorTracksCreateMoveEdgesCornersAndActiveDrag() {
+        let screen = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+        let desktop = ScreenshotDesktopGeometry(
+            displays: [ScreenshotDisplayGeometry(displayID: 1, screenFrame: screen)],
+            desktopBounds: screen,
+            windowCandidates: [],
+            appKitReferenceTop: screen.maxY
+        )
+        let model = ScreenshotSelectionModel(desktop: desktop)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 200, y: 200)), .precision)
+
+        model.mouseDown(at: CGPoint(x: 100, y: 120), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 500, y: 420))
+        _ = model.mouseUp(at: CGPoint(x: 500, y: 420))
+
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 300, y: 260)), .move)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 220, y: 420)), .resize(.north))
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 100, y: 260)), .resize(.west))
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 500, y: 420)), .resize(.northEast))
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 700, y: 600)), .precision)
+
+        model.mouseDown(at: CGPoint(x: 300, y: 260), clickCount: 1)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 900, y: 700)), .move)
+        model.mouseDragged(to: CGPoint(x: 340, y: 300))
+        _ = model.mouseUp(at: CGPoint(x: 340, y: 300))
+    }
+
+    @MainActor
+    func testSelectionCanResizeFromAnywhereAlongAnEdge() {
+        let screen = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+        let desktop = ScreenshotDesktopGeometry(
+            displays: [ScreenshotDisplayGeometry(displayID: 1, screenFrame: screen)],
+            desktopBounds: screen,
+            windowCandidates: [],
+            appKitReferenceTop: screen.maxY
+        )
+        let model = ScreenshotSelectionModel(desktop: desktop)
+        model.mouseDown(at: CGPoint(x: 100, y: 120), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 500, y: 420))
+        _ = model.mouseUp(at: CGPoint(x: 500, y: 420))
+
+        model.mouseDown(at: CGPoint(x: 220, y: 420), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 220, y: 470))
+        _ = model.mouseUp(at: CGPoint(x: 220, y: 470))
+
+        XCTAssertEqual(model.selectionRect, CGRect(x: 100, y: 120, width: 400, height: 350))
+    }
+
+    @MainActor
+    func testToolbarSelectionModeKeepsMoveResizeAndOutsideReselectReachable() {
+        let screen = CGRect(x: 0, y: 0, width: 1_440, height: 900)
+        let desktop = ScreenshotDesktopGeometry(
+            displays: [ScreenshotDisplayGeometry(displayID: 1, screenFrame: screen)],
+            desktopBounds: screen,
+            windowCandidates: [],
+            appKitReferenceTop: screen.maxY
+        )
+        let model = ScreenshotSelectionModel(desktop: desktop)
+        var previews: [CGRect] = []
+        var commits: [CGRect] = []
+        model.onSelectionPreview = { previews.append($0) }
+        model.onSelectionReady = { commits.append($0) }
+
+        model.mouseDown(at: CGPoint(x: 100, y: 120), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 500, y: 420))
+        _ = model.mouseUp(at: CGPoint(x: 500, y: 420))
+        model.beginEditing()
+
+        XCTAssertFalse(model.isEditing)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 300, y: 260)), .move)
+
+        model.mouseDown(at: CGPoint(x: 300, y: 260), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 340, y: 290))
+        _ = model.mouseUp(at: CGPoint(x: 340, y: 290))
+        XCTAssertEqual(model.selectionRect, CGRect(x: 140, y: 150, width: 400, height: 300))
+
+        model.mouseDown(at: CGPoint(x: 540, y: 300), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 600, y: 300))
+        _ = model.mouseUp(at: CGPoint(x: 600, y: 300))
+        XCTAssertEqual(model.selectionRect, CGRect(x: 140, y: 150, width: 460, height: 300))
+
+        model.mouseDown(at: CGPoint(x: 760, y: 520), clickCount: 1)
+        model.mouseDragged(to: CGPoint(x: 1_000, y: 700))
+        _ = model.mouseUp(at: CGPoint(x: 1_000, y: 700))
+        XCTAssertEqual(model.selectionRect, CGRect(x: 760, y: 520, width: 240, height: 180))
+        XCTAssertEqual(commits.last, model.selectionRect)
+        XCTAssertEqual(previews.last, model.selectionRect)
+
+        model.setSelectionInteractionEnabled(false)
+        XCTAssertTrue(model.isEditing)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 800, y: 560)), .standard)
+        model.setSelectionInteractionEnabled(true)
+        XCTAssertFalse(model.isEditing)
+        XCTAssertEqual(model.cursorKind(at: CGPoint(x: 800, y: 560)), .move)
+    }
+
+    func testSelectionResizeGeometryUsesEveryEdgeAndClampsToBounds() {
+        let original = CGRect(x: 100, y: 120, width: 400, height: 300)
+        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+
+        XCTAssertEqual(
+            screenshotResizedSelection(
+                original: original,
+                handle: .northEast,
+                targetPoint: CGPoint(x: 620, y: 520),
+                bounds: bounds
+            ),
+            CGRect(x: 100, y: 120, width: 520, height: 400)
+        )
+        XCTAssertEqual(
+            screenshotResizedSelection(
+                original: original,
+                handle: .southWest,
+                targetPoint: CGPoint(x: -80, y: -40),
+                bounds: bounds
+            ),
+            CGRect(x: 0, y: 0, width: 500, height: 420)
+        )
+        XCTAssertEqual(
+            screenshotResizedSelection(
+                original: original,
+                handle: .east,
+                targetPoint: CGPoint(x: 104, y: 240),
+                bounds: bounds
+            ),
+            CGRect(x: 100, y: 120, width: 8, height: 300)
+        )
+    }
+
     func testInlineEditorCursorFollowsSelectedToolAndDefaultsToMove() {
         XCTAssertEqual(screenshotEditorCursorKind(for: .select), .move)
         XCTAssertEqual(screenshotEditorCursorKind(for: .rectangle), .drawing)
@@ -2068,29 +2545,57 @@ final class ScreenshotKitTests: XCTestCase {
     }
 
     @MainActor
-    func testMoveCursorUsesBlackCoreAndWhiteOutlineForEveryBackground() throws {
+    func testMoveCursorUsesWechatStyleBlackGlyphWithOnePointTwoPixelWhiteShadow() throws {
         let image = makeScreenshotFourWayMoveCursorImage()
         XCTAssertFalse(image.isTemplate)
+        XCTAssertEqual(image.size.width, 24, accuracy: 0.001)
+        XCTAssertEqual(image.size.height, 24, accuracy: 0.001)
         let bitmap = try XCTUnwrap(
             NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation))
         )
         var hasDarkPixel = false
-        var hasLightPixel = false
+        var hasWhiteShadowPixel = false
+        var hasWhiteHaloPixel = false
+        var opaquePixelCount = 0
         for y in 0 ..< bitmap.pixelsHigh {
             for x in 0 ..< bitmap.pixelsWide {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
-                      color.alphaComponent > 0.8 else {
+                      color.alphaComponent > 0.02 else {
                     continue
                 }
                 let brightness = (
                     color.redComponent + color.greenComponent + color.blueComponent
                 ) / 3
+                hasWhiteShadowPixel = hasWhiteShadowPixel
+                    || (
+                        brightness > 0.75
+                            && color.alphaComponent > 0.05
+                            && color.alphaComponent < 0.8
+                    )
+                guard color.alphaComponent > 0.8 else { continue }
+                opaquePixelCount += 1
                 hasDarkPixel = hasDarkPixel || brightness < 0.15
-                hasLightPixel = hasLightPixel || brightness > 0.85
+                hasWhiteHaloPixel = hasWhiteHaloPixel
+                    || (
+                        brightness > 0.85
+                            && abs(color.redComponent - color.greenComponent) < 0.08
+                            && abs(color.greenComponent - color.blueComponent) < 0.08
+                    )
             }
         }
         XCTAssertTrue(hasDarkPixel)
-        XCTAssertTrue(hasLightPixel)
+        XCTAssertTrue(hasWhiteShadowPixel)
+        XCTAssertFalse(hasWhiteHaloPixel)
+        XCTAssertGreaterThan(opaquePixelCount, 70)
+        XCTAssertLessThan(opaquePixelCount, 210)
+        let center = try XCTUnwrap(
+            bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)?
+                .usingColorSpace(.deviceRGB)
+        )
+        XCTAssertGreaterThan(center.alphaComponent, 0.9)
+        XCTAssertLessThan(center.redComponent, 0.15)
+        XCTAssertLessThan(center.greenComponent, 0.15)
+        XCTAssertLessThan(center.blueComponent, 0.15)
     }
 
     func testInlineEditorDefaultsAnnotationColorToSystemRed() throws {
@@ -3222,6 +3727,19 @@ final class ScreenshotKitTests: XCTestCase {
         }
     }
 
+    func testOverlapSearchConfigurationRejectsGapBeforeShortMovementRange() {
+        var configuration = ScrollOverlapSearchConfiguration()
+        configuration.maximumOverlapRatio = 0.80
+        configuration.maximumShortMovementRatio = 0.05
+
+        XCTAssertThrowsError(try configuration.validate()) { error in
+            XCTAssertEqual(
+                error as? ScrollCaptureError,
+                .invalidConfiguration("短距离滚动识别参数无效")
+            )
+        }
+    }
+
     func testScrollCaptureModeResolverUsesValidatedWindowAnchorWithoutAXSemanticRegion() throws {
         let mode = try ScrollCaptureModeResolver.resolve(
             automaticRequested: true,
@@ -3234,7 +3752,7 @@ final class ScreenshotKitTests: XCTestCase {
         guard case .automatic(let configuration) = mode else {
             return XCTFail("A validated window anchor must enable automatic scrolling")
         }
-        XCTAssertEqual(configuration.amount, 210)
+        XCTAssertEqual(configuration.amount, 150)
         XCTAssertEqual(configuration.consecutiveDuplicateLimit, 2)
     }
 
@@ -3250,7 +3768,7 @@ final class ScreenshotKitTests: XCTestCase {
         guard case .automatic(let configuration) = mode else {
             return XCTFail("A validated window anchor must enable automatic scrolling")
         }
-        XCTAssertEqual(configuration.amount, 42)
+        XCTAssertEqual(configuration.amount, 30)
     }
 
     func testScrollCaptureModeResolverPreservesConfiguredAmountAsCeiling() throws {
@@ -3307,6 +3825,341 @@ final class ScreenshotKitTests: XCTestCase {
         guard case .manual = mode else {
             return XCTFail("Disabling automatic scrolling must select manual mode")
         }
+    }
+
+    func testScrollCapturePreferenceDefaultsToAutomatic() {
+        let suiteName = "ScreenshotKitTests.scroll-preference-default.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Unable to create isolated defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(ScrollCapturePreferenceResolver.automaticScrollingEnabled(
+            defaults: defaults,
+            attemptOverride: nil
+        ))
+    }
+
+    func testScrollCaptureRecoveryOverrideDoesNotChangePersistentPreference() {
+        let suiteName = "ScreenshotKitTests.scroll-preference-override.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Unable to create isolated defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: ScrollCapturePreferenceResolver.automaticScrollingKey)
+
+        XCTAssertFalse(ScrollCapturePreferenceResolver.automaticScrollingEnabled(
+            defaults: defaults,
+            attemptOverride: false
+        ))
+        XCTAssertTrue(ScrollCapturePreferenceResolver.automaticScrollingEnabled(
+            defaults: defaults,
+            attemptOverride: nil
+        ))
+        XCTAssertTrue(defaults.bool(
+            forKey: ScrollCapturePreferenceResolver.automaticScrollingKey
+        ))
+    }
+
+    func testScrollWheelPulsePlannerPreservesRequestedTotal() {
+        let pulses = ScrollWheelPulsePlanner.amounts(for: 700)
+
+        XCTAssertEqual(pulses.reduce(0, +), 700)
+        XCTAssertTrue(pulses.allSatisfy { (1 ... 96).contains($0) })
+        XCTAssertLessThanOrEqual((pulses.max() ?? 0) - (pulses.min() ?? 0), 1)
+    }
+
+    func testScrollWheelPulsePlannerAvoidsTinyTrailingPulse() {
+        XCTAssertEqual(
+            ScrollWheelPulsePlanner.amounts(for: 210, maximumEventAmount: 96),
+            [70, 70, 70]
+        )
+        XCTAssertTrue(ScrollWheelPulsePlanner.amounts(for: 0).isEmpty)
+        XCTAssertTrue(ScrollWheelPulsePlanner.amounts(for: -1).isEmpty)
+    }
+
+    func testAdaptiveScrollStepPlannerContractsFallbackTransactions() {
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: nil,
+                consecutiveNoMovementTransactions: 0
+            ),
+            120
+        )
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: nil,
+                consecutiveNoMovementTransactions: 1
+            ),
+            60
+        )
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: nil,
+                consecutiveNoMovementTransactions: 2
+            ),
+            30
+        )
+    }
+
+    func testAdaptiveScrollStepPlannerUsesSemanticTailProgress() throws {
+        let nearEnd = try XCTUnwrap(ScrollPositionSnapshot(
+            value: 0.95,
+            minimum: 0,
+            maximum: 1
+        ))
+        let finalTail = try XCTUnwrap(ScrollPositionSnapshot(
+            value: 0.99,
+            minimum: 0,
+            maximum: 1
+        ))
+        let atEnd = try XCTUnwrap(ScrollPositionSnapshot(
+            value: 1,
+            minimum: 0,
+            maximum: 1
+        ))
+
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: nearEnd,
+                consecutiveNoMovementTransactions: 0
+            ),
+            60
+        )
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: finalTail,
+                consecutiveNoMovementTransactions: 0
+            ),
+            30
+        )
+        XCTAssertEqual(
+            AdaptiveScrollStepPlanner.amount(
+                configuredAmount: 120,
+                viewportHeight: 600,
+                position: atEnd,
+                consecutiveNoMovementTransactions: 0
+            ),
+            0
+        )
+    }
+
+    func testAutomaticScrollSessionRequiresThreeFallbackNoMovementTransactions() async throws {
+        let frame = try makePixelBuffer(startingAtRow: 0, width: 96, height: 200)
+            .makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: [frame, frame, frame, frame])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 96, height: 200),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 120,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertEqual(result.capturedFrameCount, 4)
+        XCTAssertEqual(calls.map(\.amount), [120, 60, 30])
+    }
+
+    func testScrollCaptureMemoryBudgetScalesWithPhysicalMemoryAndCapsAt512MiB() {
+        let gibibyte = UInt64(1_024 * 1_024 * 1_024)
+        let mebibyte = 1_024 * 1_024
+
+        XCTAssertEqual(
+            ScrollCaptureMemoryBudget.recommended(
+                physicalMemoryBytes: 4 * gibibyte
+            ).maximumEstimatedPeakBytes,
+            192 * mebibyte
+        )
+        XCTAssertEqual(
+            ScrollCaptureMemoryBudget.recommended(
+                physicalMemoryBytes: 8 * gibibyte
+            ).maximumEstimatedPeakBytes,
+            256 * mebibyte
+        )
+        XCTAssertEqual(
+            ScrollCaptureMemoryBudget.recommended(
+                physicalMemoryBytes: 16 * gibibyte
+            ).maximumEstimatedPeakBytes,
+            384 * mebibyte
+        )
+        XCTAssertEqual(
+            ScrollCaptureMemoryBudget.recommended(
+                physicalMemoryBytes: 64 * gibibyte
+            ).maximumEstimatedPeakBytes,
+            512 * mebibyte
+        )
+    }
+
+    func testHighOverlapRetinaCaptureStopsAtMemoryBudgetAndStitchesSafePrefix() async throws {
+        let pixelWidth = 256
+        let pixelHeight = 256
+        let displacement = 16
+        let frames = try [0, displacement, displacement * 2, displacement * 3].map {
+            try makePixelBuffer(
+                startingAtRow: $0,
+                width: pixelWidth,
+                height: pixelHeight
+            )
+        }
+        let capturer = SequenceScrollFrameCapturer(
+            images: try frames.map { try $0.makeCGImage() }
+        )
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                // A 2x backing image exercises Retina byte accounting rather
+                // than estimating memory from this logical-point rectangle.
+                captureRect: CGRect(x: 0, y: 0, width: 128, height: 128),
+                mode: .manual,
+                captureInterval: 0.1,
+                maximumFrames: frames.count,
+                maximumDuration: 10,
+                memoryBudget: ScrollCaptureMemoryBudget(
+                    maximumRetainedFrameBytes: 900_000,
+                    maximumEstimatedPeakBytes: 1_400_000
+                )
+            ),
+            capturer: capturer,
+            scrollDriver: NoOpAutomaticScrollDriver()
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: pixelWidth,
+            height: pixelHeight + displacement * 2
+        )
+
+        XCTAssertEqual(result.stopReason, .memoryLimit)
+        XCTAssertEqual(result.capturedFrameCount, 4)
+        XCTAssertEqual(result.acceptedFrameCount, 3)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [displacement, displacement])
+        XCTAssertEqual(output.width, expected.width)
+        XCTAssertEqual(output.height, expected.height)
+        XCTAssertEqual(output.rgbaData, expected.rgbaData)
+        XCTAssertTrue(result.warnings.contains { $0.contains("内存保护上限") })
+    }
+
+    func testOversizedFirstFrameUsesOriginalImageWithoutAllocatingStitchOutput() async throws {
+        let pixels = try makePixelBuffer(
+            startingAtRow: 0,
+            width: 256,
+            height: 256
+        )
+        let originalImage = try pixels.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: [originalImage])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 128, height: 128),
+                mode: .manual,
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10,
+                memoryBudget: ScrollCaptureMemoryBudget(
+                    maximumRetainedFrameBytes: 300_000,
+                    maximumEstimatedPeakBytes: 600_000
+                )
+            ),
+            capturer: capturer,
+            scrollDriver: NoOpAutomaticScrollDriver()
+        )
+
+        let result = try await session.start()
+        let captureCount = await capturer.captureCount
+
+        XCTAssertEqual(result.stopReason, .memoryLimit)
+        XCTAssertEqual(result.capturedFrameCount, 1)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.image === originalImage)
+        XCTAssertEqual(captureCount, 1)
+        XCTAssertTrue(result.warnings.contains { $0.contains("未分配拼接缓冲区") })
+    }
+
+    func testVerticalImageStitcherObservesCancellationBeforeCopyingRows() async throws {
+        let frame = try makePixelBuffer(
+            startingAtRow: 0,
+            width: 256,
+            height: 256
+        )
+        let task = Task.detached { () throws -> ScrollPixelBuffer in
+            // Make cancellation deterministic even if the detached task starts
+            // before the test thread calls `cancel()`.
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            return try VerticalImageStitcher().stitch(
+                pixelBuffers: [frame],
+                overlaps: []
+            )
+        }
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("A cancelled stitch must not allocate or copy the output")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected cancellation error: \(error)")
+        }
+    }
+
+    func testAutomaticScrollSessionStopsAfterAcceptingSemanticBottomFrame() async throws {
+        let first = try makePixelBuffer(startingAtRow: 0, width: 96, height: 200)
+        let second = try makePixelBuffer(startingAtRow: 48, width: 96, height: 200)
+        let viewport = CoupledScrollViewport(captureVariantsByScrollStep: try [
+            [first.makeCGImage()],
+            [second.makeCGImage()]
+        ])
+        let driver = PositionAwareAutomaticScrollDriver(
+            viewport: viewport,
+            positions: try [
+                XCTUnwrap(ScrollPositionSnapshot(value: 0.5, minimum: 0, maximum: 1)),
+                XCTUnwrap(ScrollPositionSnapshot(value: 1, minimum: 0, maximum: 1))
+            ]
+        )
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 96, height: 200),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let calls = await viewport.scrollCalls
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [48])
+        XCTAssertEqual(calls.map(\.amount), [120])
     }
 
     func testScrollCaptureSessionCancelledBeforeStartDoesNotCaptureFrame() async {
@@ -3366,10 +4219,51 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertEqual(calls, [AutomaticScrollCall(point: scrollPoint, amount: 420)])
     }
 
-    func testAutomaticScrollSessionFailsWhenInitialScrollAttemptsDoNotMoveContent() async throws {
+    func testAutomaticScrollSessionKeepsSafeAmountWhenAppConsumesOnlyPartOfRequest() async throws {
+        let width = 96
+        let height = 200
+        let offsets = [0, 20, 40, 60]
+        var imagesByOffset: [Int: CGImage] = [:]
+        for offset in offsets {
+            imagesByOffset[offset] = try makePixelBuffer(
+                startingAtRow: offset,
+                width: width,
+                height: height
+            ).makeCGImage()
+        }
+        let viewport = AmountCoupledScrollViewport(
+            imagesByOffset: imagesByOffset,
+            maximumOffset: 60,
+            maximumConsumedPerCall: 20
+        )
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 80)),
+                captureInterval: 0.1,
+                maximumFrames: offsets.count,
+                maximumDuration: 10
+            ),
+            capturer: AmountCoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: AmountCoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let calls = await viewport.scrollCalls
+
+        XCTAssertEqual(result.acceptedFrameCount, offsets.count)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [20, 20, 20])
+        XCTAssertEqual(
+            calls.map(\.amount),
+            [80, 80, 80],
+            "A clamped native view must not make the next request grow beyond the safe baseline"
+        )
+    }
+
+    func testAutomaticScrollSessionFinishesWithSingleFrameWhenContentNeverMoves() async throws {
         let frame = try makePixelBuffer(startingAtRow: 0, height: 100)
         let image = try frame.makeCGImage()
-        let capturer = SequenceScrollFrameCapturer(images: [image, image, image])
+        let capturer = SequenceScrollFrameCapturer(images: [image, image, image, image])
         let driver = RecordingAutomaticScrollDriver()
         let session = ScrollCaptureSession(
             configuration: ScrollCaptureConfiguration(
@@ -3386,19 +4280,18 @@ final class ScreenshotKitTests: XCTestCase {
             scrollDriver: driver
         )
 
-        do {
-            _ = try await session.start()
-            XCTFail("A target that never moves must not produce a one-frame result")
-        } catch let error as ScrollCaptureError {
-            XCTAssertEqual(error, .targetDidNotScroll)
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
         let captureCount = await capturer.captureCount
         let calls = await driver.calls
-        XCTAssertEqual(captureCount, 3)
-        XCTAssertEqual(calls.count, 2)
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.capturedFrameCount, 4)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(output.rgbaData, frame.rgbaData)
+        XCTAssertEqual(captureCount, 4)
+        XCTAssertEqual(calls.map(\.amount), [400, 200, 100])
     }
 
     func testAutomaticScrollSessionTreatsDuplicatesAsEndAfterContentMoved() async throws {
@@ -3408,6 +4301,7 @@ final class ScreenshotKitTests: XCTestCase {
         let secondImage = try second.makeCGImage()
         let capturer = SequenceScrollFrameCapturer(images: [
             firstImage,
+            secondImage,
             secondImage,
             secondImage,
             secondImage
@@ -3431,11 +4325,909 @@ final class ScreenshotKitTests: XCTestCase {
         let result = try await session.start()
 
         XCTAssertEqual(result.stopReason, .endDetected)
-        XCTAssertEqual(result.capturedFrameCount, 4)
+        XCTAssertEqual(result.capturedFrameCount, 5)
         XCTAssertEqual(result.acceptedFrameCount, 2)
         XCTAssertEqual(result.overlaps.count, 1)
         let calls = await driver.calls
-        XCTAssertEqual(calls.count, 3)
+        XCTAssertEqual(calls.map(\.amount), [400, 400, 200, 100])
+    }
+
+    func testAutomaticScrollSessionStillThrowsWhenScrollTargetChanges() async throws {
+        let frame = try makePixelBuffer(startingAtRow: 0, height: 100)
+        let capturer = SequenceScrollFrameCapturer(images: [try frame.makeCGImage()])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 400)),
+                captureInterval: 0.1,
+                maximumFrames: 5,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: ThrowingAutomaticScrollDriver(error: .scrollTargetChanged)
+        )
+
+        do {
+            _ = try await session.start()
+            XCTFail("A changed scroll target is a real failure and must not look like document end")
+        } catch let error as ScrollCaptureError {
+            XCTAssertEqual(error, .scrollTargetChanged)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let captureCount = await capturer.captureCount
+        XCTAssertEqual(captureCount, 1)
+    }
+
+    func testAutomaticScrollSessionAcceptsSparseTextThreePercentMovement() async throws {
+        let width = 320
+        let height = 240
+        let displacement = 7
+        let first = try makeSparseTextPixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height
+        )
+        let second = try makeSparseTextPixelBuffer(
+            startingAtRow: displacement,
+            width: width,
+            height: height
+        )
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            second.makeCGImage()
+        ])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.capturedFrameCount, 2)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.overlapPixels), [height - displacement])
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [displacement])
+        XCTAssertEqual(calls.count, 1)
+    }
+
+    func testAutomaticScrollSessionFinishesAfterShortTailThenDuplicateFrames() async throws {
+        let width = 96
+        let height = 200
+        let displacement = 6
+        let first = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let tail = try makePixelBuffer(
+            startingAtRow: displacement,
+            width: width,
+            height: height
+        )
+        let firstImage = try first.makeCGImage()
+        let tailImage = try tail.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: [
+            firstImage,
+            tailImage,
+            tailImage,
+            tailImage,
+            tailImage
+        ])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 120,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 6,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let calls = await driver.calls
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + displacement
+        )
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.capturedFrameCount, 5)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.overlapPixels), [height - displacement])
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(calls.map(\.amount), [120, 120, 60, 30])
+    }
+
+    func testAutomaticScrollSessionKeepsModerateTailWhenEstablishedRegionDrifts() async throws {
+        let width = 96
+        let height = 120
+        let fixedTop = 16
+        let mainDisplacement = 42
+        let tailDisplacement = 25
+        let first = try makeSyntheticScrollFrame(
+            startingAtRow: 0,
+            width: width,
+            height: height,
+            fixedTop: fixedTop
+        )
+        let second = try makeSyntheticScrollFrame(
+            startingAtRow: mainDisplacement,
+            width: width,
+            height: height,
+            fixedTop: fixedTop
+        )
+        let third = try makeSyntheticScrollFrame(
+            startingAtRow: mainDisplacement * 2,
+            width: width,
+            height: height,
+            fixedTop: fixedTop
+        )
+        let tail = try makeSyntheticScrollFrame(
+            startingAtRow: mainDisplacement * 2 + tailDisplacement,
+            width: width,
+            height: height,
+            fixedTop: fixedTop - 1
+        )
+
+        guard case .safe(let initialRegion) = try ScrollMovingRegionDetector().detect(
+            previous: first,
+            next: second,
+            overlapPixels: height - mainDisplacement
+        ) else {
+            return XCTFail("The initial fixed edge must establish a safe moving region")
+        }
+        guard case .safe(let driftedRegion) = try ScrollMovingRegionDetector().detect(
+            previous: third,
+            next: tail,
+            overlapPixels: height - (tailDisplacement + 1)
+        ) else {
+            return XCTFail("The one-pixel edge drift fixture must remain geometrically detectable")
+        }
+        XCTAssertEqual(initialRegion.cropRect.y, fixedTop)
+        XCTAssertEqual(driftedRegion.cropRect.y, fixedTop - 1)
+
+        let tailImage = try tail.makeCGImage()
+        let viewport = CoupledScrollViewport(captureVariantsByScrollStep: try [
+            [first.makeCGImage()],
+            [second.makeCGImage()],
+            [third.makeCGImage()],
+            [tailImage, tailImage],
+            [tailImage],
+            [tailImage],
+            [tailImage]
+        ])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: Int32(mainDisplacement),
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: CoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let recoveredTailViewport = try tail.cropped(to: initialRegion.cropRect)
+        let recoveredTailDisplacement = tailDisplacement + 1
+        let expectedFinalRows = try recoveredTailViewport.cropped(to: ScrollPixelRect(
+            x: 0,
+            y: recoveredTailViewport.height - recoveredTailDisplacement,
+            width: recoveredTailViewport.width,
+            height: recoveredTailDisplacement
+        ))
+        let actualFinalRows = try output.cropped(to: ScrollPixelRect(
+            x: 0,
+            y: output.height - recoveredTailDisplacement,
+            width: output.width,
+            height: recoveredTailDisplacement
+        ))
+        let calls = await viewport.scrollCalls
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 4)
+        XCTAssertEqual(result.capturedFrameCount, 8)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [mainDisplacement, mainDisplacement, recoveredTailDisplacement]
+        )
+        XCTAssertEqual(
+            output.height,
+            height - fixedTop + mainDisplacement * 2 + recoveredTailDisplacement
+        )
+        XCTAssertEqual(
+            actualFinalRows.rgbaData,
+            expectedFinalRows.rgbaData,
+            "The final partial viewport must be retained pixel-for-pixel"
+        )
+        XCTAssertEqual(calls.map(\.amount), [42, 42, 42, 42, 21, 10])
+    }
+
+    func testAutomaticScrollSessionKeepsSparseThreePixelTailBeforeStableDuplicates() async throws {
+        let width = 320
+        let height = 240
+        let mainDisplacement = 220
+        let tailDisplacement = 3
+        let first = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height
+        )
+        let second = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: mainDisplacement,
+            width: width,
+            height: height
+        )
+        let tail = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: mainDisplacement + tailDisplacement,
+            width: width,
+            height: height
+        )
+        let estimator = ScrollOverlapEstimator()
+        let samePositionDifference = try estimator.normalizedDifferenceAtSamePosition(
+            second,
+            tail
+        )
+        XCTAssertGreaterThan(samePositionDifference, 0)
+        XCTAssertLessThanOrEqual(
+            samePositionDifference,
+            estimator.configuration.shortMovementMaximumNormalizedDifference / 2,
+            "The fixture must remain a low-difference sparse tail, not a normal full-page scroll"
+        )
+
+        let tailImage = try tail.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            second.makeCGImage(),
+            tailImage,
+            tailImage,
+            tailImage,
+            tailImage,
+            tailImage
+        ])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 220,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + mainDisplacement + tailDisplacement
+        )
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 3)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [mainDisplacement, tailDisplacement]
+        )
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+    }
+
+    func testAutomaticScrollSessionKeepsSparseSmoothTailThroughIntermediateFrames() async throws {
+        let width = 320
+        let height = 240
+        let mainDisplacement = 220
+        let partialTailDisplacement = 2
+        let settledTailDisplacement = 5
+        let first = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height
+        )
+        let second = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: mainDisplacement,
+            width: width,
+            height: height
+        )
+        let partialTail = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: mainDisplacement + partialTailDisplacement,
+            width: width,
+            height: height
+        )
+        let settledTail = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: mainDisplacement + settledTailDisplacement,
+            width: width,
+            height: height
+        )
+        let settledTailImage = try settledTail.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            second.makeCGImage(),
+            partialTail.makeCGImage(),
+            settledTailImage,
+            settledTailImage,
+            settledTailImage,
+            settledTailImage,
+            settledTailImage
+        ])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 220,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let calls = await driver.calls
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makeSparseTailDocumentPixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + mainDisplacement + settledTailDisplacement
+        )
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.capturedFrameCount, 8)
+        XCTAssertEqual(result.acceptedFrameCount, 3)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [mainDisplacement, settledTailDisplacement]
+        )
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(
+            calls.count,
+            5,
+            "The 2 px transition must be recaptured in place; only the settled 5 px tail may scroll again"
+        )
+    }
+
+    func testAutomaticScrollSessionContinuesAcrossConsecutiveThreePercentMovements() async throws {
+        let width = 96
+        let height = 200
+        let displacement = 6
+        let offsets = [0, displacement, displacement * 2, displacement * 3]
+        let viewport = CoupledScrollViewport(
+            captureVariantsByScrollStep: try offsets.map { offset in
+                [try makePixelBuffer(
+                    startingAtRow: offset,
+                    width: width,
+                    height: height
+                ).makeCGImage()]
+            }
+        )
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: offsets.count,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: CoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + displacement * 3
+        )
+        let calls = await viewport.scrollCalls
+        let captureCounts = await viewport.captureCountsByScrollStep
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, offsets.count)
+        XCTAssertEqual(result.capturedFrameCount, offsets.count)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [displacement, displacement, displacement]
+        )
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(calls.count, offsets.count - 1)
+        XCTAssertEqual(
+            captureCounts,
+            [1, 1, 1, 1],
+            "Ordinary consecutive short movements must keep scrolling instead of settling every step as a possible tail"
+        )
+    }
+
+    func testAutomaticScrollSessionStabilizesOnlyFirstContractedTailStep() async throws {
+        let width = 96
+        let height = 200
+        let mainDisplacement = 80
+        let shortDisplacement = 6
+        let offsets = [
+            0,
+            mainDisplacement,
+            mainDisplacement + shortDisplacement,
+            mainDisplacement + shortDisplacement * 2
+        ]
+        let viewport = CoupledScrollViewport(
+            captureVariantsByScrollStep: try offsets.map { offset in
+                [try makePixelBuffer(
+                    startingAtRow: offset,
+                    width: width,
+                    height: height
+                ).makeCGImage()]
+            }
+        )
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: offsets.count,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: CoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + mainDisplacement + shortDisplacement * 2
+        )
+        let calls = await viewport.scrollCalls
+        let captureCounts = await viewport.captureCountsByScrollStep
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, offsets.count)
+        XCTAssertEqual(result.capturedFrameCount, offsets.count + 1)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [mainDisplacement, shortDisplacement, shortDisplacement]
+        )
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(calls.count, offsets.count - 1)
+        XCTAssertEqual(
+            captureCounts,
+            [1, 1, 2, 1],
+            "Only the first strong contraction after a larger step is a tail candidate; an accepted short step becomes the next local baseline"
+        )
+    }
+
+    func testAutomaticScrollSessionRetriesWheelAfterFirstEventIsNotConsumed() async throws {
+        let width = 96
+        let height = 200
+        let displacement = 48
+        let first = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let moved = try makePixelBuffer(
+            startingAtRow: displacement,
+            width: width,
+            height: height
+        )
+        let animationRect = ScrollPixelRect(x: 34, y: 72, width: 14, height: 12)
+        let unconsumedEventVariants = try (1 ... 5).map { phase in
+            try makeLocalizedAnimationVariant(
+                of: first,
+                rect: animationRect,
+                phase: phase
+            ).makeCGImage()
+        }
+        let viewport = CoupledScrollViewport(captureVariantsByScrollStep: try [
+            [first.makeCGImage()],
+            unconsumedEventVariants,
+            [moved.makeCGImage()]
+        ])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: CoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + displacement
+        )
+        let calls = await viewport.scrollCalls
+        let captureCounts = await viewport.captureCountsByScrollStep
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [displacement])
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(
+            calls.count,
+            2,
+            "A quiet local animation after an unconsumed wheel event must trigger a bounded wheel retry, not lock the session at one position"
+        )
+        XCTAssertGreaterThan(captureCounts[1], 0)
+        XCTAssertLessThanOrEqual(
+            captureCounts[1],
+            5,
+            "The same-position diagnosis must remain bounded before retrying the wheel event"
+        )
+    }
+
+    func testAutomaticShortMovementDoesNotRequireFullFrameRGBAStability() async throws {
+        let width = 96
+        let height = 200
+        let displacement = 6
+        let first = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let moved = try makePixelBuffer(
+            startingAtRow: displacement,
+            width: width,
+            height: height
+        )
+        let caretRect = ScrollPixelRect(x: 8, y: 8, width: 1, height: 1)
+        let movingVariants = try (1 ... 5).map { phase in
+            try makeLocalizedAnimationVariant(
+                of: moved,
+                rect: caretRect,
+                phase: phase
+            ).makeCGImage()
+        }
+        let viewport = CoupledScrollViewport(captureVariantsByScrollStep: try [
+            [first.makeCGImage()],
+            movingVariants
+        ])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10
+            ),
+            capturer: CoupledScrollFrameCapturer(viewport: viewport),
+            scrollDriver: CoupledAutomaticScrollDriver(viewport: viewport)
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + displacement
+        )
+        let captureCounts = await viewport.captureCountsByScrollStep
+        let calls = await viewport.scrollCalls
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.capturedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [displacement])
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(
+            captureCounts,
+            [1, 1],
+            "A harmless viewport-local caret change must not require two whole frames to be byte-identical before a real short scroll is accepted"
+        )
+    }
+
+    func testAutomaticScrollSessionStopDuringWaitStillCapturesCurrentTailFrame() async throws {
+        let width = 96
+        let height = 200
+        let tailDisplacement = 24
+        let first = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let tail = try makePixelBuffer(
+            startingAtRow: tailDisplacement,
+            width: width,
+            height: height
+        )
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            tail.makeCGImage()
+        ])
+        let driver = SignallingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 120)),
+                captureInterval: 1,
+                maximumFrames: 6,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let captureTask = Task { try await session.start() }
+        await driver.waitUntilScrollCallCount(1)
+        await session.stop()
+        let result = try await captureTask.value
+        let callCount = await driver.callCount
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + tailDisplacement
+        )
+
+        XCTAssertEqual(result.stopReason, .userStopped)
+        XCTAssertEqual(result.capturedFrameCount, 2)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [tailDisplacement])
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertEqual(callCount, 1, "Stopping during the wait must not send another wheel event")
+    }
+
+    func testAutomaticScrollSessionStopBeforeStartStillCapturesCurrentViewportOnce() async throws {
+        let frame = try makePixelBuffer(startingAtRow: 0, width: 96, height: 120)
+        let capturer = SequenceScrollFrameCapturer(images: [try frame.makeCGImage()])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 96, height: 120),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 80)),
+                captureInterval: 0.1,
+                maximumFrames: 4,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        await session.stop()
+        let result = try await session.start()
+        let captureCount = await capturer.captureCount
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .userStopped)
+        XCTAssertEqual(result.capturedFrameCount, 1)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertEqual(captureCount, 1)
+        XCTAssertTrue(calls.isEmpty, "A stop queued before start must never issue a wheel event")
+    }
+
+    func testNearFullOverlapSearchFinishesWithoutAcceptingStationarySparsePage() async throws {
+        let frame = try makeSparseTextPixelBuffer(
+            startingAtRow: 0,
+            width: 320,
+            height: 240
+        )
+        let image = try frame.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: [image, image, image, image])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 320, height: 240),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 120,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 5,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: RecordingAutomaticScrollDriver()
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(
+            output.rgbaData,
+            frame.rgbaData,
+            "Stationary sparse pixels must remain a single unmodified viewport"
+        )
+    }
+
+    func testLocalizedAnimationEndsCaptureWithoutEnteringOutput() async throws {
+        let width = 160
+        let height = 200
+        let base = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let animationRect = ScrollPixelRect(x: 48, y: 62, width: 64, height: 54)
+        let settledAnimation = try makeLocalizedAnimationVariant(
+            of: base,
+            rect: animationRect,
+            phase: 3
+        )
+        let frames = try [
+            base,
+            makeLocalizedAnimationVariant(of: base, rect: animationRect, phase: 1),
+            makeLocalizedAnimationVariant(of: base, rect: animationRect, phase: 2),
+            settledAnimation,
+            settledAnimation,
+            settledAnimation,
+            settledAnimation,
+        ]
+        let capturer = SequenceScrollFrameCapturer(
+            images: try frames.map { try $0.makeCGImage() }
+        )
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 120,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 4,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+
+        let calls = await driver.calls
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(
+            output.rgbaData,
+            base.rgbaData,
+            "A rejected animation candidate must never enter the successful output"
+        )
+        XCTAssertLessThanOrEqual(calls.count, 2)
+    }
+
+    func testStableLocalizedAnimationEndsCaptureWithoutEnteringOutput() async throws {
+        let width = 160
+        let height = 200
+        let base = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let animationRect = ScrollPixelRect(x: 48, y: 62, width: 64, height: 54)
+        let stableAnimation = try makeLocalizedAnimationVariant(
+            of: base,
+            rect: animationRect,
+            phase: 1
+        )
+        let stableImage = try stableAnimation.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            base.makeCGImage(),
+            stableImage,
+            stableImage,
+            stableImage,
+            stableImage
+        ])
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: 120,
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 6,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+
+        let calls = await driver.calls
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(
+            output.rgbaData,
+            base.rgbaData,
+            "Even a stable rejected candidate must not replace the accepted viewport"
+        )
+        XCTAssertEqual(
+            calls.count,
+            2,
+            "A stable local animation must be classified as stationary noise and allow one bounded wheel retry"
+        )
+    }
+
+    func testAutomaticScrollSessionKeepsShortTailWithFixedBottomBar() async throws {
+        let width = 96
+        let contentHeight = 104
+        let fixedBottom = 16
+        let viewportHeight = contentHeight + fixedBottom
+        let mainDisplacement = 48
+        let tailDisplacement = 3
+        let first = try makeSyntheticScrollFrame(
+            startingAtRow: 0,
+            width: width,
+            height: viewportHeight,
+            fixedBottom: fixedBottom
+        )
+        let second = try makeSyntheticScrollFrame(
+            startingAtRow: mainDisplacement,
+            width: width,
+            height: viewportHeight,
+            fixedBottom: fixedBottom
+        )
+        let tail = try makeSyntheticScrollFrame(
+            startingAtRow: mainDisplacement + tailDisplacement,
+            width: width,
+            height: viewportHeight,
+            fixedBottom: fixedBottom
+        )
+        let tailImage = try tail.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            second.makeCGImage(),
+            tailImage,
+            tailImage,
+            tailImage,
+            tailImage,
+            tailImage
+        ])
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: viewportHeight),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: Int32(mainDisplacement),
+                    consecutiveDuplicateLimit: 2
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 8,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: RecordingAutomaticScrollDriver()
+        )
+
+        let result = try await session.start()
+        let stitched = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: contentHeight + mainDisplacement + tailDisplacement
+        )
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 3)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [mainDisplacement, tailDisplacement]
+        )
+        XCTAssertEqual(stitched.rgbaData, expected.rgbaData)
+        XCTAssertTrue(result.warnings.contains("已自动裁除固定标题栏或侧栏"))
     }
 
     func testAutomaticScrollSessionRecapturesTransientFrameWithoutScrollingAgain() async throws {
@@ -3472,13 +5264,15 @@ final class ScreenshotKitTests: XCTestCase {
         XCTAssertEqual(calls.count, 1, "Same-position recovery must not issue another scroll")
     }
 
-    func testAutomaticScrollSessionFailsWithLastDiagnosticsAfterThreeUnreliableCandidates() async throws {
+    func testAutomaticScrollSessionWaitsForStableViewportWithoutCompoundingScroll() async throws {
         let first = try makePixelBuffer(startingAtRow: 0, height: 100)
+        let recovered = try makePixelBuffer(startingAtRow: 48, height: 100)
         let capturer = SequenceScrollFrameCapturer(images: try [
             first.makeCGImage(),
             makeSolidPixelBuffer(width: 64, height: 100, value: 245).makeCGImage(),
             makeSolidPixelBuffer(width: 64, height: 100, value: 225).makeCGImage(),
-            makeSolidPixelBuffer(width: 64, height: 100, value: 205).makeCGImage()
+            makeSolidPixelBuffer(width: 64, height: 100, value: 205).makeCGImage(),
+            recovered.makeCGImage(),
         ])
         let driver = RecordingAutomaticScrollDriver()
         let session = ScrollCaptureSession(
@@ -3493,38 +5287,115 @@ final class ScreenshotKitTests: XCTestCase {
             scrollDriver: driver
         )
 
-        do {
-            _ = try await session.start()
-            XCTFail("Three unreliable captures at one position must fail closed")
-        } catch let error as ScrollCaptureError {
-            guard case .unreliableOverlap(let frame, let diagnostics) = error else {
-                return XCTFail("Unexpected error: \(error)")
-            }
-            XCTAssertEqual(frame, 2)
-            XCTAssertEqual(diagnostics.failureReason, .differenceTooHigh)
-            XCTAssertNotNil(diagnostics.candidateOverlapPixels)
-            XCTAssertNotNil(diagnostics.normalizedDifference)
-            XCTAssertGreaterThan(diagnostics.evaluatedCandidateCount, 0)
-            XCTAssertTrue(error.localizedDescription.contains("相邻画面差异过大"))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-
-        let captureCount = await capturer.captureCount
+        let result = try await session.start()
         let calls = await driver.calls
-        XCTAssertEqual(captureCount, 4)
-        XCTAssertEqual(calls.count, 1, "Retries at one scroll position must not re-scroll")
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(startingAtRow: 0, height: 148)
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.capturedFrameCount, 5)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [48])
+        XCTAssertEqual(output.rgbaData, expected.rgbaData)
+        XCTAssertEqual(calls.map(\.amount), [35])
     }
 
-    func testAutomaticScrollSessionCarriesOnlyValidatedPrefixAfterLaterFailure() async throws {
+    func testAutomaticScrollSessionEndsWithFirstFrameAfterUnreliableCandidates() async throws {
+        let first = try makePixelBuffer(startingAtRow: 0, height: 100)
+        let unreliableImages = try stride(from: 245, through: 85, by: -20).map {
+            try makeSolidPixelBuffer(width: 64, height: 100, value: UInt8($0)).makeCGImage()
+        }
+        let capturer = SequenceScrollFrameCapturer(
+            images: try [first.makeCGImage()] + unreliableImages
+        )
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 35)),
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let captureCount = await capturer.captureCount
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .alignmentStopped)
+        XCTAssertEqual(result.capturedFrameCount, 6)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(
+            output.rgbaData,
+            first.rgbaData,
+            "None of the unreliable candidates may enter the output"
+        )
+        XCTAssertEqual(captureCount, 6)
+        XCTAssertEqual(
+            calls.map(\.amount),
+            [35],
+            "An unresolved wheel transaction must never receive additive recovery scrolls"
+        )
+    }
+
+    func testAutomaticScrollSessionReturnsValidatedPrefixAfterLaterUnreliableOverlap() async throws {
+        let first = try makePixelBuffer(startingAtRow: 0, height: 100)
+        let second = try makePixelBuffer(startingAtRow: 60, height: 100)
+        let unreliableImages = try stride(from: 245, through: 85, by: -20).map {
+            try makeSolidPixelBuffer(width: 64, height: 100, value: UInt8($0)).makeCGImage()
+        }
+        let capturer = SequenceScrollFrameCapturer(
+            images: try [first.makeCGImage(), second.makeCGImage()] + unreliableImages
+        )
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
+                mode: .automatic(AutomaticScrollConfiguration(amount: 35)),
+                captureInterval: 0.1,
+                maximumFrames: 5,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(startingAtRow: 0, height: 160)
+        let captureCount = await capturer.captureCount
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .alignmentStopped)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.capturedFrameCount, 7)
+        XCTAssertEqual(result.overlaps.map(\.overlapPixels), [40])
+        XCTAssertFalse(result.warnings.contains("这是失败前已可靠采集的部分结果"))
+        XCTAssertEqual(output.width, expected.width)
+        XCTAssertEqual(output.height, expected.height)
+        XCTAssertEqual(
+            output.rgbaData,
+            expected.rgbaData,
+            "The unverified third logical frame must not enter the normal successful result"
+        )
+        XCTAssertEqual(captureCount, 7)
+        XCTAssertEqual(calls.map(\.amount), [35, 35])
+    }
+
+    func testAutomaticScrollSessionDoesNotHideBackendFailureDuringRecovery() async throws {
         let first = try makePixelBuffer(startingAtRow: 0, height: 100)
         let second = try makePixelBuffer(startingAtRow: 60, height: 100)
         let capturer = SequenceScrollFrameCapturer(images: try [
             first.makeCGImage(),
             second.makeCGImage(),
             makeSolidPixelBuffer(width: 64, height: 100, value: 245).makeCGImage(),
-            makeSolidPixelBuffer(width: 64, height: 100, value: 225).makeCGImage(),
-            makeSolidPixelBuffer(width: 64, height: 100, value: 205).makeCGImage()
+            // The same-position recovery capture is intentionally absent, so
+            // SequenceScrollFrameCapturer reports captureFailed.
         ])
         let driver = RecordingAutomaticScrollDriver()
         let session = ScrollCaptureSession(
@@ -3541,36 +5412,119 @@ final class ScreenshotKitTests: XCTestCase {
 
         do {
             _ = try await session.start()
-            XCTFail("A later unreliable frame must not turn the prefix into a full success")
+            XCTFail("A backend capture failure must not be converted into endDetected")
         } catch let failure as ScrollCapturePartialFailure {
-            guard case .unreliableOverlap(let frame, _) = failure.underlying else {
-                return XCTFail("Unexpected underlying error: \(failure.underlying)")
-            }
-            XCTAssertEqual(frame, 3)
-            XCTAssertEqual(failure.partialResult.acceptedFrameCount, 2)
-            XCTAssertEqual(failure.partialResult.capturedFrameCount, 5)
+            XCTAssertEqual(failure.underlying, .captureFailed)
             XCTAssertEqual(failure.partialResult.stopReason, .failureRecovered)
-            XCTAssertEqual(failure.partialResult.overlaps.map(\.overlapPixels), [40])
-            XCTAssertTrue(
-                failure.partialResult.warnings.contains("这是失败前已可靠采集的部分结果")
-            )
+            XCTAssertEqual(failure.partialResult.acceptedFrameCount, 2)
+            XCTAssertEqual(failure.partialResult.overlaps.map(\.newContentPixels), [60])
 
-            let partialPixels = try ScrollPixelBuffer(cgImage: failure.partialResult.image)
+            let output = try ScrollPixelBuffer(cgImage: failure.partialResult.image)
             let expected = try makePixelBuffer(startingAtRow: 0, height: 160)
-            XCTAssertEqual(partialPixels.width, expected.width)
-            XCTAssertEqual(partialPixels.height, expected.height)
-            XCTAssertEqual(partialPixels.rgbaData, expected.rgbaData)
+            XCTAssertEqual(output.rgbaData, expected.rgbaData)
+        } catch let error as ScrollCaptureError {
+            XCTAssertEqual(
+                error,
+                .captureFailed,
+                "A direct backend failure is acceptable when no partial prefix can be produced"
+            )
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
-
-        let captureCount = await capturer.captureCount
-        let calls = await driver.calls
-        XCTAssertEqual(captureCount, 5)
-        XCTAssertEqual(calls.count, 2, "Same-position recovery must not issue another scroll")
     }
 
-    func testEveryCaptureModeFailsWithoutProducingImageWhenOverlapIsUnreliable() async throws {
+    func testAutomaticScrollSessionRecoversStableOnePixelMovingRegionDrift() async throws {
+        let width = 96
+        let height = 120
+        let fixedTop = 16
+        let fixedLeft = 14
+        let displacement = 42
+        let first = try makeSyntheticScrollFrame(
+            startingAtRow: 0,
+            width: width,
+            height: height,
+            fixedTop: fixedTop,
+            fixedLeft: fixedLeft
+        )
+        let second = try makeSyntheticScrollFrame(
+            startingAtRow: displacement,
+            width: width,
+            height: height,
+            fixedTop: fixedTop,
+            fixedLeft: fixedLeft
+        )
+        let unsafeCandidate = try makeSyntheticScrollFrame(
+            startingAtRow: displacement * 2,
+            width: width,
+            height: height,
+            fixedTop: fixedTop - 1,
+            fixedLeft: fixedLeft
+        )
+        let unsafeImage = try unsafeCandidate.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            first.makeCGImage(),
+            second.makeCGImage(),
+        ] + Array(repeating: unsafeImage, count: 9))
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(amount: Int32(displacement))),
+                captureInterval: 0.1,
+                maximumFrames: 5,
+                maximumDuration: 30
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let expected = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width - fixedLeft,
+            height: height - fixedTop + displacement
+        )
+        let calls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .endDetected)
+        XCTAssertEqual(result.acceptedFrameCount, 3)
+        XCTAssertEqual(result.capturedFrameCount, 7)
+        XCTAssertEqual(
+            result.overlaps.map(\.newContentPixels),
+            [displacement, displacement],
+            "A one-pixel boundary wobble must not eat a row from the stitched output"
+        )
+        XCTAssertEqual(output.width, expected.width)
+        XCTAssertEqual(output.height, expected.height + displacement)
+        let establishedCrop = ScrollPixelRect(
+            x: fixedLeft,
+            y: fixedTop,
+            width: width - fixedLeft,
+            height: height - fixedTop
+        )
+        let recoveredViewport = try unsafeCandidate.cropped(to: establishedCrop)
+        let recoveredTail = try recoveredViewport.cropped(to: ScrollPixelRect(
+            x: 0,
+            y: recoveredViewport.height - displacement,
+            width: recoveredViewport.width,
+            height: displacement
+        ))
+        var expectedBytes = expected.rgbaData
+        expectedBytes.append(recoveredTail.rgbaData)
+        XCTAssertEqual(
+            output.rgbaData,
+            expectedBytes,
+            "Stable geometric scrolling must continue through a one-pixel sticky boundary change"
+        )
+        XCTAssertEqual(
+            calls.map(\.amount),
+            [42, 42, 42, 21, 10],
+            "After the recovered tail is accepted, visual end confirmation must contract to half and quarter steps"
+        )
+    }
+
+    func testAutomaticScrollSessionReturnsFirstFrameWhenInitialOverlapIsUnreliable() async throws {
         let firstPixels = try makeBrightnessShiftedPixelBuffer(
             startingAtRow: 0,
             brightnessOffset: 0,
@@ -3592,67 +5546,98 @@ final class ScreenshotKitTests: XCTestCase {
         let lowConfidenceEstimate = try XCTUnwrap(lowConfidenceAnalysis.estimate)
         XCTAssertLessThan(lowConfidenceEstimate.confidence, 0.55)
 
-        let images = [
-            try firstPixels.makeCGImage(),
-            try secondPixels.makeCGImage()
-        ]
-        let modes: [(name: String, mode: ScrollCaptureMode)] = [
-            ("automatic", .automatic(AutomaticScrollConfiguration())),
-            ("manual", .manual)
-        ]
+        let secondImage = try secondPixels.makeCGImage()
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            firstPixels.makeCGImage(),
+        ] + Array(repeating: secondImage, count: 9))
+        var configuration = ScrollCaptureConfiguration(
+            captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
+            mode: .automatic(AutomaticScrollConfiguration()),
+            captureInterval: 0.1,
+            maximumFrames: 2,
+            maximumDuration: 10
+        )
+        configuration.overlapSearch = overlapSearch
+        let session = ScrollCaptureSession(
+            configuration: configuration,
+            capturer: capturer,
+            scrollDriver: NoOpAutomaticScrollDriver()
+        )
 
-        for captureMode in modes {
-            let capturer = SequenceScrollFrameCapturer(images: images)
-            var configuration = ScrollCaptureConfiguration(
-                captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
-                mode: captureMode.mode,
-                captureInterval: 0.1,
-                maximumFrames: 2,
-                maximumDuration: 10
-            )
-            configuration.overlapSearch = overlapSearch
-            let session = ScrollCaptureSession(
-                configuration: configuration,
-                capturer: capturer,
-                scrollDriver: NoOpAutomaticScrollDriver()
-            )
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
 
-            do {
-                _ = try await session.start()
-                XCTFail("Unreliable \(captureMode.name) overlap must not produce an image")
-            } catch let error as ScrollCaptureError {
-                guard case .unreliableOverlap(let frame, let diagnostics) = error else {
-                    XCTFail("Unexpected \(captureMode.name) error: \(error)")
-                    continue
-                }
-                XCTAssertEqual(frame, 2, captureMode.name)
-                XCTAssertNil(diagnostics.failureReason, captureMode.name)
-                XCTAssertEqual(
-                    diagnostics.candidateOverlapPixels,
-                    lowConfidenceEstimate.overlapPixels,
-                    captureMode.name
-                )
-                XCTAssertEqual(
-                    try XCTUnwrap(diagnostics.confidence),
-                    lowConfidenceEstimate.confidence,
-                    accuracy: 0.000_001,
-                    captureMode.name
-                )
-                XCTAssertTrue(
-                    error.localizedDescription.contains("未生成可能错版的长图"),
-                    captureMode.name
-                )
-            } catch {
-                XCTFail("Unexpected \(captureMode.name) error: \(error)")
+        XCTAssertEqual(result.stopReason, .alignmentStopped)
+        XCTAssertEqual(result.capturedFrameCount, 6)
+        XCTAssertEqual(result.acceptedFrameCount, 1)
+        XCTAssertTrue(result.overlaps.isEmpty)
+        XCTAssertEqual(output.rgbaData, firstPixels.rgbaData)
+    }
+
+    func testManualScrollSessionFailsWithoutProducingImageWhenOverlapIsUnreliable() async throws {
+        let firstPixels = try makeBrightnessShiftedPixelBuffer(
+            startingAtRow: 0,
+            brightnessOffset: 0,
+            height: 100
+        )
+        let secondPixels = try makeBrightnessShiftedPixelBuffer(
+            startingAtRow: 60,
+            brightnessOffset: 20,
+            height: 100
+        )
+        var overlapSearch = ScrollOverlapSearchConfiguration()
+        overlapSearch.maximumNormalizedDifference = 0.075
+        let lowConfidenceAnalysis = try ScrollOverlapEstimator(
+            configuration: overlapSearch
+        ).analyze(previous: firstPixels, next: secondPixels)
+        let lowConfidenceEstimate = try XCTUnwrap(lowConfidenceAnalysis.estimate)
+        let capturer = SequenceScrollFrameCapturer(images: try [
+            firstPixels.makeCGImage(),
+            secondPixels.makeCGImage(),
+        ])
+        var configuration = ScrollCaptureConfiguration(
+            captureRect: CGRect(x: 0, y: 0, width: 64, height: 100),
+            mode: .manual,
+            captureInterval: 0.1,
+            maximumFrames: 2,
+            maximumDuration: 10
+        )
+        configuration.overlapSearch = overlapSearch
+        let session = ScrollCaptureSession(
+            configuration: configuration,
+            capturer: capturer,
+            scrollDriver: NoOpAutomaticScrollDriver()
+        )
+
+        do {
+            _ = try await session.start()
+            XCTFail("Unreliable manual overlap must not produce an image")
+        } catch let error as ScrollCaptureError {
+            guard case .unreliableOverlap(let frame, let diagnostics) = error else {
+                return XCTFail("Unexpected manual error: \(error)")
             }
-
-            let captureCount = await capturer.captureCount
-            XCTAssertEqual(captureCount, 2, captureMode.name)
+            XCTAssertEqual(frame, 2)
+            XCTAssertNil(diagnostics.failureReason)
+            XCTAssertEqual(
+                diagnostics.candidateOverlapPixels,
+                lowConfidenceEstimate.overlapPixels
+            )
+            XCTAssertEqual(
+                try XCTUnwrap(diagnostics.confidence),
+                lowConfidenceEstimate.confidence,
+                accuracy: 0.000_001
+            )
+        } catch {
+            XCTFail("Unexpected manual error: \(error)")
         }
     }
 
     func testScrollCaptureRemovesFixedTopBarBeforeStitching() async throws {
         try await assertFixedBandsAreRemoved(top: 18, left: 0)
+    }
+
+    func testScrollCaptureRemovesFixedTopBarDuringShortTailMovement() async throws {
+        try await assertFixedBandsAreRemoved(top: 18, left: 0, scrollDistance: 3)
     }
 
     func testScrollCaptureRemovesFixedLeftSidebarBeforeStitching() async throws {
@@ -3661,6 +5646,10 @@ final class ScreenshotKitTests: XCTestCase {
 
     func testScrollCaptureRemovesFixedBottomBarBeforeStitching() async throws {
         try await assertFixedBandsAreRemoved(bottom: 16)
+    }
+
+    func testScrollCaptureRemovesFixedBottomBarDuringShortTailMovement() async throws {
+        try await assertFixedBandsAreRemoved(bottom: 16, scrollDistance: 3)
     }
 
     func testScrollCaptureRemovesFixedRightSidebarBeforeStitching() async throws {
@@ -3684,7 +5673,7 @@ final class ScreenshotKitTests: XCTestCase {
         try await assertFixedBandsAreRemoved(top: 0, left: 0)
     }
 
-    func testScrollCaptureFailsClosedForInternalFixedOverlay() async throws {
+    func testScrollCaptureContinuesWhenInternalFixedOverlayStaysInDiscardedOverlap() async throws {
         let width = 96
         let height = 120
         let scrollDistance = 48
@@ -3702,7 +5691,187 @@ final class ScreenshotKitTests: XCTestCase {
             internalFixedOverlay: overlay
         )
 
-        await assertScrollCaptureFailsClosed(frames: [first, second], expectedFrame: 2)
+        let detection = try ScrollMovingRegionDetector().detect(
+            previous: first,
+            next: second,
+            overlapPixels: height - scrollDistance
+        )
+        guard case .safe(let region) = detection else {
+            return XCTFail("A compact overlay inside discarded overlap must remain safe")
+        }
+        XCTAssertEqual(region.cropRect, .full(width: width, height: height))
+        XCTAssertFalse(region.fixedOverlayRects.isEmpty)
+
+        let capturer = SequenceScrollFrameCapturer(images: try [first, second].map {
+            try $0.makeCGImage()
+        })
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: Int32(scrollDistance)
+                )),
+                captureInterval: 0.1,
+                maximumFrames: 2,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let scrollCalls = await driver.calls
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, 2)
+        XCTAssertEqual(result.overlaps.map(\.newContentPixels), [scrollDistance])
+        XCTAssertEqual(result.image.height, height + scrollDistance)
+        XCTAssertEqual(scrollCalls.map(\.amount), [Int32(scrollDistance)])
+    }
+
+    func testAutomaticScrollRepairsRepeatedBottomFloatingControl() async throws {
+        let width = 120
+        let height = 160
+        let scrollDistance = 48
+        let overlay = CGRect(x: 38, y: 122, width: 44, height: 26)
+        let frames = try [0, scrollDistance, scrollDistance * 2].map { startRow in
+            try makeSyntheticScrollFrame(
+                startingAtRow: startRow,
+                width: width,
+                height: height,
+                internalFixedOverlay: overlay
+            )
+        }
+        let capturer = SequenceScrollFrameCapturer(images: try frames.map {
+            try $0.makeCGImage()
+        })
+        guard case .safe(let detectedRegion) = try ScrollMovingRegionDetector().detect(
+            previous: frames[0],
+            next: frames[1],
+            overlapPixels: height - scrollDistance
+        ) else {
+            return XCTFail("A compact bottom floating control must remain recoverable")
+        }
+        XCTAssertFalse(detectedRegion.fixedOverlayRects.isEmpty)
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: Int32(scrollDistance)
+                )),
+                captureInterval: 0.1,
+                maximumFrames: frames.count,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let clean = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + scrollDistance * 2
+        )
+        let finalOverlayStart = scrollDistance * 2 + Int(overlay.minY)
+        let repairedPrefixRect = ScrollPixelRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: finalOverlayStart
+        )
+        let scrollCalls = await driver.calls
+
+        XCTAssertEqual(result.stopReason, .maximumFrames)
+        XCTAssertEqual(result.acceptedFrameCount, frames.count)
+        XCTAssertEqual(scrollCalls.map(\.amount), [
+            Int32(scrollDistance),
+            Int32(scrollDistance)
+        ])
+        let actualPrefix = try output.cropped(to: repairedPrefixRect).rgbaData
+        let expectedPrefix = try clean.cropped(to: repairedPrefixRect).rgbaData
+        if actualPrefix != expectedPrefix {
+            let mismatch = zip(actualPrefix, expectedPrefix).enumerated().first {
+                $0.element.0 != $0.element.1
+            }
+            let byteOffset = try XCTUnwrap(mismatch?.offset)
+            let pixelOffset = byteOffset / 4
+            XCTFail(
+                "Earlier floating controls must be repaired; first mismatch at "
+                    + "x=\(pixelOffset % width), y=\(pixelOffset / width), channel=\(byteOffset % 4)"
+            )
+        }
+    }
+
+    func testAutomaticScrollRepairsMultipleSeparatedFloatingControls() async throws {
+        let width = 160
+        let height = 160
+        let scrollDistance = 48
+        let leftOverlay = CGRect(x: 18, y: 122, width: 36, height: 26)
+        let rightOverlay = CGRect(x: 106, y: 122, width: 36, height: 26)
+        let frames = try [0, scrollDistance, scrollDistance * 2].map { startRow in
+            try makeSyntheticScrollFrame(
+                startingAtRow: startRow,
+                width: width,
+                height: height,
+                internalFixedOverlay: leftOverlay,
+                additionalFixedOverlays: [rightOverlay]
+            )
+        }
+        guard case .safe(let detectedRegion) = try ScrollMovingRegionDetector().detect(
+            previous: frames[0],
+            next: frames[1],
+            overlapPixels: height - scrollDistance
+        ) else {
+            return XCTFail("Separated compact floating controls must be recovered independently")
+        }
+        XCTAssertEqual(detectedRegion.fixedOverlayRects.count, 2)
+
+        let capturer = SequenceScrollFrameCapturer(images: try frames.map {
+            try $0.makeCGImage()
+        })
+        let driver = RecordingAutomaticScrollDriver()
+        let session = ScrollCaptureSession(
+            configuration: ScrollCaptureConfiguration(
+                captureRect: CGRect(x: 0, y: 0, width: width, height: height),
+                mode: .automatic(AutomaticScrollConfiguration(
+                    amount: Int32(scrollDistance)
+                )),
+                captureInterval: 0.1,
+                maximumFrames: frames.count,
+                maximumDuration: 10
+            ),
+            capturer: capturer,
+            scrollDriver: driver
+        )
+
+        let result = try await session.start()
+        let output = try ScrollPixelBuffer(cgImage: result.image)
+        let clean = try makePixelBuffer(
+            startingAtRow: 0,
+            width: width,
+            height: height + scrollDistance * 2
+        )
+        let finalOverlayStart = scrollDistance * 2 + Int(leftOverlay.minY)
+        let prefix = ScrollPixelRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: finalOverlayStart
+        )
+        let scrollCalls = await driver.calls
+
+        XCTAssertEqual(result.acceptedFrameCount, frames.count)
+        XCTAssertEqual(scrollCalls.map(\.amount), [
+            Int32(scrollDistance),
+            Int32(scrollDistance)
+        ])
+        XCTAssertEqual(
+            try output.cropped(to: prefix).rgbaData,
+            try clean.cropped(to: prefix).rgbaData
+        )
     }
 
     func testScrollCaptureFailsClosedForInternalOverlayOutsideOverlapRows() async throws {
@@ -3724,6 +5893,23 @@ final class ScreenshotKitTests: XCTestCase {
                 internalFixedOverlay: overlay
             )
         ]
+
+        await assertScrollCaptureFailsClosed(frames: frames, expectedFrame: 2)
+    }
+
+    func testScrollCaptureFailsClosedForLargeFixedPanel() async throws {
+        let width = 160
+        let height = 160
+        let scrollDistance = 48
+        let largePanel = CGRect(x: 30, y: 96, width: 100, height: 56)
+        let frames = try [0, scrollDistance].map { startRow in
+            try makeSyntheticScrollFrame(
+                startingAtRow: startRow,
+                width: width,
+                height: height,
+                internalFixedOverlay: largePanel
+            )
+        }
 
         await assertScrollCaptureFailsClosed(frames: frames, expectedFrame: 2)
     }
@@ -3967,6 +6153,30 @@ final class ScreenshotKitTests: XCTestCase {
             0,
             accuracy: 0.000_001
         )
+    }
+
+    func testOverlapEstimatorFindsExactThreePercentHighTextureMovement() throws {
+        let width = 96
+        let height = 200
+        let displacement = 6
+        let first = try makePixelBuffer(startingAtRow: 0, width: width, height: height)
+        let second = try makePixelBuffer(
+            startingAtRow: displacement,
+            width: width,
+            height: height
+        )
+
+        let analysis = try ScrollOverlapEstimator().analyze(
+            previous: first,
+            next: second
+        )
+        let estimate = try XCTUnwrap(analysis.estimate)
+
+        XCTAssertNil(analysis.diagnostics.failureReason)
+        XCTAssertEqual(estimate.overlapPixels, height - displacement)
+        XCTAssertEqual(estimate.newContentPixels, displacement)
+        XCTAssertEqual(try XCTUnwrap(estimate.normalizedDifference), 0, accuracy: 0.000_001)
+        XCTAssertGreaterThanOrEqual(estimate.confidence, 0.55)
     }
 
     func testOverlapEstimatorRefinesExactHighResolutionOverlapOutsideOldCoarseGrid() throws {
@@ -4243,6 +6453,48 @@ final class ScreenshotKitTests: XCTestCase {
         )
     }
 
+    /// Models the end of a mostly blank document: a normal full-page scroll is
+    /// followed by only three pixels of movement that reveal the final sparse
+    /// text row. The remaining low-contrast texture is deliberately sufficient
+    /// for exact overlap, while the whole-frame difference stays below the
+    /// duplicate threshold used by the session.
+    private func makeSparseTailDocumentPixelBuffer(
+        startingAtRow startRow: Int,
+        width: Int,
+        height: Int
+    ) throws -> ScrollPixelBuffer {
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        for localY in 0 ..< height {
+            let globalY = startRow + localY
+            for x in 0 ..< width {
+                let offset = (localY * width + x) * 4
+                if globalY < 240 {
+                    let shade = UInt8(188 + (globalY * 7 + x * 11) % 25)
+                    bytes[offset] = shade
+                    bytes[offset + 1] = min(255, shade + 3)
+                    bytes[offset + 2] = min(255, shade + 7)
+                } else if (457 ..< 463).contains(globalY),
+                          x >= 88,
+                          x < width - 108,
+                          (x + globalY * 3) % 17 < 6 {
+                    bytes[offset] = 72
+                    bytes[offset + 1] = 77
+                    bytes[offset + 2] = 85
+                } else {
+                    bytes[offset] = 246
+                    bytes[offset + 1] = 247
+                    bytes[offset + 2] = 249
+                }
+                bytes[offset + 3] = 255
+            }
+        }
+        return try ScrollPixelBuffer(
+            width: width,
+            height: height,
+            rgbaData: Data(bytes)
+        )
+    }
+
     private func makeRepeatingTexturePixelBuffer(
         startingAtRow startRow: Int,
         width: Int,
@@ -4269,17 +6521,47 @@ final class ScreenshotKitTests: XCTestCase {
         )
     }
 
+    /// Changes only a viewport-local rectangle, modelling a spinner, video, or
+    /// animated banner while the underlying document remains stationary.
+    private func makeLocalizedAnimationVariant(
+        of source: ScrollPixelBuffer,
+        rect: ScrollPixelRect,
+        phase: Int
+    ) throws -> ScrollPixelBuffer {
+        var bytes = [UInt8](source.rgbaData)
+        let minX = max(0, rect.x)
+        let maxX = min(source.width, rect.maxX)
+        let minY = max(0, rect.y)
+        let maxY = min(source.height, rect.maxY)
+
+        for y in minY ..< maxY {
+            for x in minX ..< maxX {
+                let offset = y * source.bytesPerRow + x * 4
+                bytes[offset] = UInt8((x * 31 + y * 17 + phase * 67) % 251)
+                bytes[offset + 1] = UInt8((x * 11 + y * 29 + phase * 43) % 253)
+                bytes[offset + 2] = UInt8((x * 23 + y * 7 + phase * 89) % 247)
+                bytes[offset + 3] = 255
+            }
+        }
+
+        return try ScrollPixelBuffer(
+            width: source.width,
+            height: source.height,
+            rgbaData: Data(bytes)
+        )
+    }
+
     private func assertFixedBandsAreRemoved(
         top: Int = 0,
         bottom: Int = 0,
         left: Int = 0,
         right: Int = 0,
+        scrollDistance: Int = 48,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
         let width = 96
         let height = 120
-        let scrollDistance = 48
         let contentWidth = width - left - right
         let contentHeight = height - top - bottom
         let frames = try [
@@ -4398,6 +6680,7 @@ final class ScreenshotKitTests: XCTestCase {
         fixedLeft: Int = 0,
         fixedRight: Int = 0,
         internalFixedOverlay: CGRect? = nil,
+        additionalFixedOverlays: [CGRect] = [],
         overlayPatternStartRow: Int? = nil
     ) throws -> ScrollPixelBuffer {
         let contentWidth = width - fixedLeft - fixedRight
@@ -4430,7 +6713,10 @@ final class ScreenshotKitTests: XCTestCase {
             }
         }
 
-        if let overlay = internalFixedOverlay?.integral {
+        let fixedOverlays = [internalFixedOverlay].compactMap { $0 }
+            + additionalFixedOverlays
+        for overlayValue in fixedOverlays {
+            let overlay = overlayValue.integral
             let minX = max(0, Int(overlay.minX))
             let maxX = min(width, Int(overlay.maxX))
             let minY = max(0, Int(overlay.minY))
@@ -4699,29 +6985,15 @@ final class ScreenshotKitTests: XCTestCase {
 }
 
 @MainActor
-private final class SuspendedCaptureIndexActivityController:
+private final class RecordingCaptureIndexActivityController:
     FileSearchIndexActivityControlling {
     private(set) var beginCaptureCount = 0
     private(set) var endCaptureCount = 0
-    private var beginCaptureContinuation: CheckedContinuation<Void, Never>?
-
-    var isBeginCaptureSuspended: Bool {
-        beginCaptureContinuation != nil
-    }
 
     func setSearchPanelActive(_ isActive: Bool) {}
 
-    func beginCaptureActivity() async {
+    func beginCaptureActivity() {
         beginCaptureCount += 1
-        await withCheckedContinuation { continuation in
-            beginCaptureContinuation = continuation
-        }
-    }
-
-    func resumeBeginCaptureActivity() {
-        let continuation = beginCaptureContinuation
-        beginCaptureContinuation = nil
-        continuation?.resume()
     }
 
     func endCaptureActivity() {
@@ -4786,9 +7058,142 @@ private actor SequenceScrollFrameCapturer: ScrollFrameCapturing {
     }
 }
 
+/// Scripted viewport for render-settling tests. Each driver call advances one
+/// physical position; the requested amount is recorded but intentionally does
+/// not control that script. Amount-sensitive behavior uses the fixture below.
+private actor CoupledScrollViewport {
+    private let captureVariantsByScrollStep: [[CGImage]]
+    private var currentScrollStep = 0
+    private(set) var scrollCalls: [AutomaticScrollCall] = []
+    private(set) var captureCountsByScrollStep: [Int]
+
+    init(captureVariantsByScrollStep: [[CGImage]]) {
+        precondition(!captureVariantsByScrollStep.isEmpty)
+        precondition(captureVariantsByScrollStep.allSatisfy { !$0.isEmpty })
+        self.captureVariantsByScrollStep = captureVariantsByScrollStep
+        captureCountsByScrollStep = Array(
+            repeating: 0,
+            count: captureVariantsByScrollStep.count
+        )
+    }
+
+    func capture() throws -> CGImage {
+        let variants = captureVariantsByScrollStep[currentScrollStep]
+        let captureIndex = captureCountsByScrollStep[currentScrollStep]
+        captureCountsByScrollStep[currentScrollStep] += 1
+        return variants[min(captureIndex, variants.count - 1)]
+    }
+
+    func scroll(at point: CGPoint, amount: Int32) {
+        scrollCalls.append(AutomaticScrollCall(point: point, amount: amount))
+        if currentScrollStep + 1 < captureVariantsByScrollStep.count {
+            currentScrollStep += 1
+        }
+    }
+}
+
+/// Viewport whose next image is selected from the amount actually requested by
+/// the driver. `maximumConsumedPerCall` models native apps that clamp a large
+/// wheel request to a smaller movement.
+private actor AmountCoupledScrollViewport {
+    private let imagesByOffset: [Int: CGImage]
+    private let maximumOffset: Int
+    private let maximumConsumedPerCall: Int?
+    private var offset = 0
+    private(set) var scrollCalls: [AutomaticScrollCall] = []
+
+    init(
+        imagesByOffset: [Int: CGImage],
+        maximumOffset: Int,
+        maximumConsumedPerCall: Int? = nil
+    ) {
+        precondition(imagesByOffset[0] != nil)
+        self.imagesByOffset = imagesByOffset
+        self.maximumOffset = max(0, maximumOffset)
+        self.maximumConsumedPerCall = maximumConsumedPerCall
+    }
+
+    func capture() throws -> CGImage {
+        guard let image = imagesByOffset[offset] else {
+            throw ScrollCaptureError.captureFailed
+        }
+        return image
+    }
+
+    func scroll(at point: CGPoint, amount: Int32) {
+        scrollCalls.append(AutomaticScrollCall(point: point, amount: amount))
+        let requested = max(0, Int(amount))
+        let consumed = min(requested, maximumConsumedPerCall ?? requested)
+        offset = min(maximumOffset, offset + consumed)
+    }
+}
+
+private struct AmountCoupledScrollFrameCapturer: ScrollFrameCapturing {
+    let viewport: AmountCoupledScrollViewport
+
+    func capture(rect: CGRect) async throws -> CGImage {
+        try await viewport.capture()
+    }
+}
+
+private struct AmountCoupledAutomaticScrollDriver: AutomaticScrollDriving {
+    let viewport: AmountCoupledScrollViewport
+    let hasAccessibilityPermission = true
+
+    func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
+        await viewport.scroll(at: globalPoint, amount: amount)
+    }
+}
+
+private struct CoupledScrollFrameCapturer: ScrollFrameCapturing {
+    let viewport: CoupledScrollViewport
+
+    func capture(rect: CGRect) async throws -> CGImage {
+        try await viewport.capture()
+    }
+}
+
+private struct CoupledAutomaticScrollDriver: AutomaticScrollDriving {
+    let viewport: CoupledScrollViewport
+    let hasAccessibilityPermission = true
+
+    func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
+        await viewport.scroll(at: globalPoint, amount: amount)
+    }
+}
+
+/// Supplies semantic scrollbar snapshots independently from the scripted
+/// viewport so the session can prove that the accepted frame reached bottom.
+private actor PositionAwareAutomaticScrollDriver: AutomaticScrollDriving {
+    nonisolated let hasAccessibilityPermission = true
+    private let viewport: CoupledScrollViewport
+    private let positions: [ScrollPositionSnapshot]
+    private var positionIndex = 0
+
+    init(
+        viewport: CoupledScrollViewport,
+        positions: [ScrollPositionSnapshot]
+    ) {
+        precondition(!positions.isEmpty)
+        self.viewport = viewport
+        self.positions = positions
+    }
+
+    func currentPosition(at globalPoint: CGPoint) -> ScrollPositionSnapshot? {
+        let snapshot = positions[min(positionIndex, positions.count - 1)]
+        positionIndex += 1
+        return snapshot
+    }
+
+    func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
+        await viewport.scroll(at: globalPoint, amount: amount)
+    }
+}
+
 private actor RecordingScreenImageCapturer: ScreenImageCapturing {
     private let image: CGImage
     private var rects: [CGRect] = []
+    private var exclusionFlags: [Bool] = []
 
     init(image: CGImage) {
         self.image = image
@@ -4806,13 +7211,32 @@ private actor RecordingScreenImageCapturer: ScreenImageCapturing {
         return image
     }
 
+    func capture(
+        rect: CGRect,
+        excludingCurrentApplication: Bool
+    ) async throws -> CGImage {
+        rects.append(rect)
+        exclusionFlags.append(excludingCurrentApplication)
+        return image
+    }
+
     func capturedRects() -> [CGRect] { rects }
+    func currentApplicationExclusionFlags() -> [Bool] { exclusionFlags }
 }
 
 private struct NoOpAutomaticScrollDriver: AutomaticScrollDriving {
     let hasAccessibilityPermission = true
 
     func scroll(at globalPoint: CGPoint, amount: Int32) async throws {}
+}
+
+private struct ThrowingAutomaticScrollDriver: AutomaticScrollDriving {
+    let error: ScrollCaptureError
+    let hasAccessibilityPermission = true
+
+    func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
+        throw error
+    }
 }
 
 private struct AutomaticScrollCall: Equatable, Sendable {
@@ -4826,5 +7250,29 @@ private actor RecordingAutomaticScrollDriver: AutomaticScrollDriving {
 
     func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
         calls.append(AutomaticScrollCall(point: globalPoint, amount: amount))
+    }
+}
+
+private actor SignallingAutomaticScrollDriver: AutomaticScrollDriving {
+    nonisolated let hasAccessibilityPermission = true
+    private(set) var callCount = 0
+    private var callCountWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+
+    func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
+        callCount += 1
+        resumeSatisfiedWaiters()
+    }
+
+    func waitUntilScrollCallCount(_ expectedCount: Int) async {
+        guard callCount < expectedCount else { return }
+        await withCheckedContinuation { continuation in
+            callCountWaiters.append((expectedCount, continuation))
+        }
+    }
+
+    private func resumeSatisfiedWaiters() {
+        let satisfied = callCountWaiters.filter { $0.count <= callCount }
+        callCountWaiters.removeAll { $0.count <= callCount }
+        satisfied.forEach { $0.continuation.resume() }
     }
 }

@@ -49,6 +49,45 @@ final compact ranked search result: blocked on live visual capture
 
 final result: passed
 
+## Screenshot selection cursors — 2026-08-29
+
+- Selected reference: `/Users/shawnshoper/.codex/generated_images/019ff0f4-7fd6-7ba3-8b26-0a76e013511f/exec-5796d7c5-7baf-4ec8-9c57-312e3e28c1ec.png` (first direction).
+- Live feedback confirmed the precision and resize cursors were present, while the move cursor still used the legacy crossed-line glyph.
+- The move cursor was redrawn as four independent high-contrast directional arrows with a blue center marker, matching the selected direction and remaining visible on light or dark captures.
+- Interaction remains functional: selection interior moves the rectangle; the four edges and four corners resize it; cursor identity remains locked during an active drag.
+- Focused cursor and interaction tests passed 3/3, including pixel assertions for a dark core, white outline, and blue center marker.
+- The final Apple Development-signed Universal Release built successfully and was installed from the same verified artifact.
+
+final result: passed
+
+# PEEK Translation Cloud and Compact Redesign Visual QA (2026-08-21)
+
+## Visual truth
+
+- User reference: `/var/folders/0w/cnq2c8gs1n7dwvq33lvpd2l00000gn/T/codex-clipboard-6732bf93-2310-4168-aef6-d93f3b380672.png` (1536 × 1024).
+- Native implementation render: `audit/translation-cloud-2026-08-21/implementation-offscreen.png` (2120 × 1360 at Retina scale).
+- Same-state comparison: `audit/translation-cloud-2026-08-21/comparison.png`.
+- State: dark appearance, 1060 × 680-point compact panel, English source text, Simplified Chinese local result, source editor focused and bottom actions enabled.
+
+## Comparison and iteration
+
+- The implementation preserves the reference hierarchy: native traffic lights, title and shortcut header, independent language bar, centered swap control, blue-focused source card, separator, stacked result area and four-column bottom shelf.
+- The first native render left a large empty region below the Apple result. The result card now fills the available height and keeps its status at the lower edge, matching the reference's extensible result canvas.
+- The source editor uses a native `NSTextView`; placeholder and insertion caret share the same font, text inset and first-baseline constraint.
+- The implementation is intentionally smaller than the concept while retaining its proportions. Provider labels add the requested extensibility without changing the source and action hierarchy.
+- The locked desktop prevented a ScreenServer capture. The comparison therefore uses the production SwiftUI/AppKit hierarchy rendered at its real Retina size, not a recreated mock or static design.
+
+## Functional verification
+
+- Apple local translation remains the always-visible primary result. Baidu and Google result cards appear only when the corresponding provider is enabled and fully configured.
+- Baidu APP ID and provider enablement stay in preferences; Baidu Secret and Google API Key are stored in the macOS Keychain. Cloud text is sent only after the user enables a configured provider.
+- Automatic source detection weighs Unicode scripts and discounts embedded acronyms, covering Chinese, Japanese, Korean, Cyrillic, Arabic and Latin mixed text.
+- Missing Apple language packs remain an inline state with a System Settings action; they do not block continued input or cloud-provider translation.
+- Escape and loss of key/app activation close and destroy the transient panel. Paste, copy, speak, language menus and language swapping remain connected to production actions.
+- The translation-specific XCTest suite, localization catalog verification and Apple Development Release build pass. The wider file-index suite still has independent existing failures tracked separately from this redesign.
+
+final result: passed
+
 # Grouped Search and Dynamic Preview Visual QA (2026-08-18)
 
 ## Visual truth
@@ -246,6 +285,43 @@ final photo-reference toolbar result: passed
 - Normal production launch still has no `WindowGroup`; settings are only shown after an explicit menu action. The `--show-settings-for-ui-testing` path is Debug-only.
 
 final settings result: passed
+
+# PEEK Translation Visual QA — Superseded Reference (2026-08-21)
+
+## Visual truth
+
+- Selected reference: `/Users/shawnshoper/.codex/generated_images/019ff0f4-7fd6-7ba3-8b26-0a76e013511f/exec-d279b3a7-56fd-454c-857e-07b4c27ff5cd.png` (1487 × 1058).
+- Final native window: `/private/tmp/peek-translate-window-final-pass.png`.
+- Full-screen material check: `/private/tmp/peek-translate-screen-final-pass.png`.
+- Normalized comparison: `/private/tmp/peek-translate-comparison-pass.png`.
+- Settings integration: `/private/tmp/peek-translation-settings-pass.jpeg`.
+- Logical viewport: 1120 × 740 points on a 5120 × 2880, 2× Retina desktop.
+- State: dark translucent floating window, automatic source detection, Simplified Chinese target, source text populated and action bar enabled.
+
+## Fidelity and interaction review
+
+- The final window uses one continuous 18-point material surface, an 80-point header, two balanced language columns, large source/result typography and the reference-sized bottom action controls.
+- The first comparison exposed an extra close button, compressed aspect ratio, undersized typography and narrow buttons. Those differences were removed before the final comparison.
+- The live desktop naturally changes the material backdrop. The implementation keeps the reference hierarchy, geometry, contrast and spacing without copying a static background into the app.
+- The source character counter reports the real string length. The supplied static concept shows a different count, which was not copied as false UI state.
+- Paste, clear, copy, speak and swap are connected. Translation is debounced, limited to 5,000 characters and uses the local macOS Translation framework.
+- Automatic routing was verified with `Hello world`: PEEK resolved the target to Simplified Chinese and macOS offered to download the missing English/Chinese local language models. No third-party service is contacted.
+
+## PEEK integration
+
+- Translation is maintained in the separate top-level `PEEKTranslate` source folder while compiling into the existing PEEK target and `com.shawnshoper.peek` Bundle ID.
+- The menu-bar menu exposes `翻译` with its dynamic shortcut and conflict state.
+- Settings exposes a dedicated `翻译` tab with source/target behavior, an `打开翻译` action, the editable shortcut and local-processing compatibility copy.
+- PEEK Search injects a first-class Translation application result for Chinese, pinyin and English aliases, and opens the same independent floating window.
+- The floating work area does not become a second app, target or Bundle ID, and is not embedded into the file-search surface.
+
+## Comparison history
+
+1. P1: the restored-window cleanup hid every non-search PEEK window, including Translation. It now hides only an actual Settings window.
+2. P2: the initial implementation diverged in close control, aspect ratio, typography and action sizing. The panel was corrected to the selected reference proportions.
+3. The final focused and whole-screen comparisons contain no actionable P0/P1/P2 visual difference.
+
+final result: superseded by the stacked translation redesign reference
 
 # Simple Search Settings Visual QA
 

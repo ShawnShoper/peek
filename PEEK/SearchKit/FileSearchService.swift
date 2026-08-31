@@ -17,6 +17,11 @@ actor FileSearchService {
         self.store = store
     }
 
+    /// Drains pending service work and deterministically releases SQLite file handles.
+    func shutdown() async {
+        await store.close()
+    }
+
     func search(_ request: FileSearchRequest) -> AsyncStream<FileSearchSnapshot> {
         let store = self.store
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in

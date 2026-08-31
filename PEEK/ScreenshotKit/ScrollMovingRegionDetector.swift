@@ -1,13 +1,18 @@
 import Foundation
+import OSLog
 
 /// 相邻两帧中可安全用于纵向拼接的单一矩形区域。
-/// 只裁除与画面边缘连续相连的固定带；内部悬浮层或边界漂移由会话层安全终止。
+/// 边缘固定带会被裁除；紧凑悬浮控件交给拼接器回填，无法恢复的固定层仍安全终止。
 struct ScrollMovingRegion: Sendable, Equatable {
     let cropRect: ScrollPixelRect
     let removedTopPixels: Int
     let removedBottomPixels: Int
     let removedLeftPixels: Int
     let removedRightPixels: Int
+    /// Small fixed controls inside the scrolling viewport. Earlier occurrences
+    /// can be repaired from the following frame after the document has moved;
+    /// the final occurrence is intentionally retained once.
+    var fixedOverlayRects: [ScrollPixelRect] = []
 
     var removedFixedEdges: Bool {
         removedTopPixels + removedBottomPixels + removedLeftPixels + removedRightPixels > 0
@@ -22,6 +27,10 @@ enum ScrollMovingRegionDetection: Sendable, Equatable {
 /// 在已知纵向位移后，区分“保持屏幕位置不变”的固定像素与“随正文移动”的像素。
 /// 全局 overlap 置信度只能证明大部分像素匹配，不能排除固定标题栏、侧栏或悬浮层。
 struct ScrollMovingRegionDetector: Sendable {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.shawnshoper.peek",
+        category: "ScrollCapture"
+    )
     struct Configuration: Sendable {
         var maximumSamePositionDifference = 0.025
         var minimumClassificationGap = 0.025
@@ -189,14 +198,35 @@ struct ScrollMovingRegionDetector: Sendable {
             overlap: overlapPixels,
             cropRect: cropRect
         )
-        guard evidence.moving >= configuration.minimumMovingTiles,
-              (evidence.fixed <= configuration.maximumUnexplainedFixedTiles
-                || lowTextureFixedBackdropIsDominant(
-                    evidence: evidence,
-                    cropRect: cropRect,
-                    removedFixedEdges: top + bottom + left + right > 0
-                )) else {
+        let removedFixedEdges = top + bottom + left + right > 0
+        let fixedBackdropIsSafe = lowTextureFixedBackdropIsDominant(
+            evidence: evidence,
+            cropRect: cropRect,
+            removedFixedEdges: removedFixedEdges
+        )
+        let recoverableOverlayRects = recoverableInternalFixedOverlays(
+            evidence: evidence,
+            displacement: displacement,
+            overlapPixels: overlapPixels,
+            cropRect: cropRect,
+            removedFixedEdges: removedFixedEdges
+        )
+        let evidenceIsSafe = evidence.moving >= configuration.minimumMovingTiles
+            && (evidence.fixed <= configuration.maximumUnexplainedFixedTiles
+                || fixedBackdropIsSafe
+                || recoverableOverlayRects != nil)
+        guard evidenceIsSafe else {
+            let clusterCount = connectedFixedRectClusters(evidence.fixedRects).count
+            Self.logger.error(
+                "stage=moving_region_evidence_rejected moving_tiles=\(evidence.moving, privacy: .public) fixed_tiles=\(evidence.fixed, privacy: .public) fixed_clusters=\(clusterCount, privacy: .public) fixed_area_px=\(evidence.fixedPixelArea, privacy: .public) displacement_px=\(displacement, privacy: .public) overlap_px=\(overlapPixels, privacy: .public) removed_edges=\(removedFixedEdges, privacy: .public) backdrop_safe=\(fixedBackdropIsSafe, privacy: .public)"
+            )
             return .unsafe
+        }
+
+        if let recoverableOverlayRects, !recoverableOverlayRects.isEmpty {
+            Self.logger.notice(
+                "stage=moving_region_overlays_recoverable overlay_regions=\(recoverableOverlayRects.count, privacy: .public) displacement_px=\(displacement, privacy: .public) overlap_px=\(overlapPixels, privacy: .public)"
+            )
         }
 
         return .safe(ScrollMovingRegion(
@@ -204,7 +234,8 @@ struct ScrollMovingRegionDetector: Sendable {
             removedTopPixels: top,
             removedBottomPixels: bottom,
             removedLeftPixels: left,
-            removedRightPixels: right
+            removedRightPixels: right,
+            fixedOverlayRects: recoverableOverlayRects ?? []
         ))
     }
 
@@ -319,13 +350,20 @@ struct ScrollMovingRegionDetector: Sendable {
         }
     }
 
+    private struct BlockEvidence {
+        var moving = 0
+        var fixed = 0
+        var fixedPixelArea = 0
+        var fixedRects: [ScrollPixelRect] = []
+    }
+
     private func blockEvidence(
         previous: PixelPlane,
         next: PixelPlane,
         displacement: Int,
         overlap: Int,
         cropRect: ScrollPixelRect
-    ) -> (moving: Int, fixed: Int) {
+    ) -> BlockEvidence {
         let tileWidth = adaptiveTileExtent(
             length: cropRect.width,
             maximumTiles: configuration.maximumTileColumns
@@ -338,8 +376,7 @@ struct ScrollMovingRegionDetector: Sendable {
             yBreakpoints.insert(displacement)
         }
         let sortedYBreakpoints = yBreakpoints.sorted()
-        var moving = 0
-        var fixed = 0
+        var evidence = BlockEvidence()
         for segmentIndex in 0 ..< (sortedYBreakpoints.count - 1) {
             let segmentStart = sortedYBreakpoints[segmentIndex]
             let segmentEnd = sortedYBreakpoints[segmentIndex + 1]
@@ -362,9 +399,17 @@ struct ScrollMovingRegionDetector: Sendable {
                         yRange: y ..< yEnd
                     ) {
                     case .moving:
-                        moving += 1
+                        evidence.moving += 1
                     case .fixed:
-                        fixed += 1
+                        evidence.fixed += 1
+                        let rect = ScrollPixelRect(
+                            x: x,
+                            y: y,
+                            width: xEnd - x,
+                            height: yEnd - y
+                        )
+                        evidence.fixedRects.append(rect)
+                        evidence.fixedPixelArea += rect.width * rect.height
                     case .ambiguous:
                         break
                     }
@@ -373,7 +418,7 @@ struct ScrollMovingRegionDetector: Sendable {
                 y = yEnd
             }
         }
-        return (moving, fixed)
+        return evidence
     }
 
     private enum BlockClassification {
@@ -499,7 +544,7 @@ struct ScrollMovingRegionDetector: Sendable {
     /// evidence. Accept only that distinctive, large-background shape; a
     /// compact high-texture overlay has far fewer fixed tiles and still fails.
     private func lowTextureFixedBackdropIsDominant(
-        evidence: (moving: Int, fixed: Int),
+        evidence: BlockEvidence,
         cropRect: ScrollPixelRect,
         removedFixedEdges: Bool
     ) -> Bool {
@@ -519,6 +564,131 @@ struct ScrollMovingRegionDetector: Sendable {
             && evidence.fixed >= Int(ceil(Double(approximateTileCount) * 0.03))
             && evidence.fixed <= Int(ceil(Double(approximateTileCount) * 0.10))
             && evidence.moving >= evidence.fixed * 5
+    }
+
+    /// Compact fixed controls are recoverable when each connected component is
+    /// either already inside the discarded overlap or can be sourced from the
+    /// following viewport after one accepted displacement. Components are
+    /// validated independently so a top control and a bottom control are not
+    /// mistaken for one page-sized fixed region.
+    private func recoverableInternalFixedOverlays(
+        evidence: BlockEvidence,
+        displacement: Int,
+        overlapPixels: Int,
+        cropRect: ScrollPixelRect,
+        removedFixedEdges: Bool
+    ) -> [ScrollPixelRect]? {
+        guard !removedFixedEdges,
+              evidence.fixed > configuration.maximumUnexplainedFixedTiles,
+              !evidence.fixedRects.isEmpty,
+              evidence.moving >= max(
+                configuration.minimumMovingTiles,
+                evidence.fixed * 2
+              ) else {
+            return nil
+        }
+
+        let cropArea = cropRect.width * cropRect.height
+        guard cropArea > 0,
+              Double(evidence.fixedPixelArea) / Double(cropArea) <= 0.10 else {
+            return nil
+        }
+
+        let clusters = connectedFixedRectClusters(evidence.fixedRects)
+        guard !clusters.isEmpty, clusters.count <= 8 else { return nil }
+
+        let margin = configuration.baseTileSize
+        let recoveryRects = clusters.map { cluster in
+            expandedBoundingRect(of: cluster, margin: margin, clippedTo: cropRect)
+        }
+        let totalRecoveryArea = recoveryRects.reduce(0) {
+            $0 + $1.width * $1.height
+        }
+        let totalAreaFraction = Double(totalRecoveryArea) / Double(cropArea)
+        let maximumAreaFraction = recoveryRects.map {
+            Double($0.width * $0.height) / Double(cropArea)
+        }.max() ?? 0
+        let maximumWidthFraction = recoveryRects.map {
+            Double($0.width) / Double(cropRect.width)
+        }.max() ?? 0
+        let maximumHeightFraction = recoveryRects.map {
+            Double($0.height) / Double(cropRect.height)
+        }.max() ?? 0
+        let allRectsCanBeRepaired = recoveryRects.allSatisfy { recoveryRect in
+            // Top/middle controls are discarded with the overlap. A bottom
+            // control can be repaired from y - displacement in the next frame.
+            // The blind zone remains fail-closed.
+            recoveryRect.maxY <= overlapPixels || recoveryRect.y >= displacement
+        }
+        guard totalAreaFraction <= 0.30,
+              maximumAreaFraction <= 0.24,
+              maximumWidthFraction <= 0.60,
+              maximumHeightFraction <= 0.60,
+              allRectsCanBeRepaired else {
+            Self.logger.error(
+                "stage=fixed_overlay_geometry_rejected regions=\(recoveryRects.count, privacy: .public) total_area_fraction=\(totalAreaFraction, privacy: .public) max_area_fraction=\(maximumAreaFraction, privacy: .public) max_width_fraction=\(maximumWidthFraction, privacy: .public) max_height_fraction=\(maximumHeightFraction, privacy: .public) repairable_position=\(allRectsCanBeRepaired, privacy: .public)"
+            )
+            return nil
+        }
+        return recoveryRects
+    }
+
+    private func connectedFixedRectClusters(
+        _ rects: [ScrollPixelRect]
+    ) -> [[ScrollPixelRect]] {
+        var visited = Array(repeating: false, count: rects.count)
+        var clusters: [[ScrollPixelRect]] = []
+        let proximity = configuration.baseTileSize
+
+        for start in rects.indices where !visited[start] {
+            visited[start] = true
+            var pending = [start]
+            var cluster: [ScrollPixelRect] = []
+            while let current = pending.popLast() {
+                cluster.append(rects[current])
+                for candidate in rects.indices where !visited[candidate] {
+                    guard rectsAreConnected(
+                        rects[current],
+                        rects[candidate],
+                        proximity: proximity
+                    ) else { continue }
+                    visited[candidate] = true
+                    pending.append(candidate)
+                }
+            }
+            clusters.append(cluster)
+        }
+        return clusters
+    }
+
+    private func rectsAreConnected(
+        _ first: ScrollPixelRect,
+        _ second: ScrollPixelRect,
+        proximity: Int
+    ) -> Bool {
+        first.x <= second.maxX + proximity
+            && second.x <= first.maxX + proximity
+            && first.y <= second.maxY + proximity
+            && second.y <= first.maxY + proximity
+    }
+
+    private func expandedBoundingRect(
+        of rects: [ScrollPixelRect],
+        margin: Int,
+        clippedTo cropRect: ScrollPixelRect
+    ) -> ScrollPixelRect {
+        let minimumX = rects.map(\.x).min() ?? cropRect.x
+        let minimumY = rects.map(\.y).min() ?? cropRect.y
+        let maximumX = rects.map(\.maxX).max() ?? cropRect.maxX
+        let maximumY = rects.map(\.maxY).max() ?? cropRect.maxY
+        let x = max(cropRect.x, minimumX - margin)
+        let y = max(cropRect.y, minimumY - margin)
+        return ScrollPixelRect(
+            x: x,
+            y: y,
+            width: min(cropRect.maxX, maximumX + margin) - x,
+            height: min(cropRect.maxY, maximumY + margin) - y
+        )
     }
 
     private func localTexture(_ plane: PixelPlane, at point: PixelPoint) -> Double {

@@ -20,6 +20,9 @@ enum PEEKPreferenceKey {
     static let documentDefaultRootPaths = "search.documentDefaultRoots.paths"
     static let didPresentDocumentAuthorization = "search.documentAuthorization.presented"
     static let openDocumentSearchSettings = "settings.openDocumentSearch"
+    static let didAutoPresentOnboarding = "onboarding.autoPresented"
+    static let didCompleteOnboarding = "onboarding.completed"
+    static let openOnboarding = "settings.openOnboarding"
 }
 
 enum SearchWindowScreenPreference: String, CaseIterable, Identifiable, Sendable {
@@ -360,6 +363,72 @@ enum FileSearchFirstLaunchAuthorizationPromptPolicy {
             forKey: PEEKPreferenceKey.didPresentDocumentAuthorization
         )
         return missingRootCount > 0
+    }
+}
+
+/// Coordinates the one-time first-launch guide.
+///
+/// Automatic presentation and completion are deliberately separate. Scheduling
+/// the guide is recorded immediately so closing Settings midway never turns into
+/// a launch-time nag. Finishing or skipping records the user's explicit outcome.
+/// The transient flag lets the app delegate open Settings before `SettingsView`
+/// exists, while `requestReplay` can show the same guide again without changing
+/// either first-launch marker.
+enum PEEKFirstLaunchOnboardingPolicy {
+    static func shouldAutomaticallyPresent(defaults: UserDefaults = .standard) -> Bool {
+        !defaults.bool(forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
+            && !defaults.bool(forKey: PEEKPreferenceKey.didCompleteOnboarding)
+    }
+
+    @discardableResult
+    static func preparePresentationIfNeeded(
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard shouldAutomaticallyPresent(defaults: defaults) else {
+            defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
+            return false
+        }
+
+        // `didPresentDocumentAuthorization` shipped before onboarding. Its
+        // presence identifies an existing installation, which must not be
+        // treated as a brand-new install after an upgrade.
+        if defaults.object(
+            forKey: PEEKPreferenceKey.didPresentDocumentAuthorization
+        ) != nil {
+            defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
+            defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
+            return false
+        }
+
+        // Persist before opening Settings so an interrupted presentation is
+        // still exactly-once across relaunches.
+        defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
+        defaults.set(true, forKey: PEEKPreferenceKey.openOnboarding)
+        // Do not consume the legacy document-authorization marker here. The
+        // search step offers an explicit authorization action, while keeping
+        // the existing next-launch reminder as a fallback when the guide is
+        // skipped or closed before the user grants directory access.
+        return true
+    }
+
+    static func requestReplay(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: PEEKPreferenceKey.openOnboarding)
+    }
+
+    static func consumePendingPresentation(
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard defaults.bool(forKey: PEEKPreferenceKey.openOnboarding) else {
+            return false
+        }
+        defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
+        return true
+    }
+
+    static func markCompleted(defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
+        defaults.set(true, forKey: PEEKPreferenceKey.didCompleteOnboarding)
+        defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
     }
 }
 

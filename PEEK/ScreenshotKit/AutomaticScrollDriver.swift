@@ -5,7 +5,41 @@ import Foundation
 
 protocol AutomaticScrollDriving: Sendable {
     var hasAccessibilityPermission: Bool { get }
+    func currentPosition(at globalPoint: CGPoint) async -> ScrollPositionSnapshot?
     func scroll(at globalPoint: CGPoint, amount: Int32) async throws
+}
+
+extension AutomaticScrollDriving {
+    /// Most test/fallback drivers do not expose a semantic scrollbar. The
+    /// capture session then uses bounded visual end confirmation.
+    func currentPosition(at globalPoint: CGPoint) async -> ScrollPositionSnapshot? {
+        nil
+    }
+}
+
+/// Splits one logical scroll request into several moderate pixel events.
+///
+/// Some native views clamp a single large wheel event while others consume it
+/// literally. Equal-sized pulses keep the requested total deterministic and
+/// avoid a tiny trailing event that could be swallowed by an application.
+enum ScrollWheelPulsePlanner {
+    static let defaultMaximumEventAmount: Int32 = 96
+
+    static func amounts(
+        for totalAmount: Int32,
+        maximumEventAmount: Int32 = defaultMaximumEventAmount
+    ) -> [Int32] {
+        guard totalAmount > 0, maximumEventAmount > 0 else { return [] }
+        let eventCount = Int(
+            (Int64(totalAmount) + Int64(maximumEventAmount) - 1)
+                / Int64(maximumEventAmount)
+        )
+        let quotient = totalAmount / Int32(eventCount)
+        let remainder = totalAmount % Int32(eventCount)
+        return (0 ..< eventCount).map { index in
+            quotient + (index < Int(remainder) ? 1 : 0)
+        }
+    }
 }
 
 /// Stable WindowServer identity used to keep automatic scrolling attached to
@@ -112,22 +146,47 @@ enum AccessibilityScrollPermission {
 }
 
 struct QuartzAutomaticScrollDriver: AutomaticScrollDriving {
+    typealias EventPoster = @Sendable (_ point: CGPoint, _ amount: Int32) throws -> Void
+
     private let anchor: ScrollCaptureWindowAnchor?
     private let selectionQuartzRect: CGRect?
     private let currentPID: pid_t
+    private let maximumEventAmount: Int32
+    private let pulseIntervalNanoseconds: UInt64
+    private let eventPoster: EventPoster
+    private let positionProbe: (any ScrollPositionProbing)?
 
     init(
         anchor: ScrollCaptureWindowAnchor? = nil,
         selectionQuartzRect: CGRect? = nil,
-        currentPID: pid_t = ProcessInfo.processInfo.processIdentifier
+        currentPID: pid_t = ProcessInfo.processInfo.processIdentifier,
+        maximumEventAmount: Int32 = ScrollWheelPulsePlanner.defaultMaximumEventAmount,
+        pulseIntervalNanoseconds: UInt64 = 8_000_000,
+        positionProbe: (any ScrollPositionProbing)? = nil,
+        eventPoster: EventPoster? = nil
     ) {
         self.anchor = anchor
         self.selectionQuartzRect = selectionQuartzRect?.standardized
         self.currentPID = currentPID
+        self.maximumEventAmount = max(1, maximumEventAmount)
+        self.pulseIntervalNanoseconds = pulseIntervalNanoseconds
+        self.eventPoster = eventPoster ?? { point, amount in
+            try Self.postPixelScrollEvent(at: point, amount: amount)
+        }
+        self.positionProbe = positionProbe ?? anchor.map {
+            AXScrollPositionProbe(ownerPID: $0.ownerPID, quartzPoint: Self.globalPointForProbe(
+                selectionQuartzRect: selectionQuartzRect,
+                fallbackFrame: $0.quartzFrame
+            ))
+        }
     }
 
     var hasAccessibilityPermission: Bool {
         AccessibilityScrollPermission.isGranted
+    }
+
+    func currentPosition(at globalPoint: CGPoint) async -> ScrollPositionSnapshot? {
+        await positionProbe?.snapshot()
     }
 
     func scroll(at globalPoint: CGPoint, amount: Int32) async throws {
@@ -150,21 +209,52 @@ struct QuartzAutomaticScrollDriver: AutomaticScrollDriving {
                 windowSnapshots: Self.captureWindowSnapshots()
             )
 
-            guard let source = CGEventSource(stateID: .combinedSessionState),
-                  let event = CGEvent(
-                      scrollWheelEvent2Source: source,
-                      units: .pixel,
-                      wheelCount: 1,
-                      wheel1: -amount,
-                      wheel2: 0,
-                      wheel3: 0
-                  ) else {
-                throw ScrollCaptureError.captureFailed
-            }
-
-            event.location = globalPoint
-            event.post(tap: .cghidEventTap)
         }
+
+        let pulses = ScrollWheelPulsePlanner.amounts(
+            for: amount,
+            maximumEventAmount: maximumEventAmount
+        )
+        guard !pulses.isEmpty else {
+            throw ScrollCaptureError.invalidConfiguration(
+                L10n.tr("自动滚动距离必须大于 0")
+            )
+        }
+        for (index, pulse) in pulses.enumerated() {
+            try Task.checkCancellation()
+            try eventPoster(globalPoint, pulse)
+            if index + 1 < pulses.count, pulseIntervalNanoseconds > 0 {
+                try await Task.sleep(nanoseconds: pulseIntervalNanoseconds)
+            }
+        }
+    }
+
+    private static func postPixelScrollEvent(
+        at globalPoint: CGPoint,
+        amount: Int32
+    ) throws {
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let event = CGEvent(
+                  scrollWheelEvent2Source: source,
+                  units: .pixel,
+                  wheelCount: 1,
+                  wheel1: -amount,
+                  wheel2: 0,
+                  wheel3: 0
+              ) else {
+            throw ScrollCaptureError.captureFailed
+        }
+
+        event.location = globalPoint
+        event.post(tap: .cghidEventTap)
+    }
+
+    private static func globalPointForProbe(
+        selectionQuartzRect: CGRect?,
+        fallbackFrame: CGRect
+    ) -> CGPoint {
+        let rect = selectionQuartzRect?.standardized ?? fallbackFrame.standardized
+        return CGPoint(x: rect.midX, y: rect.midY)
     }
 
     @MainActor

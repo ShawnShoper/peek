@@ -1,5 +1,89 @@
+import ApplicationServices
 import CoreGraphics
 import Foundation
+import Security
+
+/// Runtime capabilities that decide whether PEEK may inspect another app's
+/// Accessibility hierarchy. Mac App Store builds run inside App Sandbox, where
+/// cross-process AX inspection is unavailable even when Post Event access is
+/// granted. Keeping this policy in one testable value prevents target
+/// selection and scroll-position probing from silently disagreeing.
+struct ScrollCaptureRuntimeCapabilities: Equatable, Sendable {
+    enum AppSandboxState: String, Equatable, Sendable {
+        case enabled
+        case disabled
+        /// Entitlement lookup failed. Treat this as sandboxed for capability
+        /// decisions so a transient Security failure can never enable AX.
+        case unknown
+    }
+
+    enum TargetInspectionMode: String, Equatable, Sendable {
+        case accessibility
+        case visualCompatibility
+    }
+
+    let appSandboxState: AppSandboxState
+    let isAccessibilityTrusted: Bool
+
+    init(
+        appSandboxState: AppSandboxState,
+        isAccessibilityTrusted: Bool
+    ) {
+        self.appSandboxState = appSandboxState
+        self.isAccessibilityTrusted = isAccessibilityTrusted
+    }
+
+    init(
+        isAppSandboxEnabled: Bool,
+        isAccessibilityTrusted: Bool
+    ) {
+        self.init(
+            appSandboxState: isAppSandboxEnabled ? .enabled : .disabled,
+            isAccessibilityTrusted: isAccessibilityTrusted
+        )
+    }
+
+    var isAppSandboxEnabled: Bool {
+        appSandboxState == .enabled
+    }
+
+    var supportsCrossProcessAccessibilityInspection: Bool {
+        appSandboxState == .disabled && isAccessibilityTrusted
+    }
+
+    var targetInspectionMode: TargetInspectionMode {
+        supportsCrossProcessAccessibilityInspection
+            ? .accessibility
+            : .visualCompatibility
+    }
+
+    static var current: ScrollCaptureRuntimeCapabilities {
+        let sandboxState = AppSandboxEntitlement.state
+        return ScrollCaptureRuntimeCapabilities(
+            appSandboxState: sandboxState,
+            // This is a read-only TCC check. Automatic capture paths must
+            // never trigger the system permission prompt themselves.
+            isAccessibilityTrusted: sandboxState == .disabled
+                ? AXIsProcessTrusted()
+                : false
+        )
+    }
+}
+
+private enum AppSandboxEntitlement {
+    static let state: ScrollCaptureRuntimeCapabilities.AppSandboxState = {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                task,
+                "com.apple.security.app-sandbox" as CFString,
+                nil
+              ) else {
+            return .unknown
+        }
+        guard let enabled = value as? Bool else { return .unknown }
+        return enabled ? .enabled : .disabled
+    }()
+}
 
 /// 滚动截图使用 Quartz 全局坐标：原点位于主显示器左上角，单位为逻辑点。
 /// 调用方若从 AppKit 选区得到矩形，需要先转换为 Quartz 全局坐标。
@@ -14,6 +98,11 @@ struct ScrollCaptureConfiguration: Sendable {
     var maximumDuration: TimeInterval? = 300
     var overlapSearch = ScrollOverlapSearchConfiguration()
     var stitchLimits = ScrollStitchLimits()
+    /// Bounds retained RGBA frames and the predicted stitch peak separately.
+    /// Output pixel limits alone are insufficient for high-overlap Retina
+    /// captures because dozens of full viewport frames can be retained while
+    /// the final long image grows by only a few rows per frame.
+    var memoryBudget = ScrollCaptureMemoryBudget.recommended()
 
     func validated() throws -> ScrollCaptureConfiguration {
         guard captureRect.isFinite,
@@ -36,6 +125,7 @@ struct ScrollCaptureConfiguration: Sendable {
         }
         try overlapSearch.validate()
         try stitchLimits.validate()
+        try memoryBudget.validate()
 
         var copy = self
         copy.captureRect = captureRect.standardized.integral
@@ -44,6 +134,51 @@ struct ScrollCaptureConfiguration: Sendable {
             y: copy.captureRect.midY
         )
         return copy
+    }
+}
+
+/// Per-attempt memory guard for scrolling capture. The recommended budget is
+/// intentionally conservative because PEEK shares the process with search,
+/// clipboard previews and editors that may already own significant memory.
+struct ScrollCaptureMemoryBudget: Sendable, Equatable {
+    private static let mebibyte = 1_024 * 1_024
+    private static let gibibyte = UInt64(1_024 * 1_024 * 1_024)
+
+    /// Sum of the actual `rgbaData.count` values retained for accepted frames
+    /// and any additional uncropped reference frame needed for validation.
+    var maximumRetainedFrameBytes: Int
+    /// Conservative estimate of retained input + stitched output + one largest
+    /// viewport scratch buffer. This protects the transient stitch peak.
+    var maximumEstimatedPeakBytes: Int
+
+    static func recommended(
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> ScrollCaptureMemoryBudget {
+        let peakMiB: Int
+        switch physicalMemoryBytes {
+        case 0 ... 4 * gibibyte:
+            peakMiB = 192
+        case 0 ... 8 * gibibyte:
+            peakMiB = 256
+        case 0 ... 16 * gibibyte:
+            peakMiB = 384
+        default:
+            peakMiB = 512
+        }
+        let peakBytes = peakMiB * mebibyte
+        return ScrollCaptureMemoryBudget(
+            maximumRetainedFrameBytes: peakBytes * 2 / 3,
+            maximumEstimatedPeakBytes: peakBytes
+        )
+    }
+
+    func validate() throws {
+        let minimumBudget = 256 * 1_024
+        guard maximumRetainedFrameBytes >= minimumBudget,
+              maximumEstimatedPeakBytes >= minimumBudget,
+              maximumRetainedFrameBytes <= maximumEstimatedPeakBytes else {
+            throw ScrollCaptureError.invalidConfiguration(L10n.tr("滚动截图内存预算无效"))
+        }
     }
 }
 
@@ -88,6 +223,15 @@ struct ScrollOverlapSearchConfiguration: Sendable {
     /// closer than this value are considered ambiguous. Ambiguity fails closed
     /// instead of selecting an arbitrary repeated pattern.
     var minimumDistinctCandidateDifference: Double = 0.004
+    /// The normal overlap search deliberately stops at 95%. Near the bottom of
+    /// a page, however, the target application may consume only a few pixels of
+    /// the requested wheel event. This second range is searched exhaustively
+    /// and is accepted only with stricter difference, improvement and confidence
+    /// gates, so a caret blink or local animation cannot masquerade as scrolling.
+    var maximumShortMovementRatio: Double = 0.05
+    var shortMovementMaximumNormalizedDifference: Double = 0.06
+    var shortMovementMinimumImprovement: Double = 0.002
+    var shortMovementMinimumConfidence: Double = 0.65
 
     func validate() throws {
         guard minimumOverlapRatio > 0,
@@ -114,6 +258,18 @@ struct ScrollOverlapSearchConfiguration: Sendable {
         guard minimumDistinctCandidateDifference >= 0,
               minimumDistinctCandidateDifference < maximumNormalizedDifference else {
             throw ScrollCaptureError.invalidConfiguration(L10n.tr("重叠候选区分阈值无效"))
+        }
+        guard maximumShortMovementRatio > 0,
+              maximumShortMovementRatio <= 0.10,
+              maximumOverlapRatio + maximumShortMovementRatio >= 1,
+              shortMovementMaximumNormalizedDifference > 0,
+              shortMovementMaximumNormalizedDifference < maximumNormalizedDifference,
+              shortMovementMinimumImprovement > 0,
+              shortMovementMinimumImprovement
+                < shortMovementMaximumNormalizedDifference,
+              shortMovementMinimumConfidence >= 0.5,
+              shortMovementMinimumConfidence <= 1 else {
+            throw ScrollCaptureError.invalidConfiguration(L10n.tr("短距离滚动识别参数无效"))
         }
     }
 }
@@ -156,6 +312,13 @@ enum ScrollCaptureStopReason: String, Sendable {
     case maximumFrames
     case durationLimit
     case endDetected
+    /// The accepted prefix reached the attempt's retained-frame or projected
+    /// stitch-memory budget. It is a successful bounded result, not an error.
+    case memoryLimit
+    /// A changed viewport could not be aligned after bounded same-position
+    /// samples. The accepted prefix is safe, but this is not reported as the
+    /// bottom of the document.
+    case alignmentStopped
     /// A later frame failed validation, but the already accepted prefix was
     /// stitched successfully and is available for explicit user recovery.
     case failureRecovered

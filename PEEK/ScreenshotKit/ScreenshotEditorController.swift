@@ -140,6 +140,7 @@ final class ScreenshotEditorController {
     /// Presents the annotation canvas directly over the frozen selection and
     /// anchors one compact horizontal toolbar to its lower edge. No titled
     /// editor window is created.
+    @discardableResult
     func editInline(
         image: NSImage,
         selectionRect: CGRect,
@@ -148,11 +149,12 @@ final class ScreenshotEditorController {
         renderSelection: @escaping (CGRect) throws -> NSImage,
         onSelectionPreviewChanged: ((CGRect) -> Void)? = nil,
         onSelectionChanged: @escaping (CGRect) -> Void,
+        onSelectionInteractionChanged: ((Bool) -> Void)? = nil,
         onAction: ((ScreenshotEditorAction) -> Void)? = nil,
         initialTool: ScreenshotAnnotationTool = .select,
         focusToolbarForUITesting: Bool = false,
         completion: @escaping (NSImage?, CGRect) -> Void
-    ) {
+    ) -> UUID {
         let id = UUID()
         let session = ScreenshotInlineEditorSession(
             image: image,
@@ -162,6 +164,7 @@ final class ScreenshotEditorController {
             renderSelection: renderSelection,
             onSelectionPreviewChanged: onSelectionPreviewChanged,
             onSelectionChanged: onSelectionChanged,
+            onSelectionInteractionChanged: onSelectionInteractionChanged,
             onAction: onAction,
             initialTool: initialTool,
             focusToolbarForUITesting: focusToolbarForUITesting
@@ -171,21 +174,24 @@ final class ScreenshotEditorController {
         }
         inlineSessions[id] = session
         session.show()
+        return id
     }
 
     /// Shows the complete inline toolbar while the selected desktop region is
     /// still live. The supplied capture closure is invoked exactly once, only
     /// when an operation actually needs image pixels.
+    @discardableResult
     func editInlineDeferred(
         selectionRect: CGRect,
         screenFrame: CGRect,
         captureSelection: @escaping (CGRect) async throws -> ScreenshotInlineCapturePayload,
         onSelectionPreviewChanged: ((CGRect) -> Void)? = nil,
         onSelectionChanged: @escaping (CGRect) -> Void,
+        onSelectionInteractionChanged: ((Bool) -> Void)? = nil,
         onAction: ((ScreenshotEditorAction) -> Void)? = nil,
         focusToolbarForUITesting: Bool = false,
         completion: @escaping (NSImage?, CGRect) -> Void
-    ) {
+    ) -> UUID {
         let id = UUID()
         let placeholder = NSImage(size: selectionRect.size)
         let session = ScreenshotInlineEditorSession(
@@ -197,6 +203,7 @@ final class ScreenshotEditorController {
             captureSelection: captureSelection,
             onSelectionPreviewChanged: onSelectionPreviewChanged,
             onSelectionChanged: onSelectionChanged,
+            onSelectionInteractionChanged: onSelectionInteractionChanged,
             onAction: onAction,
             initialTool: .select,
             focusToolbarForUITesting: focusToolbarForUITesting
@@ -206,6 +213,15 @@ final class ScreenshotEditorController {
         }
         inlineSessions[id] = session
         session.show()
+        return id
+    }
+
+    func previewInlineSelection(sessionID: UUID, rect: CGRect) {
+        inlineSessions[sessionID]?.previewSelectionFromOverlay(rect)
+    }
+
+    func commitInlineSelection(sessionID: UUID, rect: CGRect) {
+        inlineSessions[sessionID]?.commitSelectionFromOverlay(rect)
     }
 }
 
@@ -459,12 +475,15 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     private let captureSelection: ((CGRect) async throws -> ScreenshotInlineCapturePayload)?
     private let onSelectionPreviewChanged: ((CGRect) -> Void)?
     private let onSelectionChanged: (CGRect) -> Void
+    private let onSelectionInteractionChanged: ((Bool) -> Void)?
     private let onAction: ((ScreenshotEditorAction) -> Void)?
     private let completion: (NSImage?, CGRect) -> Void
     private let focusToolbarForUITesting: Bool
 
     private var selectionRect: CGRect
     private var selectionMoveOrigin: CGRect?
+    private var selectionResizeOrigin: (handle: ScreenshotResizeHandle, rect: CGRect)?
+    private var externalSelectionOrigin: CGRect?
     private var cachedToolbarSize = CGSize(width: 640, height: 44)
     private let toolbarRoot = NSStackView()
     private let mainToolbarEffect = NSVisualEffectView()
@@ -481,7 +500,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     private var qrHintLeadingConstraint: NSLayoutConstraint?
     private var qrDetectionTask: Task<Void, Never>?
     private var toolButtons: [ScreenshotAnnotationTool: NSButton] = [:]
-    private var toolMenuButtons: [ScreenshotToolMenuButton] = []
     private var toolControls: [ScreenshotAnnotationTool: NSView] = [:]
     private let toolbarTooltipPresenter = ScreenshotToolbarTooltipPresenter()
     private var toolbarHoverTrackers: [ObjectIdentifier: ScreenshotToolbarHoverTracker] = [:]
@@ -502,6 +520,8 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     private var didComplete = false
     private var hasCapturedSelection: Bool
     private var captureTask: Task<Void, Never>?
+    private var outputTask: Task<Void, Never>?
+    private var outputGeneration: UUID?
     private var actionAfterCapture: (() -> Void)?
 
     private static let qrHintWidth: CGFloat = 224
@@ -515,6 +535,7 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         captureSelection: ((CGRect) async throws -> ScreenshotInlineCapturePayload)? = nil,
         onSelectionPreviewChanged: ((CGRect) -> Void)?,
         onSelectionChanged: @escaping (CGRect) -> Void,
+        onSelectionInteractionChanged: ((Bool) -> Void)?,
         onAction: ((ScreenshotEditorAction) -> Void)?,
         initialTool: ScreenshotAnnotationTool,
         focusToolbarForUITesting: Bool,
@@ -535,6 +556,7 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         self.captureSelection = captureSelection
         self.onSelectionPreviewChanged = onSelectionPreviewChanged
         self.onSelectionChanged = onSelectionChanged
+        self.onSelectionInteractionChanged = onSelectionInteractionChanged
         self.onAction = onAction
         self.selectedTool = initialTool
         self.focusToolbarForUITesting = focusToolbarForUITesting
@@ -578,6 +600,7 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         if hasCapturedSelection {
             startQRCodeHintDetection()
         }
+        onSelectionInteractionChanged?(selectedTool == .select)
     }
 
     func cancelEditing() {
@@ -1112,6 +1135,15 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         canvas.onSelectionMoveEnded = { [weak self] translation in
             self?.finishSelectionMove(translation)
         }
+        canvas.onSelectionResizeBegan = { [weak self] handle in
+            self?.beginSelectionResize(handle)
+        }
+        canvas.onSelectionResizeChanged = { [weak self] handle, translation in
+            self?.previewSelectionResize(handle: handle, translation: translation)
+        }
+        canvas.onSelectionResizeEnded = { [weak self] handle, translation in
+            self?.finishSelectionResize(handle: handle, translation: translation)
+        }
         canvas.onZoomChanged = { [weak self] scale in
             self?.canvas.showsLiveBaseImage = scale > 1.001
         }
@@ -1185,44 +1217,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         return button
     }
 
-    private func makeToolMenuButton(
-        tools: [ScreenshotAnnotationTool],
-        symbols: [ScreenshotAnnotationTool: String],
-        accessibilityLabel: String
-    ) -> ScreenshotToolMenuButton {
-        let button = ScreenshotToolMenuButton(
-            tools: tools,
-            symbols: symbols,
-            selectedTool: tools[0]
-        )
-        let menu = NSMenu()
-        for tool in tools {
-            let item = NSMenuItem(
-                title: tool.title,
-                action: #selector(toolMenuItemSelected(_:)),
-                keyEquivalent: ""
-            )
-            item.tag = tool.rawValue
-            item.target = self
-            item.image = symbols[tool].flatMap {
-                NSImage(systemSymbolName: $0, accessibilityDescription: tool.title)
-            }
-            menu.addItem(item)
-            toolControls[tool] = button
-        }
-        button.menu = menu
-        button.target = self
-        button.action = #selector(toolMenuButtonPressed(_:))
-        button.toolTip = accessibilityLabel
-        button.setAccessibilityLabel(accessibilityLabel)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 62).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        installToolbarHoverName(on: button, text: accessibilityLabel)
-        toolMenuButtons.append(button)
-        return button
-    }
-
     private func makeIconButton(
         symbolName: String,
         accessibilityLabel: String,
@@ -1282,150 +1276,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         button.widthAnchor.constraint(equalToConstant: 34).isActive = true
         button.heightAnchor.constraint(equalToConstant: 34).isActive = true
         installToolbarHoverName(on: button, text: accessibilityLabel)
-    }
-
-    private func makeUndoRedoGroup() -> NSView {
-        let stack = NSStackView(views: [undoButton, redoButton])
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView()
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
-        container.layer?.cornerRadius = 10
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 3),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -3),
-            stack.topAnchor.constraint(equalTo: container.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            container.widthAnchor.constraint(equalToConstant: 86),
-            container.heightAnchor.constraint(equalToConstant: 42)
-        ])
-        return container
-    }
-
-    private func applyActionButtonBackground(_ button: NSButton) {
-        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
-        button.layer?.borderWidth = 1
-        button.layer?.borderColor = NSColor.white.withAlphaComponent(0.055).cgColor
-        button.layer?.cornerRadius = 10
-    }
-
-    private func makeTextButton(
-        title: String,
-        symbolName: String?,
-        accessibilityLabel: String,
-        action: Selector
-    ) -> NSButton {
-        let button = NSButton(title: title, target: self, action: action)
-        button.isBordered = false
-        button.font = .systemFont(ofSize: 14, weight: .semibold)
-        button.image = symbolName.flatMap {
-            NSImage(systemSymbolName: $0, accessibilityDescription: accessibilityLabel)
-        }
-        button.imagePosition = symbolName == nil ? .noImage : .imageLeading
-        button.imageHugsTitle = true
-        button.contentTintColor = .labelColor
-        button.wantsLayer = true
-        button.layer?.cornerRadius = 8
-        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
-        button.layer?.borderWidth = 1
-        button.layer?.borderColor = NSColor.white.withAlphaComponent(0.06).cgColor
-        button.toolTip = accessibilityLabel
-        button.setAccessibilityLabel(accessibilityLabel)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: title == "OCR" ? 54 : 76)
-            .isActive = true
-        installToolbarHoverName(on: button, text: accessibilityLabel)
-        return button
-    }
-
-    private func makeCompletionControl() -> NSView {
-        let doneButton = NSButton(
-            title: L10n.tr("完成"),
-            target: self,
-            action: #selector(doneButtonPressed)
-        )
-        doneButton.keyEquivalent = "\r"
-        doneButton.isBordered = false
-        doneButton.font = .systemFont(ofSize: 14, weight: .semibold)
-        doneButton.contentTintColor = .white
-        doneButton.attributedTitle = NSAttributedString(
-            string: L10n.tr("完成"),
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 14, weight: .semibold),
-                .foregroundColor: NSColor.white
-            ]
-        )
-        doneButton.wantsLayer = true
-        doneButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        doneButton.layer?.cornerRadius = 8
-        doneButton.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
-        doneButton.toolTip = L10n.tr("完成并复制")
-        doneButton.setAccessibilityLabel(L10n.tr("完成并复制"))
-        doneButton.translatesAutoresizingMaskIntoConstraints = false
-        doneButton.widthAnchor.constraint(equalToConstant: 58).isActive = true
-        doneButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        installToolbarHoverName(on: doneButton, text: L10n.tr("完成并复制"))
-
-        let moreButton = NSButton(
-            image: NSImage(
-                systemSymbolName: "chevron.down",
-                accessibilityDescription: L10n.tr("更多完成操作")
-            ) ?? NSImage(),
-            target: self,
-            action: #selector(completionMenuButtonPressed(_:))
-        )
-        let completionMenu = NSMenu()
-        let saveItem = NSMenuItem(
-            title: L10n.tr("保存为 PNG…"),
-            action: #selector(saveImage),
-            keyEquivalent: "s"
-        )
-        saveItem.keyEquivalentModifierMask = [.command, .shift]
-        saveItem.image = NSImage(
-            systemSymbolName: "square.and.arrow.down",
-            accessibilityDescription: L10n.tr("保存")
-        )
-        saveItem.target = self
-        completionMenu.addItem(saveItem)
-        completionMenu.addItem(.separator())
-        let cancelItem = NSMenuItem(
-            title: L10n.tr("取消截图"),
-            action: #selector(cancelButtonPressed),
-            keyEquivalent: "\u{1b}"
-        )
-        cancelItem.image = NSImage(
-            systemSymbolName: "xmark",
-            accessibilityDescription: L10n.tr("取消截图")
-        )
-        cancelItem.target = self
-        completionMenu.addItem(cancelItem)
-        moreButton.menu = completionMenu
-        moreButton.imagePosition = .imageOnly
-        moreButton.isBordered = false
-        moreButton.contentTintColor = .white
-        moreButton.wantsLayer = true
-        moreButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
-        moreButton.layer?.cornerRadius = 8
-        moreButton.layer?.maskedCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
-        moreButton.toolTip = L10n.tr("保存或取消")
-        moreButton.setAccessibilityLabel(L10n.tr("更多完成操作"))
-        moreButton.translatesAutoresizingMaskIntoConstraints = false
-        moreButton.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        moreButton.heightAnchor.constraint(equalToConstant: 42).isActive = true
-        installToolbarHoverName(on: moreButton, text: L10n.tr("保存或取消"))
-
-        let stack = NSStackView(views: [doneButton, moreButton])
-        stack.orientation = .horizontal
-        stack.spacing = 1
-        stack.alignment = .centerY
-        return stack
     }
 
     private func installToolbarHoverName(on view: NSView, text: String) {
@@ -1515,14 +1365,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         selectTool(tool)
     }
 
-    @objc private func toolMenuButtonPressed(_ sender: ScreenshotToolMenuButton) {
-        sender.menu?.popUp(
-            positioning: sender.menu?.item(withTag: sender.selectedTool.rawValue),
-            at: CGPoint(x: 0, y: sender.bounds.maxY + 4),
-            in: sender
-        )
-    }
-
     @objc private func toolMenuItemSelected(_ sender: NSMenuItem) {
         guard let tool = ScreenshotAnnotationTool(rawValue: sender.tag) else { return }
         selectTool(tool)
@@ -1541,6 +1383,7 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     private func applySelectedTool(_ tool: ScreenshotAnnotationTool) {
         selectedTool = tool
         canvas.tool = tool
+        onSelectionInteractionChanged?(tool == .select)
         updateToolSelection()
         contextPaletteRow.isHidden = !tool.supportsInlineStylePalette
         updateToolbarFrame()
@@ -1575,18 +1418,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
                 ? NSColor.controlAccentColor.cgColor
                 : NSColor.clear.cgColor
             button.contentTintColor = selected ? .white : .labelColor
-        }
-        for button in toolMenuButtons {
-            let selected = button.tools.contains(selectedTool)
-            if selected {
-                button.selectedTool = selectedTool
-            }
-            button.contentTintColor = .labelColor
-            button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
-            button.layer?.borderWidth = selected ? 1.5 : 1
-            button.layer?.borderColor = selected
-                ? NSColor.controlAccentColor.cgColor
-                : NSColor.white.withAlphaComponent(0.055).cgColor
         }
     }
 
@@ -1644,29 +1475,122 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
             translation: translation,
             screenFrame: screenFrame
         )
+        commitSelectionFrame(proposed, rollback: origin, notifyModel: true)
+    }
+
+    private func beginSelectionResize(_ handle: ScreenshotResizeHandle) {
+        guard !didComplete else { return }
+        canvas.resetZoom()
+        selectionResizeOrigin = (handle, selectionRect)
+        qrDetectionTask?.cancel()
+        selectionPreviewView?.updateSelection(selectionRect)
+    }
+
+    private func previewSelectionResize(
+        handle: ScreenshotResizeHandle,
+        translation: CGSize
+    ) {
+        guard let origin = selectionResizeOrigin,
+              origin.handle == handle,
+              !didComplete else {
+            return
+        }
+        let anchor = screenshotSelectionHandlePoint(for: handle, in: origin.rect)
+        let proposed = screenshotResizedSelection(
+            original: origin.rect,
+            handle: handle,
+            targetPoint: CGPoint(
+                x: anchor.x + translation.width,
+                y: anchor.y + translation.height
+            ),
+            bounds: screenFrame
+        )
+        selectionPreviewView?.updateSelection(proposed)
+        applySelectionFrame(proposed)
+        onSelectionPreviewChanged?(proposed)
+    }
+
+    private func finishSelectionResize(
+        handle: ScreenshotResizeHandle,
+        translation: CGSize
+    ) {
+        guard let origin = selectionResizeOrigin,
+              origin.handle == handle,
+              !didComplete else {
+            return
+        }
+        selectionResizeOrigin = nil
+        let anchor = screenshotSelectionHandlePoint(for: handle, in: origin.rect)
+        let proposed = screenshotResizedSelection(
+            original: origin.rect,
+            handle: handle,
+            targetPoint: CGPoint(
+                x: anchor.x + translation.width,
+                y: anchor.y + translation.height
+            ),
+            bounds: screenFrame
+        )
+        commitSelectionFrame(proposed, rollback: origin.rect, notifyModel: true)
+    }
+
+    func previewSelectionFromOverlay(_ rect: CGRect) {
+        guard selectedTool == .select, !didComplete else { return }
+        if externalSelectionOrigin == nil {
+            externalSelectionOrigin = selectionRect
+            canvas.resetZoom()
+            qrDetectionTask?.cancel()
+        }
+        selectionPreviewView?.updateSelection(rect)
+        applySelectionFrame(rect)
+    }
+
+    func commitSelectionFromOverlay(_ rect: CGRect) {
+        guard selectedTool == .select, !didComplete else { return }
+        let origin = externalSelectionOrigin ?? selectionRect
+        externalSelectionOrigin = nil
+        commitSelectionFrame(rect, rollback: origin, notifyModel: false)
+    }
+
+    private func commitSelectionFrame(
+        _ proposed: CGRect,
+        rollback origin: CGRect,
+        notifyModel: Bool
+    ) {
         guard proposed != origin else {
+            selectionPreviewView?.updateSelection(origin)
             applySelectionFrame(origin)
+            if notifyModel {
+                onSelectionChanged(origin)
+            }
             if hasCapturedSelection {
                 startQRCodeHintDetection()
             }
             return
         }
         guard hasCapturedSelection else {
+            selectionPreviewView?.updateSelection(proposed)
             applySelectionFrame(proposed)
-            onSelectionChanged(proposed)
+            if notifyModel {
+                onSelectionChanged(proposed)
+            }
             return
         }
         do {
             guard let renderSelection else { return }
             let updatedImage = try renderSelection(proposed)
             sourceImage = (updatedImage.copy() as? NSImage) ?? updatedImage
+            annotationDocument.replaceBaseImage(updatedImage)
+            selectionPreviewView?.updateSelection(proposed)
             applySelectionFrame(proposed)
-            onSelectionChanged(proposed)
+            if notifyModel {
+                onSelectionChanged(proposed)
+            }
             startQRCodeHintDetection()
         } catch {
             selectionPreviewView?.updateSelection(origin)
             applySelectionFrame(origin)
             onSelectionPreviewChanged?(origin)
+            onSelectionChanged(origin)
             NSSound.beep()
         }
     }
@@ -1858,12 +1782,16 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     }
 
     private func performCopyImage() {
-        guard let image = renderCurrentSelection(), copyToPasteboard(image) else {
-            NSSound.beep()
-            return
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            let payloads = try await ScreenshotImageEncodingWorker.shared
+                .encodeClipboardPayloads(from: rendered.cgImage)
+            guard writeScreenshotPayloadsToPasteboard(payloads) else {
+                throw ScreenshotCaptureError.imageRenderingFailed
+            }
+            onAction?(.copied(rendered.image))
+            finish(with: nil)
         }
-        onAction?(.copied(image))
-        finish(with: nil)
     }
 
     @objc private func saveImage() {
@@ -1871,18 +1799,19 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     }
 
     private func performSaveImage() {
-        guard let image = renderCurrentSelection() else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "PEEK_\(Self.filenameTimestamp()).png"
         panel.beginSheetModal(for: toolbarPanel) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try Self.writePNG(image, to: url)
-                self?.onAction?(.saved(image, url))
-                self?.finish(with: nil)
-            } catch {
-                self?.presentSaveError(error)
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.startOutputOperation(showsErrorAlert: true) { [weak self] rendered in
+                guard let self else { return }
+                try await ScreenshotImageEncodingWorker.shared.writePNG(
+                    rendered.cgImage,
+                    to: url
+                )
+                onAction?(.saved(rendered.image, url))
+                finish(with: nil)
             }
         }
     }
@@ -1895,25 +1824,19 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     }
 
     private func performShareImage(_ sender: NSButton) {
-        guard let image = renderCurrentSelection() else { return }
-        let picker = NSSharingServicePicker(items: [image])
-        picker.show(
-            relativeTo: sender.bounds,
-            of: sender,
-            preferredEdge: .maxY
-        )
+        startOutputOperation { [weak sender] rendered in
+            guard let sender else { return }
+            let picker = NSSharingServicePicker(items: [rendered.image])
+            picker.show(
+                relativeTo: sender.bounds,
+                of: sender,
+                preferredEdge: .maxY
+            )
+        }
     }
 
     @objc private func cancelButtonPressed() {
         finish(with: nil)
-    }
-
-    @objc private func completionMenuButtonPressed(_ sender: NSButton) {
-        sender.menu?.popUp(
-            positioning: nil,
-            at: CGPoint(x: sender.bounds.minX, y: sender.bounds.maxY + 4),
-            in: sender
-        )
     }
 
     @objc private func doneButtonPressed() {
@@ -1925,42 +1848,50 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     }
 
     private func performCompleteAndCopy() {
-        guard let image = renderCurrentSelection() else {
-            NSSound.beep()
-            return
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            let payloads = try await ScreenshotImageEncodingWorker.shared
+                .encodeClipboardPayloads(from: rendered.cgImage)
+            guard writeScreenshotPayloadsToPasteboard(payloads) else {
+                throw ScreenshotCaptureError.imageRenderingFailed
+            }
+            onAction?(.copied(rendered.image))
+            finish(with: rendered.image)
         }
-        guard copyToPasteboard(image) else {
-            NSSound.beep()
-            return
-        }
-        onAction?(.copied(image))
-        finish(with: image)
     }
 
     private func performPinImage() {
-        guard let image = renderCurrentSelection() else { return }
-        onAction?(.pinRequested(image))
-        finish(with: nil)
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            onAction?(.pinRequested(rendered.image))
+            finish(with: nil)
+        }
     }
 
     private func performRecognizeText() {
-        guard let image = renderCurrentSelection() else { return }
-        onAction?(.ocrRequested(image))
-        finish(with: nil)
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            onAction?(.ocrRequested(rendered.image))
+            finish(with: nil)
+        }
     }
 
     private func performRecognizeQRCode() {
         qrDetectionTask?.cancel()
         qrDetectionTask = nil
-        guard let image = renderCurrentSelection() else { return }
-        onAction?(.qrCodeRequested(image))
-        finish(with: nil)
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            onAction?(.qrCodeRequested(rendered.image))
+            finish(with: nil)
+        }
     }
 
     private func performScrollCapture() {
-        guard let image = renderCurrentSelection() else { return }
-        onAction?(.scrollCaptureRequestedInSelection(image, selectionRect))
-        finish(with: nil)
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            onAction?(.scrollCaptureRequestedInSelection(rendered.image, selectionRect))
+            finish(with: nil)
+        }
     }
 
     private func focusCanvas() {
@@ -1977,6 +1908,7 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         actionAfterCapture = action
         guard captureTask == nil, let captureSelection else { return }
 
+        onSelectionInteractionChanged?(false)
         canvasPanel.orderOut(nil)
         toolbarPanel.orderOut(nil)
         captureTask = Task { @MainActor [weak self] in
@@ -2017,24 +1949,64 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
     private func showEditorPanels() {
         canvasPanel.orderFrontRegardless()
         toolbarPanel.orderFrontRegardless()
+        onSelectionInteractionChanged?(selectedTool == .select)
         focusCanvas()
     }
 
-    private func copyToPasteboard(_ image: NSImage) -> Bool {
-        writeScreenshotImageToPasteboard(image)
+    private func makeCurrentRenderWork() throws -> ScreenshotAnnotationRenderWork {
+        canvas.commitInlineTextEditing()
+        let baseImage: NSImage
+        if let renderSelection {
+            baseImage = try renderSelection(selectionRect)
+        } else {
+            baseImage = annotationDocument.baseImage
+        }
+        return screenshotRenderWork(baseImage: baseImage, document: annotationDocument)
     }
 
-    private func renderCurrentSelection() -> NSImage? {
-        canvas.commitInlineTextEditing()
+    private func startOutputOperation(
+        showsErrorAlert: Bool = false,
+        _ operation: @escaping @MainActor (ScreenshotRenderedImage) async throws -> Void
+    ) {
+        guard !didComplete else { return }
+        let work: ScreenshotAnnotationRenderWork
         do {
-            return try screenshotRenderedInlineSelection(
-                selectionRect: selectionRect,
-                renderSelection: renderSelection,
-                document: annotationDocument
-            )
+            work = try makeCurrentRenderWork()
         } catch {
-            NSSound.beep()
-            return nil
+            if showsErrorAlert {
+                presentSaveError(error)
+            } else {
+                NSSound.beep()
+            }
+            return
+        }
+
+        outputTask?.cancel()
+        let generation = UUID()
+        outputGeneration = generation
+        outputTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if outputGeneration == generation {
+                    outputGeneration = nil
+                    outputTask = nil
+                }
+            }
+            do {
+                let rendered = try await ScreenshotAnnotationRenderWorker.shared.render(work)
+                try Task.checkCancellation()
+                guard !didComplete, outputGeneration == generation else { return }
+                try await operation(rendered)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !didComplete, outputGeneration == generation else { return }
+                if showsErrorAlert {
+                    presentSaveError(error)
+                } else {
+                    NSSound.beep()
+                }
+            }
         }
     }
 
@@ -2085,6 +2057,9 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
         didComplete = true
         captureTask?.cancel()
         captureTask = nil
+        outputTask?.cancel()
+        outputTask = nil
+        outputGeneration = nil
         actionAfterCapture = nil
         qrDetectionTask?.cancel()
         qrDetectionTask = nil
@@ -2116,15 +2091,6 @@ private final class ScreenshotInlineEditorSession: NSObject, NSWindowDelegate {
             toolbarPanel.close()
         }
         completion(image, selectionRect)
-    }
-
-    private static func writePNG(_ image: NSImage, to url: URL) throws {
-        guard let tiff = image.tiffRepresentation,
-              let representation = NSBitmapImageRep(data: tiff),
-              let data = representation.representation(using: .png, properties: [:]) else {
-            throw ScreenshotCaptureError.imageRenderingFailed
-        }
-        try data.write(to: url, options: .atomic)
     }
 
     private static func filenameTimestamp() -> String {
@@ -2184,80 +2150,6 @@ private final class ScreenshotStyleOptionButton: NSButton {
 }
 
 @MainActor
-private final class ScreenshotToolMenuButton: NSButton {
-    let tools: [ScreenshotAnnotationTool]
-    private let symbols: [ScreenshotAnnotationTool: String]
-
-    var selectedTool: ScreenshotAnnotationTool {
-        didSet { updateSymbol() }
-    }
-
-    init(
-        tools: [ScreenshotAnnotationTool],
-        symbols: [ScreenshotAnnotationTool: String],
-        selectedTool: ScreenshotAnnotationTool
-    ) {
-        self.tools = tools
-        self.symbols = symbols
-        self.selectedTool = selectedTool
-        super.init(frame: .zero)
-        title = ""
-        imagePosition = .imageOnly
-        isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = 10
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.075).cgColor
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.055).cgColor
-        updateSymbol()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateSymbol()
-    }
-
-    private func updateSymbol() {
-        guard let symbolName = symbols[selectedTool],
-              let primary = NSImage(
-                systemSymbolName: symbolName,
-                accessibilityDescription: selectedTool.title
-              ),
-              let chevron = NSImage(
-                systemSymbolName: "chevron.down",
-                accessibilityDescription: nil
-              ) else {
-            image = nil
-            return
-        }
-
-        let composed = NSImage(size: CGSize(width: 36, height: 22), flipped: false) { rect in
-            primary.draw(
-                in: CGRect(x: rect.minX, y: rect.minY + 1, width: 20, height: 20),
-                from: .zero,
-                operation: .sourceOver,
-                fraction: 1
-            )
-            chevron.draw(
-                in: CGRect(x: rect.maxX - 9, y: rect.midY - 4, width: 9, height: 8),
-                from: .zero,
-                operation: .sourceOver,
-                fraction: 1
-            )
-            return true
-        }
-        composed.isTemplate = true
-        image = composed
-        setAccessibilityValue(selectedTool.title)
-    }
-}
-
-@MainActor
 private final class ScreenshotColorSwatchButton: NSButton {
     let swatchColor: NSColor
 
@@ -2298,6 +2190,33 @@ private final class ScreenshotColorSwatchButton: NSButton {
     }
 }
 
+enum ScreenshotEditorWindowLayout {
+    static let styleMask: NSWindow.StyleMask = [
+        .titled,
+        .closable,
+        .miniaturizable,
+        .resizable,
+    ]
+
+    /// Keep the complete title bar, annotation controls and bottom actions
+    /// inside the current display. `contentRect` excludes the system title bar,
+    /// so the controls can never be drawn underneath it.
+    static func contentSize(for visibleFrame: CGRect) -> CGSize {
+        CGSize(
+            width: min(1_180, max(720, visibleFrame.width - 48)),
+            height: min(720, max(500, visibleFrame.height - 96))
+        )
+    }
+
+    static func minimumSize(for visibleFrame: CGRect) -> CGSize {
+        let contentSize = contentSize(for: visibleFrame)
+        return CGSize(
+            width: min(920, contentSize.width),
+            height: min(600, contentSize.height)
+        )
+    }
+}
+
 @MainActor
 private final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelegate {
     private let annotationDocument: ScreenshotAnnotationDocument
@@ -2311,6 +2230,8 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
     private let colorWell = NSColorWell()
     private let widthSlider = NSSlider(value: 3, minValue: 1, maxValue: 12, target: nil, action: nil)
     private var didComplete = false
+    private var outputTask: Task<Void, Never>?
+    private var outputGeneration: UUID?
 
     init(
         image: NSImage,
@@ -2328,14 +2249,17 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
             action: nil
         )
 
+        let visibleFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? CGRect(x: 0, y: 0, width: 1_280, height: 800)
+        let contentSize = ScreenshotEditorWindowLayout.contentSize(for: visibleFrame)
         let window = NSWindow(
-            contentRect: CGRect(x: 0, y: 0, width: 1180, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            contentRect: CGRect(origin: .zero, size: contentSize),
+            styleMask: ScreenshotEditorWindowLayout.styleMask,
             backing: .buffered,
             defer: false
         )
         window.title = L10n.tr("截图编辑")
-        window.minSize = CGSize(width: 920, height: 600)
+        window.minSize = ScreenshotEditorWindowLayout.minimumSize(for: visibleFrame)
         window.isReleasedWhenClosed = false
         super.init(window: window)
 
@@ -2504,50 +2428,60 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
     }
 
     @objc private func pinImage() {
-        guard let image = renderedImageCommittingText() else { return }
-        onAction?(.pinRequested(image))
+        startOutputOperation { [weak self] rendered in
+            self?.onAction?(.pinRequested(rendered.image))
+        }
     }
 
     @objc private func recognizeText() {
-        guard let image = renderedImageCommittingText() else { return }
-        onAction?(.ocrRequested(image))
+        startOutputOperation { [weak self] rendered in
+            self?.onAction?(.ocrRequested(rendered.image))
+        }
     }
 
     @objc private func recognizeQRCode() {
-        guard let image = renderedImageCommittingText() else { return }
-        onAction?(.qrCodeRequested(image))
+        startOutputOperation { [weak self] rendered in
+            self?.onAction?(.qrCodeRequested(rendered.image))
+        }
     }
 
     @objc private func startScrollCapture() {
-        guard let image = renderedImageCommittingText() else { return }
-        onAction?(.scrollCaptureRequested(image))
-        // The editor must leave the captured desktop before the scrolling
-        // session starts, otherwise its own window contaminates every frame.
-        finish(with: nil)
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            onAction?(.scrollCaptureRequested(rendered.image))
+            // The editor must leave the captured desktop before the scrolling
+            // session starts, otherwise its own window contaminates every frame.
+            finish(with: nil)
+        }
     }
 
     @objc private func copyImage() {
-        guard let image = renderedImageCommittingText() else { return }
-        guard writeScreenshotImageToPasteboard(image) else {
-            NSSound.beep()
-            return
+        startOutputOperation { [weak self] rendered in
+            guard let self else { return }
+            let payloads = try await ScreenshotImageEncodingWorker.shared
+                .encodeClipboardPayloads(from: rendered.cgImage)
+            guard writeScreenshotPayloadsToPasteboard(payloads) else {
+                throw ScreenshotCaptureError.imageRenderingFailed
+            }
+            onAction?(.copied(rendered.image))
         }
-        onAction?(.copied(image))
     }
 
     @objc private func saveImage() {
-        guard let window, let image = renderedImageCommittingText() else { return }
+        guard let window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "PEEK_\(Self.filenameTimestamp()).png"
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try Self.writePNG(image, to: url)
-                self?.onAction?(.saved(image, url))
-                self?.finish(with: nil)
-            } catch {
-                self?.presentSaveError(error)
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.startOutputOperation(showsErrorAlert: true) { [weak self] rendered in
+                guard let self else { return }
+                try await ScreenshotImageEncodingWorker.shared.writePNG(
+                    rendered.cgImage,
+                    to: url
+                )
+                onAction?(.saved(rendered.image, url))
+                finish(with: nil)
             }
         }
     }
@@ -2557,16 +2491,52 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
     }
 
     @objc private func doneButtonPressed() {
-        guard let image = renderedImageCommittingText() else {
-            NSSound.beep()
-            return
+        startOutputOperation { [weak self] rendered in
+            self?.finish(with: rendered.image)
         }
-        finish(with: image)
     }
 
-    private func renderedImageCommittingText() -> NSImage? {
+    private func makeCurrentRenderWork() -> ScreenshotAnnotationRenderWork {
         canvas.commitInlineTextEditing()
-        return annotationDocument.renderedImage()
+        return screenshotRenderWork(
+            baseImage: annotationDocument.baseImage,
+            document: annotationDocument
+        )
+    }
+
+    private func startOutputOperation(
+        showsErrorAlert: Bool = false,
+        _ operation: @escaping @MainActor (ScreenshotRenderedImage) async throws -> Void
+    ) {
+        guard !didComplete else { return }
+        let work = makeCurrentRenderWork()
+        outputTask?.cancel()
+        let generation = UUID()
+        outputGeneration = generation
+        outputTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if outputGeneration == generation {
+                    outputGeneration = nil
+                    outputTask = nil
+                }
+            }
+            do {
+                let rendered = try await ScreenshotAnnotationRenderWorker.shared.render(work)
+                try Task.checkCancellation()
+                guard !didComplete, outputGeneration == generation else { return }
+                try await operation(rendered)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !didComplete, outputGeneration == generation else { return }
+                if showsErrorAlert {
+                    presentSaveError(error)
+                } else {
+                    NSSound.beep()
+                }
+            }
+        }
     }
 
     private func applyStyle() {
@@ -2592,6 +2562,9 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
     private func finish(with image: NSImage?, closeWindow: Bool = true) {
         guard !didComplete else { return }
         didComplete = true
+        outputTask?.cancel()
+        outputTask = nil
+        outputGeneration = nil
         annotationDocument.onChange = nil
         canvas.onTextRequested = nil
         if closeWindow {
@@ -2599,15 +2572,6 @@ private final class ScreenshotEditorWindowController: NSWindowController, NSWind
             window?.close()
         }
         completion(image)
-    }
-
-    private static func writePNG(_ image: NSImage, to url: URL) throws {
-        guard let tiff = image.tiffRepresentation,
-              let representation = NSBitmapImageRep(data: tiff),
-              let data = representation.representation(using: .png, properties: [:]) else {
-            throw ScreenshotCaptureError.imageRenderingFailed
-        }
-        try data.write(to: url, options: .atomic)
     }
 
     private static func filenameTimestamp() -> String {

@@ -268,6 +268,50 @@ enum TranslationCloudError: LocalizedError {
     }
 }
 
+enum TranslationCloudRequestBuilder {
+    private static let googleTranslationV2URL = URL(
+        string: "https://translation.googleapis.com/language/translate/v2"
+    )!
+
+    /// Builds the Cloud Translation Basic (v2) request without placing credentials in the URL.
+    /// Keeping the API key in a request header prevents it from leaking through URL logs/history.
+    static func googleTranslationV2(
+        text: String,
+        sourceIdentifier: String?,
+        targetIdentifier: String,
+        apiKey: String
+    ) throws -> URLRequest {
+        let normalizedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedAPIKey.isEmpty else {
+            throw TranslationCloudError.invalidConfiguration
+        }
+        guard let target = TranslationCloudLanguageMapper.code(
+            for: targetIdentifier,
+            provider: .google,
+            isSource: false
+        ) else {
+            throw TranslationCloudError.unsupportedTarget
+        }
+
+        var request = URLRequest(url: googleTranslationV2URL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 12
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue(normalizedAPIKey, forHTTPHeaderField: "x-goog-api-key")
+
+        var body: [String: Any] = ["q": text, "target": target, "format": "text"]
+        if let source = TranslationCloudLanguageMapper.code(
+            for: sourceIdentifier,
+            provider: .google,
+            isSource: true
+        ) {
+            body["source"] = source
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+}
+
 actor TranslationCloudClient {
     static let shared = TranslationCloudClient()
 
@@ -343,26 +387,12 @@ actor TranslationCloudClient {
         targetIdentifier: String,
         configuration: TranslationCloudConfiguration
     ) async throws -> String {
-        guard let target = TranslationCloudLanguageMapper.code(
-            for: targetIdentifier,
-            provider: .google,
-            isSource: false
-        ) else { throw TranslationCloudError.unsupportedTarget }
-        var components = URLComponents(string: "https://translation.googleapis.com/language/translate/v2")!
-        components.queryItems = [URLQueryItem(name: "key", value: configuration.secret)]
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 12
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        var body: [String: Any] = ["q": text, "target": target, "format": "text"]
-        if let source = TranslationCloudLanguageMapper.code(
-            for: sourceIdentifier,
-            provider: .google,
-            isSource: true
-        ) {
-            body["source"] = source
-        }
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let request = try TranslationCloudRequestBuilder.googleTranslationV2(
+            text: text,
+            sourceIdentifier: sourceIdentifier,
+            targetIdentifier: targetIdentifier,
+            apiKey: configuration.secret
+        )
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response)

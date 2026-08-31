@@ -9,6 +9,7 @@ enum ScreenshotCaptureError: LocalizedError {
     case screenRecordingPermissionRequiresRestart
     case noAvailableDisplays
     case displayCaptureFailed(CGDirectDisplayID)
+    case preparationTimedOut
     case overlayPresentationFailed
     case selectionTimedOut
     case emptySelection
@@ -26,6 +27,8 @@ enum ScreenshotCaptureError: LocalizedError {
             return L10n.tr("没有检测到可截图的显示器")
         case let .displayCaptureFailed(displayID):
             return L10n.tr("无法读取显示器画面（Display %u）", displayID)
+        case .preparationTimedOut:
+            return L10n.tr("截图准备超时，已自动恢复，请重试")
         case .overlayPresentationFailed:
             return L10n.tr("截图选区界面未能显示，请重试")
         case .selectionTimedOut:

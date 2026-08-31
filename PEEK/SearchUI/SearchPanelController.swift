@@ -232,9 +232,6 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
             return
         }
 
-        let settingsWasVisible = NSApp.windows.contains {
-            PEEKSettingsWindowPresenter.isSettingsWindow($0) && $0.isVisible
-        }
         let (panel, viewModel) = ensurePanel(
             provider: provider,
             actionHandler: actionHandler
@@ -246,18 +243,6 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
         FileSearchIndexRuntime.shared.setSearchPanelActive(true)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        guard !settingsWasVisible else { return }
-        [0.0, 0.08, 0.2, 0.5].forEach { delay in
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                NSApp.windows
-                    .filter {
-                        PEEKSettingsWindowPresenter.isSettingsWindow($0)
-                            && $0.isVisible
-                    }
-                    .forEach { $0.orderOut(nil) }
-                panel.makeKeyAndOrderFront(nil)
-            }
-        }
     }
 
     func toggle(
@@ -275,6 +260,20 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
         FileSearchIndexRuntime.shared.setSearchPanelActive(false)
         viewModel?.pauseForPanel()
         panel?.orderOut(nil)
+    }
+
+    /// Dismisses the reusable search panel synchronously, then runs the next
+    /// action on the following main event-loop turn. Screen capture callers use
+    /// this instead of guessing how long AppKit needs with a fixed sleep.
+    func closeThenPerform(_ action: @escaping @MainActor () -> Void) {
+        close()
+        DispatchQueue.main.async { [weak self] in
+            if self?.panel?.isVisible == true {
+                self?.close()
+            }
+            guard self?.panel?.isVisible != true else { return }
+            action()
+        }
     }
 
     func windowWillClose(_ notification: Notification) {

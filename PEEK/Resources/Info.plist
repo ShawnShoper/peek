@@ -28,6 +28,8 @@
 	<true/>
 	<key>LSMultipleInstancesProhibited</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSScreenCaptureUsageDescription</key>

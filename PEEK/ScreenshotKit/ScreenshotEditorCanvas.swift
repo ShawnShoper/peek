@@ -151,35 +151,54 @@ private final class ScreenshotInlineTextEditorView: NSView, NSTextViewDelegate {
 func makeScreenshotFourWayMoveCursorImage() -> NSImage {
     let size = CGSize(width: 24, height: 24)
     let image = NSImage(size: size, flipped: false) { _ in
-        let path = NSBezierPath()
-        path.lineCapStyle = .round
-        path.lineJoinStyle = .round
+        let arrows = NSBezierPath()
+        arrows.lineJoinStyle = .round
 
-        path.move(to: CGPoint(x: 12, y: 3))
-        path.line(to: CGPoint(x: 12, y: 21))
-        path.move(to: CGPoint(x: 3, y: 12))
-        path.line(to: CGPoint(x: 21, y: 12))
+        // A single continuous silhouette matches the compact move cursor used
+        // by chat screenshot tools: narrow triangular heads, slim shafts, and
+        // a natural center intersection without an added center dot.
+        arrows.move(to: CGPoint(x: 12, y: 1))
+        arrows.line(to: CGPoint(x: 8.2, y: 5.4))
+        arrows.line(to: CGPoint(x: 10.6, y: 5.4))
+        arrows.line(to: CGPoint(x: 10.6, y: 10.6))
+        arrows.line(to: CGPoint(x: 5.4, y: 10.6))
+        arrows.line(to: CGPoint(x: 5.4, y: 8.2))
+        arrows.line(to: CGPoint(x: 1, y: 12))
+        arrows.line(to: CGPoint(x: 5.4, y: 15.8))
+        arrows.line(to: CGPoint(x: 5.4, y: 13.4))
+        arrows.line(to: CGPoint(x: 10.6, y: 13.4))
+        arrows.line(to: CGPoint(x: 10.6, y: 18.6))
+        arrows.line(to: CGPoint(x: 8.2, y: 18.6))
+        arrows.line(to: CGPoint(x: 12, y: 23))
+        arrows.line(to: CGPoint(x: 15.8, y: 18.6))
+        arrows.line(to: CGPoint(x: 13.4, y: 18.6))
+        arrows.line(to: CGPoint(x: 13.4, y: 13.4))
+        arrows.line(to: CGPoint(x: 18.6, y: 13.4))
+        arrows.line(to: CGPoint(x: 18.6, y: 15.8))
+        arrows.line(to: CGPoint(x: 23, y: 12))
+        arrows.line(to: CGPoint(x: 18.6, y: 8.2))
+        arrows.line(to: CGPoint(x: 18.6, y: 10.6))
+        arrows.line(to: CGPoint(x: 13.4, y: 10.6))
+        arrows.line(to: CGPoint(x: 13.4, y: 5.4))
+        arrows.line(to: CGPoint(x: 15.8, y: 5.4))
+        arrows.close()
 
-        path.move(to: CGPoint(x: 8, y: 7))
-        path.line(to: CGPoint(x: 12, y: 3))
-        path.line(to: CGPoint(x: 16, y: 7))
-        path.move(to: CGPoint(x: 8, y: 17))
-        path.line(to: CGPoint(x: 12, y: 21))
-        path.line(to: CGPoint(x: 16, y: 17))
-        path.move(to: CGPoint(x: 7, y: 8))
-        path.line(to: CGPoint(x: 3, y: 12))
-        path.line(to: CGPoint(x: 7, y: 16))
-        path.move(to: CGPoint(x: 17, y: 8))
-        path.line(to: CGPoint(x: 21, y: 12))
-        path.line(to: CGPoint(x: 17, y: 16))
-
-        NSColor.white.setStroke()
-        path.lineWidth = 5
-        path.stroke()
-
-        NSColor.black.setStroke()
-        path.lineWidth = 2
-        path.stroke()
+        // A 1.2-pixel, zero-offset white shadow keeps the black cursor visible
+        // on dark captures without turning it into a thick outlined glyph.
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.white.withAlphaComponent(0.78)
+        shadow.shadowBlurRadius = 1.2
+        shadow.shadowOffset = .zero
+        shadow.set()
+        NSColor.black.withAlphaComponent(0.96).setFill()
+        arrows.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        // Keep only a sub-pixel neutral edge for antialiasing; unlike the old
+        // cursor this does not create a thick white border.
+        NSColor(calibratedWhite: 0.34, alpha: 0.6).setStroke()
+        arrows.lineWidth = 0.6
+        arrows.stroke()
         return true
     }
     image.isTemplate = false
@@ -355,6 +374,11 @@ final class ScreenshotEditorCanvas: NSView {
         case stroke(tool: ScreenshotAnnotationTool, points: [CGPoint])
         case move(index: Int, original: ScreenshotAnnotation, start: CGPoint, current: CGPoint)
         case moveSelection(start: CGPoint, current: CGPoint)
+        case resizeSelection(
+            handle: ScreenshotResizeHandle,
+            start: CGPoint,
+            current: CGPoint
+        )
     }
 
     let document: ScreenshotAnnotationDocument
@@ -385,6 +409,9 @@ final class ScreenshotEditorCanvas: NSView {
     var onSelectionMoveBegan: (() -> Void)?
     var onSelectionMoveChanged: ((CGSize) -> Void)?
     var onSelectionMoveEnded: ((CGSize) -> Void)?
+    var onSelectionResizeBegan: ((ScreenshotResizeHandle) -> Void)?
+    var onSelectionResizeChanged: ((ScreenshotResizeHandle, CGSize) -> Void)?
+    var onSelectionResizeEnded: ((ScreenshotResizeHandle, CGSize) -> Void)?
     var onZoomChanged: ((CGFloat) -> Void)?
     var drawsBaseImage = true {
         didSet {
@@ -443,6 +470,69 @@ final class ScreenshotEditorCanvas: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     override func resetCursorRects() {
+        if tool == .select {
+            addCursorRect(bounds, cursor: Self.fourWayMoveCursor)
+            let radius: CGFloat = 9
+            let cornerSize = radius * 2
+            let horizontalLength = max(0, bounds.width - cornerSize * 2)
+            let verticalLength = max(0, bounds.height - cornerSize * 2)
+
+            let cursorRects: [(ScreenshotResizeHandle, CGRect)] = [
+                (.north, CGRect(
+                    x: cornerSize,
+                    y: max(0, bounds.maxY - radius),
+                    width: horizontalLength,
+                    height: radius
+                )),
+                (.south, CGRect(
+                    x: cornerSize,
+                    y: bounds.minY,
+                    width: horizontalLength,
+                    height: radius
+                )),
+                (.east, CGRect(
+                    x: max(0, bounds.maxX - radius),
+                    y: cornerSize,
+                    width: radius,
+                    height: verticalLength
+                )),
+                (.west, CGRect(
+                    x: bounds.minX,
+                    y: cornerSize,
+                    width: radius,
+                    height: verticalLength
+                )),
+                (.northWest, CGRect(
+                    x: bounds.minX,
+                    y: max(0, bounds.maxY - cornerSize),
+                    width: cornerSize,
+                    height: cornerSize
+                )),
+                (.northEast, CGRect(
+                    x: max(0, bounds.maxX - cornerSize),
+                    y: max(0, bounds.maxY - cornerSize),
+                    width: cornerSize,
+                    height: cornerSize
+                )),
+                (.southEast, CGRect(
+                    x: max(0, bounds.maxX - cornerSize),
+                    y: bounds.minY,
+                    width: cornerSize,
+                    height: cornerSize
+                )),
+                (.southWest, CGRect(
+                    x: bounds.minX,
+                    y: bounds.minY,
+                    width: cornerSize,
+                    height: cornerSize
+                ))
+            ]
+            for (handle, rect) in cursorRects where !rect.isEmpty {
+                addCursorRect(rect.intersection(bounds), cursor: Self.resizeCursor(for: handle))
+            }
+            return
+        }
+
         let cursor: NSCursor
         switch screenshotEditorCursorKind(for: tool) {
         case .move:
@@ -547,6 +637,26 @@ final class ScreenshotEditorCanvas: NSView {
             onDoubleClick?()
             return
         }
+        if tool == .select {
+            let localPoint = convert(event.locationInWindow, from: nil)
+            if let handle = screenshotSelectionResizeHandle(
+                at: localPoint,
+                in: bounds,
+                hitRadius: 9
+            ) {
+                selectedAnnotationIndex = nil
+                let location = NSEvent.mouseLocation
+                interaction = .resizeSelection(
+                    handle: handle,
+                    start: location,
+                    current: location
+                )
+                Self.resizeCursor(for: handle).set()
+                onSelectionResizeBegan?(handle)
+                needsDisplay = true
+                return
+            }
+        }
         guard let point = imagePoint(for: event.locationInWindow, clamp: false) else {
             selectedAnnotationIndex = nil
             needsDisplay = true
@@ -597,6 +707,20 @@ final class ScreenshotEditorCanvas: NSView {
             )
             return
         }
+        if case let .resizeSelection(handle, start, _) = interaction {
+            let current = NSEvent.mouseLocation
+            interaction = .resizeSelection(
+                handle: handle,
+                start: start,
+                current: current
+            )
+            Self.resizeCursor(for: handle).set()
+            onSelectionResizeChanged?(
+                handle,
+                CGSize(width: current.x - start.x, height: current.y - start.y)
+            )
+            return
+        }
         guard let point = imagePoint(for: event.locationInWindow, clamp: true),
               let interaction else {
             return
@@ -621,6 +745,8 @@ final class ScreenshotEditorCanvas: NSView {
             )
         case .moveSelection:
             break
+        case .resizeSelection:
+            break
         }
         needsDisplay = true
     }
@@ -636,6 +762,16 @@ final class ScreenshotEditorCanvas: NSView {
             )
             return
         }
+        if case let .resizeSelection(handle, start, _) = interaction {
+            let current = NSEvent.mouseLocation
+            self.interaction = nil
+            onSelectionResizeEnded?(
+                handle,
+                CGSize(width: current.x - start.x, height: current.y - start.y)
+            )
+            window?.invalidateCursorRects(for: self)
+            return
+        }
 
         switch interaction {
         case .shape, .stroke:
@@ -649,6 +785,8 @@ final class ScreenshotEditorCanvas: NSView {
                 document.replace(at: index, with: original.translated(by: delta))
             }
         case .moveSelection:
+            break
+        case .resizeSelection:
             break
         }
         self.interaction = nil
@@ -958,6 +1096,8 @@ final class ScreenshotEditorCanvas: NSView {
             )
         case .moveSelection:
             return nil
+        case .resizeSelection:
+            return nil
         }
     }
 
@@ -991,4 +1131,21 @@ final class ScreenshotEditorCanvas: NSView {
             hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2)
         )
     }()
+
+    private static let resizeCursors: [ScreenshotResizeHandle: NSCursor] = {
+        Dictionary(uniqueKeysWithValues: ScreenshotResizeHandle.allCases.map { handle in
+            let image = makeScreenshotResizeCursorImage(handle: handle)
+            return (
+                handle,
+                NSCursor(
+                    image: image,
+                    hotSpot: CGPoint(x: image.size.width / 2, y: image.size.height / 2)
+                )
+            )
+        })
+    }()
+
+    private static func resizeCursor(for handle: ScreenshotResizeHandle) -> NSCursor {
+        resizeCursors[handle] ?? fourWayMoveCursor
+    }
 }

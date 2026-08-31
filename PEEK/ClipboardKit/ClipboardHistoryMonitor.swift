@@ -1,0 +1,662 @@
+import AppKit
+import Combine
+import Foundation
+import ImageIO
+
+struct ClipboardIgnoredApplication: Codable, Equatable, Identifiable, Sendable {
+    let bundleIdentifier: String
+    let displayName: String
+
+    var id: String { bundleIdentifier }
+}
+
+enum ClipboardHistoryPreferenceKey {
+    static let enabled = "clipboard.history.enabled"
+    static let ignoredApplications = "clipboard.history.ignoredApplications"
+}
+
+/// Immutable pasteboard data used by the parser. Keeping parsing independent of
+/// the live system pasteboard makes it deterministic and lets the serial capture
+/// worker release provider-owned objects as soon as one snapshot is complete.
+struct ClipboardHistoryPasteboardItemSnapshot: Sendable {
+    private let values: [String: Data]
+
+    init(values: [String: Data]) {
+        self.values = values
+    }
+
+    init(item: NSPasteboardItem, types: [NSPasteboard.PasteboardType]) {
+        var values: [String: Data] = [:]
+        for type in types where item.types.contains(type) {
+            if type == .string || type == .fileURL,
+               let string = item.string(forType: type),
+               let data = string.data(using: .utf8) {
+                values[type.rawValue] = data
+            } else if let data = item.data(forType: type) {
+                values[type.rawValue] = data
+            }
+        }
+        self.values = values
+    }
+
+    func data(forType type: NSPasteboard.PasteboardType) -> Data? {
+        values[type.rawValue]
+    }
+
+    func string(forType type: NSPasteboard.PasteboardType) -> String? {
+        data(forType: type).flatMap { String(data: $0, encoding: .utf8) }
+    }
+}
+
+/// AppKit does not annotate NSPasteboard as Sendable, although the system
+/// pasteboard server supports reads from background threads. Access is confined
+/// to the monitor's single capture task, and changeCount is checked again before
+/// the result is committed so a concurrent paste cannot be mislabelled.
+private final class ClipboardHistoryPasteboardReference: @unchecked Sendable {
+    let value: NSPasteboard
+
+    init(_ value: NSPasteboard) {
+        self.value = value
+    }
+}
+
+private struct ClipboardHistoryCaptureRequest: Sendable {
+    let changeCount: Int
+    let sourceApplicationName: String?
+    let sourceBundleIdentifier: String?
+}
+
+/// Watches `NSPasteboard.changeCount` at low frequency. The main actor only
+/// observes ownership changes; provider reads, parsing, image metadata, payload
+/// encoding, file I/O, and SQLite work all run outside the interface actor.
+@MainActor
+final class ClipboardHistoryMonitor: ObservableObject {
+    static let shared = ClipboardHistoryMonitor()
+
+    @Published private(set) var records: [ClipboardHistoryRecord] = []
+    @Published private(set) var storageSummary = ClipboardHistoryStorageSummary(
+        itemCount: 0,
+        byteCount: 0
+    )
+    @Published private(set) var isEnabled: Bool
+    @Published private(set) var ignoredApplications: [ClipboardIgnoredApplication]
+    @Published private(set) var lastErrorMessage: String?
+
+    private let pasteboard: NSPasteboard
+    private let store: ClipboardHistoryStore
+    private let defaults: UserDefaults
+    private var lastObservedChangeCount: Int
+    private var pollingTask: Task<Void, Never>?
+    private var isMonitoringRequested = false
+    private var captureProcessingTask: Task<Void, Never>?
+    private var pendingCaptureRequest: ClipboardHistoryCaptureRequest?
+    private var captureProcessingGeneration = 0
+    private var isClearingHistory = false
+    private var hasLoadedInitialRecords = false
+    private var isReloading = false
+    private var isPanelVisible = false
+
+    init(
+        pasteboard: NSPasteboard = .general,
+        store: ClipboardHistoryStore = .shared,
+        defaults: UserDefaults = .standard
+    ) {
+        self.pasteboard = pasteboard
+        self.store = store
+        self.defaults = defaults
+        lastObservedChangeCount = pasteboard.changeCount
+        isEnabled = defaults.object(forKey: ClipboardHistoryPreferenceKey.enabled) == nil
+            ? false
+            : defaults.bool(forKey: ClipboardHistoryPreferenceKey.enabled)
+        if let data = defaults.data(forKey: ClipboardHistoryPreferenceKey.ignoredApplications),
+           let decoded = try? JSONDecoder().decode(
+               [ClipboardIgnoredApplication].self,
+               from: data
+           ) {
+            ignoredApplications = decoded
+        } else {
+            ignoredApplications = []
+        }
+    }
+
+    var isPolling: Bool { pollingTask != nil }
+
+    func start() {
+        isMonitoringRequested = true
+        lastObservedChangeCount = pasteboard.changeCount
+        // A disabled feature must stay completely dormant at launch. History
+        // metadata is loaded lazily when the user enables recording, opens the
+        // history panel, or displays Settings.
+        if isEnabled {
+            reloadIfNeeded()
+        }
+        startPollingIfNeeded()
+    }
+
+    func stop() {
+        isMonitoringRequested = false
+        stopPolling()
+        invalidateCaptureProcessing()
+    }
+
+    func setEnabled(_ enabled: Bool) {
+        guard isEnabled != enabled else { return }
+        isEnabled = enabled
+        defaults.set(enabled, forKey: ClipboardHistoryPreferenceKey.enabled)
+        lastObservedChangeCount = pasteboard.changeCount
+        lastErrorMessage = nil
+        if enabled {
+            reloadIfNeeded()
+            startPollingIfNeeded()
+        } else {
+            stopPolling()
+            invalidateCaptureProcessing()
+        }
+    }
+
+    /// The hidden panel does not need UI-speed polling. The modest adaptive
+    /// interval reduces wakeups without leaving enough time to miss normal copy
+    /// sequences while PEEK remains in the menu bar.
+    func setPanelVisible(_ visible: Bool) {
+        guard isPanelVisible != visible else { return }
+        isPanelVisible = visible
+        // Apply the visible/hidden interval immediately. If history is disabled,
+        // startPollingIfNeeded keeps the timer fully stopped.
+        stopPolling()
+        startPollingIfNeeded()
+    }
+
+    private func startPollingIfNeeded() {
+        guard isMonitoringRequested, isEnabled, pollingTask == nil else { return }
+        pollingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let interval: UInt64 = self.isPanelVisible
+                    ? 450_000_000
+                    : 850_000_000
+                do {
+                    try await Task.sleep(nanoseconds: interval)
+                    try Task.checkCancellation()
+                } catch {
+                    return
+                }
+                self.pollPasteboardIfNeeded()
+            }
+        }
+    }
+
+    private func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
+    }
+
+    func reloadIfNeeded() {
+        guard !hasLoadedInitialRecords else { return }
+        reload()
+    }
+
+    func reload() {
+        guard !isReloading else { return }
+        isReloading = true
+        Task { [weak self, store] in
+            do {
+                let snapshot = try await store.recordsAndStorageSummary()
+                await MainActor.run {
+                    self?.records = snapshot.records
+                    self?.storageSummary = snapshot.summary
+                    self?.hasLoadedInitialRecords = true
+                    self?.isReloading = false
+                }
+            } catch {
+                await MainActor.run {
+                    self?.lastErrorMessage = error.localizedDescription
+                    self?.isReloading = false
+                }
+            }
+        }
+    }
+
+    func delete(_ record: ClipboardHistoryRecord) {
+        Task { [weak self, store] in
+            do {
+                try await store.delete(record)
+                let snapshot = try await store.recordsAndStorageSummary()
+                await MainActor.run {
+                    self?.records = snapshot.records
+                    self?.storageSummary = snapshot.summary
+                    self?.lastErrorMessage = nil
+                }
+            } catch {
+                await MainActor.run {
+                    self?.lastErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func clear() {
+        Task { @MainActor [weak self] in
+            await self?.clearHistory()
+        }
+    }
+
+    /// Atomically pauses capture, invalidates already-materializing pasteboard
+    /// requests, clears storage, then resumes from the pasteboard's current
+    /// generation. Content copied before or during clear can never be written
+    /// back after the operation completes.
+    func clearHistory() async {
+        guard !isClearingHistory else { return }
+        isClearingHistory = true
+        invalidateCaptureProcessing()
+        defer {
+            lastObservedChangeCount = pasteboard.changeCount
+            isClearingHistory = false
+        }
+        do {
+            try await store.clear()
+            records = []
+            storageSummary = .init(itemCount: 0, byteCount: 0)
+            lastErrorMessage = nil
+        } catch {
+            lastErrorMessage = error.localizedDescription
+        }
+    }
+
+    func payload(for record: ClipboardHistoryRecord) async throws -> ClipboardPayloadEnvelope {
+        try await store.payload(for: record)
+    }
+
+    /// Restores every retained representation, not only the preview text. Rich
+    /// text therefore remains rich when pasted into an editor that supports it.
+    func restore(_ record: ClipboardHistoryRecord) async throws {
+        let payload = try await store.payload(for: record)
+        try write(payload, kind: record.kind)
+    }
+
+    func addIgnoredApplication(at applicationURL: URL) throws {
+        guard let bundle = Bundle(url: applicationURL),
+              let identifier = bundle.bundleIdentifier,
+              !identifier.isEmpty else {
+            throw ClipboardHistoryError.unavailable(L10n.tr("无法读取该应用的 Bundle ID"))
+        }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? applicationURL.deletingPathExtension().lastPathComponent
+        let application = ClipboardIgnoredApplication(
+            bundleIdentifier: identifier,
+            displayName: name
+        )
+        ignoredApplications.removeAll { $0.bundleIdentifier == identifier }
+        ignoredApplications.append(application)
+        ignoredApplications.sort {
+            $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
+        persistIgnoredApplications()
+    }
+
+    func removeIgnoredApplication(_ application: ClipboardIgnoredApplication) {
+        ignoredApplications.removeAll { $0.id == application.id }
+        persistIgnoredApplications()
+    }
+
+    /// Records a pasteboard ownership change without materializing its payload.
+    /// Internal visibility allows deterministic coverage with an isolated test
+    /// pasteboard; production polling still enters through `start()`.
+    func pollPasteboardIfNeeded() {
+        guard isEnabled, !isClearingHistory else { return }
+        let changeCount = pasteboard.changeCount
+        guard changeCount != lastObservedChangeCount else { return }
+        lastObservedChangeCount = changeCount
+
+        let sourceApplication = NSWorkspace.shared.frontmostApplication
+        if let bundleIdentifier = sourceApplication?.bundleIdentifier,
+           ignoredApplications.contains(where: {
+               $0.bundleIdentifier == bundleIdentifier
+           }) {
+            return
+        }
+        pendingCaptureRequest = ClipboardHistoryCaptureRequest(
+            changeCount: changeCount,
+            sourceApplicationName: sourceApplication?.localizedName,
+            sourceBundleIdentifier: sourceApplication?.bundleIdentifier
+        )
+        startCaptureProcessingIfNeeded()
+    }
+
+    private func startCaptureProcessingIfNeeded() {
+        guard captureProcessingTask == nil,
+              pendingCaptureRequest != nil else { return }
+        captureProcessingGeneration += 1
+        let generation = captureProcessingGeneration
+        captureProcessingTask = Task { @MainActor [weak self] in
+            await self?.drainPendingCaptures(generation: generation)
+        }
+    }
+
+    /// Drains at most one payload at a time. If another copy happens while a
+    /// provider is materializing a large value, polling replaces the pending
+    /// request with the newest changeCount and the loop continues immediately.
+    private func drainPendingCaptures(generation: Int) async {
+        let pasteboardReference = ClipboardHistoryPasteboardReference(pasteboard)
+        while !Task.isCancelled,
+              generation == captureProcessingGeneration,
+              let request = pendingCaptureRequest {
+            pendingCaptureRequest = nil
+            let capture = await Self.captureInBackground(
+                from: pasteboardReference,
+                request: request
+            )
+            guard !Task.isCancelled,
+                  generation == captureProcessingGeneration else { return }
+
+            let currentChangeCount = pasteboard.changeCount
+            guard currentChangeCount == request.changeCount else {
+                enqueueCurrentPasteboardChangeIfNeeded()
+                continue
+            }
+            guard let capture else { continue }
+
+            do {
+                _ = try await store.save(capture)
+                let snapshot = try await store.recordsAndStorageSummary()
+                guard !Task.isCancelled,
+                      generation == captureProcessingGeneration else { return }
+                records = snapshot.records
+                storageSummary = snapshot.summary
+                lastErrorMessage = nil
+            } catch {
+                guard !Task.isCancelled,
+                      generation == captureProcessingGeneration else { return }
+                lastErrorMessage = error.localizedDescription
+            }
+
+            // Close the gap between a save completing and the next timer tick.
+            enqueueCurrentPasteboardChangeIfNeeded()
+        }
+
+        guard generation == captureProcessingGeneration else { return }
+        captureProcessingTask = nil
+        enqueueCurrentPasteboardChangeIfNeeded()
+        startCaptureProcessingIfNeeded()
+    }
+
+    private func enqueueCurrentPasteboardChangeIfNeeded() {
+        guard !isClearingHistory else { return }
+        let currentChangeCount = pasteboard.changeCount
+        guard currentChangeCount != lastObservedChangeCount else { return }
+        pollPasteboardIfNeeded()
+    }
+
+    private func invalidateCaptureProcessing() {
+        pendingCaptureRequest = nil
+        captureProcessingGeneration &+= 1
+        captureProcessingTask?.cancel()
+        captureProcessingTask = nil
+    }
+
+    nonisolated private static func captureInBackground(
+        from pasteboard: ClipboardHistoryPasteboardReference,
+        request: ClipboardHistoryCaptureRequest
+    ) async -> ClipboardHistoryCapture? {
+        await Task.detached(priority: .utility) {
+            autoreleasepool {
+                capture(
+                    from: pasteboard.value,
+                    sourceApplicationName: request.sourceApplicationName,
+                    sourceBundleIdentifier: request.sourceBundleIdentifier
+                )
+            }
+        }.value
+    }
+
+    private func write(
+        _ payload: ClipboardPayloadEnvelope,
+        kind: ClipboardHistoryKind
+    ) throws {
+        if !payload.fileURLs.isEmpty {
+            let urls = payload.fileURLs.compactMap(URL.init(string:)) as [NSURL]
+            pasteboard.clearContents()
+            guard !urls.isEmpty, pasteboard.writeObjects(urls) else {
+                throw ClipboardHistoryError.pasteboardWriteFailed
+            }
+            lastObservedChangeCount = pasteboard.changeCount
+            return
+        }
+
+        let representations = payload.representations
+        guard !representations.isEmpty else {
+            throw ClipboardHistoryError.payloadMissing
+        }
+        pasteboard.clearContents()
+        let types = representations.map { NSPasteboard.PasteboardType($0.type) }
+        pasteboard.declareTypes(types, owner: nil)
+        var wroteAny = false
+        for representation in representations {
+            let type = NSPasteboard.PasteboardType(representation.type)
+            wroteAny = pasteboard.setData(representation.data, forType: type) || wroteAny
+        }
+        guard wroteAny else { throw ClipboardHistoryError.pasteboardWriteFailed }
+        lastObservedChangeCount = pasteboard.changeCount
+    }
+
+    private func persistIgnoredApplications() {
+        if let data = try? JSONEncoder().encode(ignoredApplications) {
+            defaults.set(data, forKey: ClipboardHistoryPreferenceKey.ignoredApplications)
+        }
+    }
+
+    /// Converts a pasteboard ownership change into one logical record. A Finder
+    /// multi-selection remains one record and image payloads keep only one
+    /// lossless representation to prevent PNG+TIFF duplication.
+    static func capture(
+        from pasteboard: NSPasteboard,
+        sourceApplication: NSRunningApplication?
+    ) -> ClipboardHistoryCapture? {
+        capture(
+            from: pasteboard,
+            sourceApplicationName: sourceApplication?.localizedName,
+            sourceBundleIdentifier: sourceApplication?.bundleIdentifier
+        )
+    }
+
+    /// Reads only the selected representations. The monitor invokes this from
+    /// its serial utility-priority task so large provider data and rich-text or
+    /// image parsing do not block SwiftUI updates.
+    nonisolated private static func capture(
+        from pasteboard: NSPasteboard,
+        sourceApplicationName: String?,
+        sourceBundleIdentifier: String?
+    ) -> ClipboardHistoryCapture? {
+        let pasteboardItems = pasteboard.pasteboardItems ?? []
+        guard !pasteboardItems.isEmpty else { return nil }
+
+        // Reading every advertised representation can synchronously materialize
+        // large provider-owned payloads on the main actor. Inspect type names
+        // first, then request only the representations used by our parser.
+        let items: [ClipboardHistoryPasteboardItemSnapshot]
+        if pasteboardItems.contains(where: { $0.types.contains(.fileURL) }) {
+            items = pasteboardItems
+                .prefix(ClipboardHistoryLimits.maximumFileURLCount)
+                .map {
+                    ClipboardHistoryPasteboardItemSnapshot(item: $0, types: [.fileURL])
+                }
+        } else {
+            let first = pasteboardItems[0]
+            let requestedTypes: [NSPasteboard.PasteboardType]
+            if first.types.contains(.png) {
+                requestedTypes = [.png]
+            } else if first.types.contains(.tiff) {
+                requestedTypes = [.tiff]
+            } else if first.types.contains(.string)
+                        || first.types.contains(.rtf)
+                        || first.types.contains(.html) {
+                requestedTypes = [.string, .rtf, .html]
+            } else if first.types.contains(.pdf) {
+                requestedTypes = [.pdf]
+            } else {
+                return nil
+            }
+            items = [ClipboardHistoryPasteboardItemSnapshot(
+                item: first,
+                types: requestedTypes
+            )]
+        }
+        return capture(
+            items: items,
+            sourceApplicationName: sourceApplicationName,
+            sourceBundleIdentifier: sourceBundleIdentifier
+        )
+    }
+
+    /// Parses one pasteboard ownership change into one logical history item.
+    nonisolated static func capture(
+        items: [ClipboardHistoryPasteboardItemSnapshot],
+        sourceApplicationName sourceName: String?,
+        sourceBundleIdentifier sourceIdentifier: String?
+    ) -> ClipboardHistoryCapture? {
+        guard !items.isEmpty else { return nil }
+
+        let fileURLs = items
+            .prefix(ClipboardHistoryLimits.maximumFileURLCount)
+            .compactMap { item -> URL? in
+            guard let value = item.string(forType: .fileURL) else { return nil }
+            return URL(string: value)
+        }
+        if !fileURLs.isEmpty {
+            let title = fileURLs.count == 1
+                ? fileURLs[0].lastPathComponent
+                : L10n.tr("%d 个文件", fileURLs.count)
+            let detail = fileURLs.count == 1
+                ? fileURLs[0].deletingLastPathComponent().path
+                : fileURLs.prefix(3).map(\.lastPathComponent).joined(separator: "、")
+            return ClipboardHistoryCapture(
+                kind: .files,
+                title: title,
+                detail: detail,
+                sourceApplicationName: sourceName,
+                sourceBundleIdentifier: sourceIdentifier,
+                payload: ClipboardPayloadEnvelope(
+                    fileURLs: fileURLs.map(\.absoluteString)
+                )
+            )
+        }
+
+        guard let first = items.first else { return nil }
+        if let png = first.data(forType: .png) {
+            return imageCapture(
+                data: png,
+                type: .png,
+                sourceName: sourceName,
+                sourceIdentifier: sourceIdentifier
+            )
+        }
+        if let tiff = first.data(forType: .tiff) {
+            return imageCapture(
+                data: tiff,
+                type: .tiff,
+                sourceName: sourceName,
+                sourceIdentifier: sourceIdentifier
+            )
+        }
+
+        let plainText = first.string(forType: .string)
+        let rtf = first.data(forType: .rtf)
+        let html = first.data(forType: .html)
+        if plainText != nil || rtf != nil || html != nil {
+            let resolvedText = plainText
+                ?? rtf.flatMap {
+                    NSAttributedString(
+                        rtf: $0,
+                        documentAttributes: nil
+                    )?.string
+                }
+                ?? ""
+            let trimmed = resolvedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            var representations: [ClipboardRepresentation] = []
+            if let plainText,
+               let data = plainText.data(using: .utf8) {
+                representations.append(.init(type: NSPasteboard.PasteboardType.string.rawValue, data: data))
+            }
+            if let rtf {
+                representations.append(.init(type: NSPasteboard.PasteboardType.rtf.rawValue, data: rtf))
+            }
+            if let html {
+                representations.append(.init(type: NSPasteboard.PasteboardType.html.rawValue, data: html))
+            }
+            guard !representations.isEmpty else { return nil }
+
+            let isLink = URL(string: trimmed).map {
+                ["http", "https"].contains($0.scheme?.lowercased() ?? "")
+            } ?? false
+            let kind: ClipboardHistoryKind = isLink
+                ? .link
+                : ((rtf != nil || html != nil) ? .richText : .text)
+            return ClipboardHistoryCapture(
+                kind: kind,
+                title: summaryTitle(for: trimmed, fallback: kind.title),
+                detail: L10n.tr("%d 个字符", resolvedText.count),
+                sourceApplicationName: sourceName,
+                sourceBundleIdentifier: sourceIdentifier,
+                payload: ClipboardPayloadEnvelope(representations: representations)
+            )
+        }
+
+        if let pdf = first.data(forType: .pdf) {
+            return ClipboardHistoryCapture(
+                kind: .pdf,
+                title: L10n.tr("PDF 内容"),
+                detail: ByteCountFormatter.string(fromByteCount: Int64(pdf.count), countStyle: .file),
+                sourceApplicationName: sourceName,
+                sourceBundleIdentifier: sourceIdentifier,
+                payload: ClipboardPayloadEnvelope(
+                    representations: [.init(type: NSPasteboard.PasteboardType.pdf.rawValue, data: pdf)]
+                )
+            )
+        }
+        return nil
+    }
+
+    nonisolated private static func imageCapture(
+        data: Data,
+        type: NSPasteboard.PasteboardType,
+        sourceName: String?,
+        sourceIdentifier: String?
+    ) -> ClipboardHistoryCapture {
+        let dimensions: String
+        // Read only ImageIO metadata here. `NSBitmapImageRep` would decode the
+        // complete bitmap on the main actor and make copying a large image feel
+        // like the clipboard panel had frozen.
+        if data.count <= Int(ClipboardHistoryLimits.standard.maximumItemBytes),
+           let source = CGImageSourceCreateWithData(data as CFData, nil),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+               as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? Int,
+           let height = properties[kCGImagePropertyPixelHeight] as? Int {
+            dimensions = "\(width) × \(height)"
+        } else {
+            dimensions = ByteCountFormatter.string(
+                fromByteCount: Int64(data.count),
+                countStyle: .file
+            )
+        }
+        return ClipboardHistoryCapture(
+            kind: .image,
+            title: L10n.tr("图片 %@", dimensions),
+            detail: ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file),
+            sourceApplicationName: sourceName,
+            sourceBundleIdentifier: sourceIdentifier,
+            payload: ClipboardPayloadEnvelope(
+                representations: [.init(type: type.rawValue, data: data)]
+            )
+        )
+    }
+
+    nonisolated private static func summaryTitle(for text: String, fallback: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return fallback }
+        if normalized.count <= 90 { return normalized }
+        return String(normalized.prefix(89)) + "…"
+    }
+}

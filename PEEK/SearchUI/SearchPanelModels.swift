@@ -42,9 +42,14 @@ struct SearchPanelMetadataField: Identifiable, Hashable, Sendable {
     }
 }
 
-enum SearchPanelLaunchBehavior: String, Hashable, Sendable {
+enum SearchPanelLaunchBehavior: Hashable, Sendable {
     case fileURL
     case peekTranslation
+    case peekClipboardHistory
+    case peekRegionCapture
+    case peekScrollingCapture
+    case peekOCRCapture
+    case peekSettings(PEEKSettingsDestination)
 
     var isPEEKBuiltInTool: Bool { self != .fileURL }
 }
@@ -93,6 +98,7 @@ struct SearchPanelItem: Identifiable, Hashable, Sendable {
 }
 
 enum SearchPanelResultGroupKind: String, Identifiable, Sendable {
+    case tools
     case applications
     case documents
 
@@ -100,6 +106,7 @@ enum SearchPanelResultGroupKind: String, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .tools: return L10n.tr("PEEK 工具")
         case .applications: return L10n.tr("应用结果")
         case .documents: return L10n.tr("文档结果")
         }

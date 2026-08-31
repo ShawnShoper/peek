@@ -40,6 +40,89 @@ struct ScrollOverlapEstimator: Sendable {
         next: ScrollPixelBuffer,
         preferredOverlapPixels: Int? = nil
     ) throws -> ScrollOverlapAnalysis {
+        let standard = try analyzeStandard(
+            previous: previous,
+            next: next,
+            preferredOverlapPixels: preferredOverlapPixels
+        )
+        let shortMovement = try analyzeShortMovement(
+            previous: previous,
+            next: next,
+            preferredOverlapPixels: preferredOverlapPixels,
+            temporallyStable: false
+        )
+
+        switch (standard.estimate, shortMovement.estimate) {
+        case (let standardEstimate?, let shortEstimate?):
+            let standardDifference = standardEstimate.normalizedDifference ?? 1
+            let shortDifference = shortEstimate.normalizedDifference ?? 1
+            let differenceGap = abs(standardDifference - shortDifference)
+            let overlapGap = abs(
+                standardEstimate.overlapPixels - shortEstimate.overlapPixels
+            )
+
+            // Two similarly strong matches in spatially distant ranges are
+            // ambiguous (a common repeated-pattern failure). Do not silently
+            // prefer the newly added short-movement path.
+            guard overlapGap <= 2
+                    || differenceGap >= configuration.minimumDistinctCandidateDifference else {
+                let preferred = shortDifference < standardDifference
+                    ? shortMovement.diagnostics
+                    : standard.diagnostics
+                return ScrollOverlapAnalysis(
+                    estimate: nil,
+                    diagnostics: ScrollOverlapDiagnostics(
+                        failureReason: .ambiguous,
+                        candidateOverlapPixels: preferred.candidateOverlapPixels,
+                        normalizedDifference: preferred.normalizedDifference,
+                        texture: preferred.texture,
+                        confidence: preferred.confidence,
+                        evaluatedCandidateCount: standard.diagnostics.evaluatedCandidateCount
+                            + shortMovement.diagnostics.evaluatedCandidateCount,
+                        preferredOverlapPixels: preferredOverlapPixels
+                    )
+                )
+            }
+            return shortDifference < standardDifference ? shortMovement : standard
+
+        case (_?, nil):
+            return standard
+        case (nil, _?):
+            return shortMovement
+        case (nil, nil):
+            // Prefer the diagnostic that contains the stronger concrete
+            // candidate. This makes the recovery UI useful without changing
+            // the fail-closed behavior.
+            let standardDifference = standard.diagnostics.normalizedDifference ?? 1
+            let shortDifference = shortMovement.diagnostics.normalizedDifference ?? 1
+            return shortDifference < standardDifference ? shortMovement : standard
+        }
+    }
+
+    /// Re-evaluates a non-identical short tail only after the session captured
+    /// exactly the same candidate twice at the same scroll position. Unlike the
+    /// normal fast sampler, this path examines every row so one or two text
+    /// lines on a mostly blank final viewport are not missed. The overlap still
+    /// has to be unique, improve on the unshifted image and pass the session's
+    /// moving-region validation before it can enter the stitched result.
+    func analyzeStableShortMovement(
+        previous: ScrollPixelBuffer,
+        next: ScrollPixelBuffer,
+        preferredOverlapPixels: Int? = nil
+    ) throws -> ScrollOverlapAnalysis {
+        try analyzeShortMovement(
+            previous: previous,
+            next: next,
+            preferredOverlapPixels: preferredOverlapPixels,
+            temporallyStable: true
+        )
+    }
+
+    private func analyzeStandard(
+        previous: ScrollPixelBuffer,
+        next: ScrollPixelBuffer,
+        preferredOverlapPixels: Int? = nil
+    ) throws -> ScrollOverlapAnalysis {
         try requireCompatible(previous, next)
         try configuration.validate()
 
@@ -212,6 +295,178 @@ struct ScrollOverlapEstimator: Sendable {
         )
     }
 
+    /// Exhaustively searches the narrow range above the normal 95% overlap
+    /// ceiling. A target application is free to consume less of a wheel event
+    /// than requested, especially near the end of a document. These candidates
+    /// therefore use stricter gates than ordinary scrolling:
+    ///
+    /// - the shifted match must beat the original screen position;
+    /// - the candidate must be unique and sufficiently textured;
+    /// - its absolute difference and confidence must pass tighter limits.
+    ///
+    /// Exact duplicates cannot pass the improvement gate, so this path can run
+    /// before the session decides that a nearly unchanged frame is a duplicate.
+    private func analyzeShortMovement(
+        previous: ScrollPixelBuffer,
+        next: ScrollPixelBuffer,
+        preferredOverlapPixels: Int?,
+        temporallyStable: Bool
+    ) throws -> ScrollOverlapAnalysis {
+        try requireCompatible(previous, next)
+        try configuration.validate()
+
+        let height = previous.height
+        guard height >= 3 else {
+            return failure(
+                reason: .noCandidate,
+                candidate: nil,
+                evaluatedCandidateCount: 0,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        let standardMaximumOverlap = min(
+            height - 1,
+            Int((Double(height) * configuration.maximumOverlapRatio).rounded())
+        )
+        let maximumShortDisplacement = max(
+            1,
+            Int((Double(height) * configuration.maximumShortMovementRatio).rounded(.up))
+        )
+        let minimumOverlap = max(
+            standardMaximumOverlap + 1,
+            height - maximumShortDisplacement
+        )
+        let maximumOverlap = height - 1
+        guard minimumOverlap <= maximumOverlap else {
+            return failure(
+                reason: .noCandidate,
+                candidate: nil,
+                evaluatedCandidateCount: 0,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        var evaluated: [Int: CandidateScore] = [:]
+        evaluated.reserveCapacity(maximumOverlap - minimumOverlap + 1)
+        for overlap in minimumOverlap ... maximumOverlap {
+            evaluated[overlap] = score(
+                previous: previous,
+                next: next,
+                overlap: overlap,
+                exhaustiveRows: temporallyStable
+            )
+        }
+
+        let minimumStableInformativeSamples = max(
+            8,
+            min(24, previous.width / 24)
+        )
+        let texturedCandidates = evaluated.filter {
+            if temporallyStable {
+                return $0.value.informativeSampleCount >= minimumStableInformativeSamples
+            }
+            return $0.value.texture >= configuration.minimumTexture
+        }
+        guard let best = texturedCandidates.min(by: candidateSort) else {
+            return failure(
+                reason: .insufficientTexture,
+                candidate: evaluated.min(by: candidateSort),
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        let bestOverlap = best.key
+        let bestScore = best.value
+        let candidate = (key: bestOverlap, value: bestScore)
+        let secondBestDifference = texturedCandidates
+            .filter { abs($0.key - bestOverlap) > 2 }
+            .map(\.value.difference)
+            .min()
+        let resolvedConfidence = confidence(
+            score: bestScore,
+            secondBestDifference: secondBestDifference
+        )
+
+        guard bestScore.difference
+                <= configuration.shortMovementMaximumNormalizedDifference else {
+            return failure(
+                reason: .differenceTooHigh,
+                candidate: candidate,
+                confidence: resolvedConfidence,
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        let samePositionScore = score(
+            previous: previous,
+            next: next,
+            overlap: height,
+            exhaustiveRows: temporallyStable
+        )
+        let minimumImprovement = temporallyStable
+            ? min(configuration.shortMovementMinimumImprovement, 0.00025)
+            : configuration.shortMovementMinimumImprovement
+        guard samePositionScore.difference - bestScore.difference
+                >= minimumImprovement else {
+            return failure(
+                reason: .noCandidate,
+                candidate: candidate,
+                confidence: resolvedConfidence,
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        let minimumDistinctDifference = temporallyStable
+            ? min(configuration.minimumDistinctCandidateDifference, 0.001)
+            : configuration.minimumDistinctCandidateDifference
+        if let secondBestDifference,
+           secondBestDifference - bestScore.difference < minimumDistinctDifference {
+            return failure(
+                reason: .ambiguous,
+                candidate: candidate,
+                confidence: resolvedConfidence,
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+        let minimumConfidence = temporallyStable
+            ? min(configuration.shortMovementMinimumConfidence, 0.60)
+            : configuration.shortMovementMinimumConfidence
+        guard resolvedConfidence >= minimumConfidence else {
+            return failure(
+                reason: .ambiguous,
+                candidate: candidate,
+                confidence: resolvedConfidence,
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        }
+
+        let estimate = ScrollOverlapEstimate(
+            overlapPixels: bestOverlap,
+            newContentPixels: height - bestOverlap,
+            normalizedDifference: bestScore.difference,
+            confidence: resolvedConfidence,
+            usedFallback: true
+        )
+        return ScrollOverlapAnalysis(
+            estimate: estimate,
+            diagnostics: ScrollOverlapDiagnostics(
+                failureReason: nil,
+                candidateOverlapPixels: bestOverlap,
+                normalizedDifference: bestScore.difference,
+                texture: bestScore.texture,
+                confidence: resolvedConfidence,
+                evaluatedCandidateCount: evaluated.count,
+                preferredOverlapPixels: preferredOverlapPixels
+            )
+        )
+    }
+
     private func failure(
         reason: ScrollOverlapFailureReason,
         candidate: (key: Int, value: CandidateScore)?,
@@ -275,21 +530,29 @@ struct ScrollOverlapEstimator: Sendable {
     private func score(
         previous: ScrollPixelBuffer,
         next: ScrollPixelBuffer,
-        overlap: Int
+        overlap: Int,
+        exhaustiveRows: Bool = false
     ) -> CandidateScore {
         let inset = min(max(1, previous.width / 25), max(1, previous.width / 4))
         let firstX = min(inset, previous.width - 2)
         let lastX = max(firstX, previous.width - inset - 2)
         let availableColumns = max(1, lastX - firstX + 1)
-        let columnCount = min(configuration.sampleColumns, availableColumns)
-        let rowCount = min(configuration.sampleRows, overlap)
+        let requestedColumns = exhaustiveRows
+            ? min(configuration.sampleColumns, 48)
+            : configuration.sampleColumns
+        let columnCount = min(requestedColumns, availableColumns)
+        let rowCount = exhaustiveRows ? overlap : min(configuration.sampleRows, overlap)
         let previousStartY = previous.height - overlap
 
         return previous.rgbaData.withUnsafeBytes { previousRawBuffer in
             next.rgbaData.withUnsafeBytes { nextRawBuffer in
                 guard let previousBase = previousRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self),
                       let nextBase = nextRawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return CandidateScore(difference: 1, texture: 0)
+                    return CandidateScore(
+                        difference: 1,
+                        texture: 0,
+                        informativeSampleCount: 0
+                    )
                 }
 
                 var globalDifferences: [Double] = []
@@ -386,7 +649,11 @@ struct ScrollOverlapEstimator: Sendable {
                 }
 
                 guard sampleCount > 0 else {
-                    return CandidateScore(difference: 1, texture: 0)
+                    return CandidateScore(
+                        difference: 1,
+                        texture: 0,
+                        informativeSampleCount: 0
+                    )
                 }
                 let globalDifference = mean(globalDifferences)
                 let difference: Double
@@ -407,7 +674,8 @@ struct ScrollOverlapEstimator: Sendable {
                 }
                 return CandidateScore(
                     difference: difference,
-                    texture: textureTotal / Double(sampleCount)
+                    texture: textureTotal / Double(sampleCount),
+                    informativeSampleCount: informativeDifferences.count
                 )
             }
         }
@@ -427,6 +695,7 @@ private func candidateSort(
 private struct CandidateScore {
     let difference: Double
     let texture: Double
+    let informativeSampleCount: Int
 }
 
 private func sampledIndex(_ index: Int, count: Int, extent: Int) -> Int {
