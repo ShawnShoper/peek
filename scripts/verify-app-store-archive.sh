@@ -25,7 +25,7 @@ build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/
 
 test "$bundle_id" = "com.shawnshoper.peek"
 test "$short_version" = "0.3.0"
-test "$build_version" = "3"
+test "$build_version" = "4"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app_path/Contents/Info.plist")" = "13.0"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$app_path/Contents/Info.plist")" = "public.app-category.productivity"
 test "$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$app_path/Contents/Info.plist")" = "false"

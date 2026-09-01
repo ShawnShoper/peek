@@ -299,6 +299,7 @@ struct SettingsView: View {
         }
         .onChange(of: routeCoordinator.revision) { _ in
             applyPendingSettingsRoute()
+            presentPendingOnboardingIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshPermissionState()

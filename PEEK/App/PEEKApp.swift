@@ -438,7 +438,7 @@ final class PEEKAppDelegate: NSObject, NSApplicationDelegate {
             }
         } else if ProcessInfo.processInfo.arguments.contains("--show-translation-panel-for-ui-testing") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                TranslationPanelController.shared.show(previewMode: true)
+                TranslationPanelController.shared.show()
             }
         } else if ProcessInfo.processInfo.arguments.contains("--show-onboarding-for-ui-testing") {
             PEEKFirstLaunchOnboardingPolicy.requestReplay()

@@ -1,6 +1,18 @@
 {
   "sourceLanguage" : "zh-Hans",
   "strings" : {
+    "PEEK 是菜单栏应用，全部功能入口如下" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK is a menu-bar app. Every feature is listed below." } } }
+    },
+    "功能总览与使用指南…" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Feature Overview and Guide…" } } }
+    },
+    "翻译（本地翻译需要 macOS 15，云服务可选）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Translation (on-device requires macOS 15; cloud is optional)" } } }
+    },
+    "剪贴板历史（已关闭，可在设置中启用）" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Clipboard History (off; enable in Settings)" } } }
+    },
     "%d 个字符" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%d characters" } } }
     },
@@ -555,9 +567,6 @@
     },
     "%@ 配置已保存" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@ configuration saved" } } }
-    },
-    "PEEK 帮助你查找、截取并理解 Mac 上的内容。" : {
-      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK helps you find, capture, and understand what is on your Mac." } } }
     },
     "API Key" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "API Key" } } }

@@ -5,8 +5,21 @@ struct MenuBarMenuView: View {
     let searchProvider: FileSearchPanelProvider
     @EnvironmentObject private var screenshotService: ScreenshotService
     @ObservedObject private var hotKeyManager = ScreenshotGlobalHotKeyManager.shared
+    @ObservedObject private var clipboardHistoryMonitor = ClipboardHistoryMonitor.shared
 
     var body: some View {
+        Text(L10n.tr("PEEK 是菜单栏应用，全部功能入口如下"))
+
+        Button {
+            PEEKFirstLaunchOnboardingPolicy.requestReplay()
+            PEEKSettingsRouteCoordinator.shared.request(.general)
+            PEEKSettingsWindowPresenter.show()
+        } label: {
+            Label(L10n.tr("功能总览与使用指南…"), systemImage: "sparkles")
+        }
+
+        Divider()
+
         Button {
             SearchPanelController.shared.toggle(provider: searchProvider)
         } label: {
@@ -124,9 +137,14 @@ struct MenuBarMenuView: View {
         let action = ScreenshotGlobalHotKeyAction.translation
         let shortcut = hotKeyManager.shortcut(for: action)?.displayString
         let state = hotKeyManager.registrationStates[action]
-        let title = state == .systemConflict
-            ? L10n.tr("翻译（快捷键冲突，可在设置中修改）")
-            : L10n.tr("翻译")
+        let title: String
+        if state == .systemConflict {
+            title = L10n.tr("翻译（快捷键冲突，可在设置中修改）")
+        } else if #available(macOS 15.0, *) {
+            title = L10n.tr("翻译")
+        } else {
+            title = L10n.tr("翻译（本地翻译需要 macOS 15，云服务可选）")
+        }
         return Label(
             shortcut.map { "\(title)    \($0)" } ?? title,
             systemImage: "character.book.closed"
@@ -137,9 +155,14 @@ struct MenuBarMenuView: View {
         let action = ScreenshotGlobalHotKeyAction.clipboardHistory
         let shortcut = hotKeyManager.shortcut(for: action)?.displayString
         let state = hotKeyManager.registrationStates[action]
-        let title = state == .systemConflict
-            ? L10n.tr("剪贴板历史（快捷键冲突，可在设置中修改）")
-            : L10n.tr("剪贴板历史")
+        let title: String
+        if state == .systemConflict {
+            title = L10n.tr("剪贴板历史（快捷键冲突，可在设置中修改）")
+        } else if !clipboardHistoryMonitor.isEnabled {
+            title = L10n.tr("剪贴板历史（已关闭，可在设置中启用）")
+        } else {
+            title = L10n.tr("剪贴板历史")
+        }
         return Label(
             shortcut.map { "\(title)    \($0)" } ?? title,
             systemImage: "clipboard"

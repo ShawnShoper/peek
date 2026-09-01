@@ -2,17 +2,19 @@ import XCTest
 @testable import PEEK
 
 final class OnboardingGuideTests: XCTestCase {
-    func testFreshInstallQueuesGuideExactlyOnceWithoutCompletingIt() throws {
+    func testReleaseQueuesGuideExactlyOnceWithoutCompletingIt() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         XCTAssertTrue(
             PEEKFirstLaunchOnboardingPolicy.shouldAutomaticallyPresent(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )
         XCTAssertTrue(
             PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )
@@ -35,26 +37,51 @@ final class OnboardingGuideTests: XCTestCase {
         )
         XCTAssertFalse(
             PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )
     }
 
-    func testExistingInstallIsMigratedWithoutAutomaticGuide() throws {
+    func testExistingInstallStillReceivesFeatureOverviewForNewRelease() throws {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         // Presence of this legacy first-launch marker identifies an upgrade.
         defaults.set(true, forKey: PEEKPreferenceKey.didPresentDocumentAuthorization)
 
-        XCTAssertFalse(
+        XCTAssertTrue(
             PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )
         XCTAssertTrue(defaults.bool(forKey: PEEKPreferenceKey.didAutoPresentOnboarding))
-        XCTAssertFalse(defaults.bool(forKey: PEEKPreferenceKey.openOnboarding))
+        XCTAssertTrue(defaults.bool(forKey: PEEKPreferenceKey.openOnboarding))
         XCTAssertFalse(defaults.bool(forKey: PEEKPreferenceKey.didCompleteOnboarding))
+    }
+
+    func testCompletedGuidePresentsAgainOnlyForANewerRelease() throws {
+        let (defaults, suiteName) = try makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+            releaseIdentifier: "0.3.0 (4)",
+            defaults: defaults
+        ))
+        PEEKFirstLaunchOnboardingPolicy.markCompleted(
+            releaseIdentifier: "0.3.0 (4)",
+            defaults: defaults
+        )
+
+        XCTAssertFalse(PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+            releaseIdentifier: "0.3.0 (4)",
+            defaults: defaults
+        ))
+        XCTAssertTrue(PEEKFirstLaunchOnboardingPolicy.preparePresentationIfNeeded(
+            releaseIdentifier: "0.3.0 (5)",
+            defaults: defaults
+        ))
     }
 
     func testFinishingOrSkippingCompletesGuideAndClearsPendingRoute() throws {
@@ -62,13 +89,17 @@ final class OnboardingGuideTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         PEEKFirstLaunchOnboardingPolicy.requestReplay(defaults: defaults)
-        PEEKFirstLaunchOnboardingPolicy.markCompleted(defaults: defaults)
+        PEEKFirstLaunchOnboardingPolicy.markCompleted(
+            releaseIdentifier: "0.3.0 (4)",
+            defaults: defaults
+        )
 
         XCTAssertTrue(defaults.bool(forKey: PEEKPreferenceKey.didCompleteOnboarding))
         XCTAssertTrue(defaults.bool(forKey: PEEKPreferenceKey.didAutoPresentOnboarding))
         XCTAssertFalse(defaults.bool(forKey: PEEKPreferenceKey.openOnboarding))
         XCTAssertFalse(
             PEEKFirstLaunchOnboardingPolicy.shouldAutomaticallyPresent(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )
@@ -78,7 +109,10 @@ final class OnboardingGuideTests: XCTestCase {
         let (defaults, suiteName) = try makeDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        PEEKFirstLaunchOnboardingPolicy.markCompleted(defaults: defaults)
+        PEEKFirstLaunchOnboardingPolicy.markCompleted(
+            releaseIdentifier: "0.3.0 (4)",
+            defaults: defaults
+        )
         PEEKFirstLaunchOnboardingPolicy.requestReplay(defaults: defaults)
 
         XCTAssertTrue(
@@ -89,6 +123,7 @@ final class OnboardingGuideTests: XCTestCase {
         XCTAssertTrue(defaults.bool(forKey: PEEKPreferenceKey.didCompleteOnboarding))
         XCTAssertFalse(
             PEEKFirstLaunchOnboardingPolicy.shouldAutomaticallyPresent(
+                releaseIdentifier: "0.3.0 (4)",
                 defaults: defaults
             )
         )

@@ -77,7 +77,6 @@ final class TranslationPanelController: NSObject, NSWindowDelegate {
     static let shared = TranslationPanelController()
 
     private var panel: TranslationFloatingPanel?
-    private var previewMode = false
     private var closeGeneration = 0
     private var isClosing = false
 
@@ -101,13 +100,9 @@ final class TranslationPanelController: NSObject, NSWindowDelegate {
         NotificationCenter.default.removeObserver(self)
     }
 
-    func show(previewMode: Bool = false) {
-        if self.previewMode != previewMode {
-            destroy()
-        }
+    func show() {
         closeGeneration &+= 1
         isClosing = false
-        self.previewMode = previewMode
         let panel = ensurePanel()
         panel.setFrame(targetFrame(), display: false)
         panel.alphaValue = 0
@@ -238,7 +233,6 @@ final class TranslationPanelController: NSObject, NSWindowDelegate {
         )
         panel.contentViewController = TranslationPanelContentViewController(
             rootView: TranslationPanelRootView(
-                previewMode: previewMode,
                 onClose: { [weak self] in self?.close() }
             )
         )

@@ -4,13 +4,12 @@ import SwiftUI
 @preconcurrency import Translation
 
 struct TranslationPanelRootView: View {
-    let previewMode: Bool
     let onClose: () -> Void
 
     var body: some View {
         Group {
             if #available(macOS 15.0, *) {
-                TranslationPanelAvailableView(previewMode: previewMode, onClose: onClose)
+                TranslationPanelAvailableView(onClose: onClose)
             } else {
                 TranslationPanelUnavailableView(onClose: onClose)
             }
@@ -32,27 +31,21 @@ private struct TranslationPanelAvailableView: View {
         let targetIdentifier: String
     }
 
-    private static let previewSource =
-        "PEEK helps you find, capture, and understand what is on your Mac."
-    private static let previewTranslation = L10n.tr(
-        "PEEK 帮助你查找、截取并理解 Mac 上的内容。"
-    )
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.shawnshoper.peek",
         category: "Translation"
     )
 
-    let previewMode: Bool
     let onClose: () -> Void
 
-    @State private var sourceText: String
-    @State private var translatedText: String
+    @State private var sourceText = ""
+    @State private var translatedText = ""
     @State private var sourceChoice = TranslationLanguageChoice.automatic
     @State private var targetChoice = TranslationLanguageChoice.system
     @State private var supportedLanguages: [TranslationLanguageDescriptor] = []
     @State private var detectedSourceIdentifier: String?
     @State private var resolvedTargetIdentifier: String?
-    @State private var phase: TranslationPanelPhase
+    @State private var phase = TranslationPanelPhase.idle
     @State private var configuration: TranslationSession.Configuration?
     @State private var pendingRequest: PendingRequest?
     @State private var translationGeneration = 0
@@ -72,16 +65,6 @@ private struct TranslationPanelAvailableView: View {
     @State private var languageAvailability = LanguageAvailability()
     @ObservedObject private var hotKeyManager = ScreenshotGlobalHotKeyManager.shared
     @ObservedObject private var cloudSettings = TranslationCloudSettings.shared
-
-    init(previewMode: Bool, onClose: @escaping () -> Void) {
-        self.previewMode = previewMode
-        self.onClose = onClose
-        _sourceText = State(initialValue: previewMode ? Self.previewSource : "")
-        _translatedText = State(initialValue: previewMode ? Self.previewTranslation : "")
-        _detectedSourceIdentifier = State(initialValue: previewMode ? "en" : nil)
-        _resolvedTargetIdentifier = State(initialValue: previewMode ? "zh-Hans" : nil)
-        _phase = State(initialValue: previewMode ? .translated : .idle)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -675,7 +658,6 @@ private struct TranslationPanelAvailableView: View {
     }
 
     private var statusText: String {
-        if previewMode { return L10n.tr("在本机完成翻译") }
         switch phase {
         case .waiting: return L10n.tr("等待输入完成…")
         case .translating: return L10n.tr("正在翻译…")
@@ -724,7 +706,6 @@ private struct TranslationPanelAvailableView: View {
     }
 
     private func submitTranslation(textOverride: String? = nil) {
-        guard !previewMode else { return }
         let submittedText = TranslationRequestPolicy.normalizedText(textOverride ?? sourceText)
         if submittedText != sourceText {
             sourceText = submittedText
@@ -767,7 +748,6 @@ private struct TranslationPanelAvailableView: View {
     }
 
     private func markTranslationStale() {
-        guard !previewMode else { return }
         cancelActiveRequest(preserveConfiguration: true, resetPhase: nil)
         translatedText = ""
         if !TranslationRequestPolicy.shouldTranslate(sourceText) {

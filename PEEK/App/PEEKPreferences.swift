@@ -23,6 +23,7 @@ enum PEEKPreferenceKey {
     static let didAutoPresentOnboarding = "onboarding.autoPresented"
     static let didCompleteOnboarding = "onboarding.completed"
     static let openOnboarding = "settings.openOnboarding"
+    static let lastAutoPresentedOnboardingRelease = "onboarding.lastAutoPresentedRelease"
 }
 
 enum SearchWindowScreenPreference: String, CaseIterable, Identifiable, Sendable {
@@ -366,42 +367,52 @@ enum FileSearchFirstLaunchAuthorizationPromptPolicy {
     }
 }
 
-/// Coordinates the one-time first-launch guide.
+/// Coordinates the feature overview shown once for every shipped build.
 ///
-/// Automatic presentation and completion are deliberately separate. Scheduling
-/// the guide is recorded immediately so closing Settings midway never turns into
-/// a launch-time nag. Finishing or skipping records the user's explicit outcome.
-/// The transient flag lets the app delegate open Settings before `SettingsView`
-/// exists, while `requestReplay` can show the same guide again without changing
-/// either first-launch marker.
+/// A menu-bar-only app must keep its complete feature set discoverable even when
+/// an upgrade reuses an existing sandbox. The release marker makes presentation
+/// exactly-once per build for every user; it is not tied to account, locale,
+/// network, time, or review state. The transient flag lets the app delegate open
+/// Settings before `SettingsView` exists, while `requestReplay` remains available
+/// from the always-visible menu and Settings.
 enum PEEKFirstLaunchOnboardingPolicy {
-    static func shouldAutomaticallyPresent(defaults: UserDefaults = .standard) -> Bool {
-        !defaults.bool(forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
-            && !defaults.bool(forKey: PEEKPreferenceKey.didCompleteOnboarding)
+    static func releaseIdentifier(bundle: Bundle = .main) -> String {
+        let version = bundle.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "unknown"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+            ?? "unknown"
+        return "\(version) (\(build))"
+    }
+
+    static func shouldAutomaticallyPresent(
+        releaseIdentifier: String = releaseIdentifier(),
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        defaults.string(
+            forKey: PEEKPreferenceKey.lastAutoPresentedOnboardingRelease
+        ) != releaseIdentifier
     }
 
     @discardableResult
     static func preparePresentationIfNeeded(
+        releaseIdentifier: String = releaseIdentifier(),
         defaults: UserDefaults = .standard
     ) -> Bool {
-        guard shouldAutomaticallyPresent(defaults: defaults) else {
-            defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
-            return false
-        }
-
-        // `didPresentDocumentAuthorization` shipped before onboarding. Its
-        // presence identifies an existing installation, which must not be
-        // treated as a brand-new install after an upgrade.
-        if defaults.object(
-            forKey: PEEKPreferenceKey.didPresentDocumentAuthorization
-        ) != nil {
-            defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
+        guard shouldAutomaticallyPresent(
+            releaseIdentifier: releaseIdentifier,
+            defaults: defaults
+        ) else {
             defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
             return false
         }
 
         // Persist before opening Settings so an interrupted presentation is
-        // still exactly-once across relaunches.
+        // still exactly-once for this build across relaunches.
+        defaults.set(
+            releaseIdentifier,
+            forKey: PEEKPreferenceKey.lastAutoPresentedOnboardingRelease
+        )
         defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
         defaults.set(true, forKey: PEEKPreferenceKey.openOnboarding)
         // Do not consume the legacy document-authorization marker here. The
@@ -425,7 +436,14 @@ enum PEEKFirstLaunchOnboardingPolicy {
         return true
     }
 
-    static func markCompleted(defaults: UserDefaults = .standard) {
+    static func markCompleted(
+        releaseIdentifier: String = releaseIdentifier(),
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(
+            releaseIdentifier,
+            forKey: PEEKPreferenceKey.lastAutoPresentedOnboardingRelease
+        )
         defaults.set(true, forKey: PEEKPreferenceKey.didAutoPresentOnboarding)
         defaults.set(true, forKey: PEEKPreferenceKey.didCompleteOnboarding)
         defaults.removeObject(forKey: PEEKPreferenceKey.openOnboarding)
