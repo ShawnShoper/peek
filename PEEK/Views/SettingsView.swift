@@ -127,7 +127,8 @@ struct SettingsView: View {
     }
 
     private enum DocumentDirectoryIndexState: Equatable {
-        case completed(Int)
+        case completed(Int, skipped: Int)
+        case limited
         case updating
         case coveredByParent
         case waiting
@@ -135,7 +136,9 @@ struct SettingsView: View {
 
         var title: String {
             switch self {
-            case .completed: return L10n.tr("已完成")
+            case let .completed(_, skipped):
+                return skipped > 0 ? L10n.tr("已有索引 · %d 处受限", skipped) : L10n.tr("已有索引可用")
+            case .limited: return L10n.tr("未完整收录")
             case .updating: return L10n.tr("更新中")
             case .coveredByParent: return L10n.tr("随上级目录")
             case .waiting: return L10n.tr("等待更新")
@@ -145,8 +148,9 @@ struct SettingsView: View {
 
         var color: Color {
             switch self {
-            case .completed: return .green
+            case let .completed(_, skipped): return skipped > 0 ? .orange : .green
             case .updating: return .blue
+            case .limited: return .orange
             case .coveredByParent: return .secondary
             case .waiting: return .orange
             case .notIndexed: return .secondary
@@ -494,21 +498,21 @@ struct SettingsView: View {
 
     private var searchConnectionFooter: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 Circle()
                     .fill(indexConnectionColor)
                     .frame(width: 9, height: 9)
-                Text(indexProgressStatusText)
-                    .font(.caption)
-                    .lineLimit(2)
-                Spacer(minLength: 0)
-                if let percentage = indexProgressPercentageText {
-                    Text(percentage)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(indexProgressStatusText).font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let percentage = indexProgressPercentageText {
+                        Text(percentage).font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
-            if isIndexUpdating {
+            if initialIndexProgress != nil || isIndexUpdating {
                 indexProgressBar
                     .frame(maxWidth: .infinity)
             }
@@ -1787,9 +1791,12 @@ struct SettingsView: View {
         let path = URL(fileURLWithPath: root.lastKnownPath, isDirectory: true)
             .standardizedFileURL.path
         guard let status = rootIndexStatuses[path] else { return .waiting }
+        if let current = initialIndexProgress?.currentRootName,
+           current == path || current.hasPrefix(path + "/") { return .updating }
         if status.isIndexing { return .updating }
+        if status.reachedLimit { return .limited }
         if status.hasCommittedGeneration {
-            return .completed(status.indexedItemCount)
+            return .completed(status.indexedItemCount, skipped: status.inaccessibleLocationCount)
         }
         return .waiting
     }
@@ -1870,6 +1877,7 @@ struct SettingsView: View {
                             .frame(width: 7, height: 7)
                         Text(directory.indexState.title)
                             .foregroundStyle(.secondary)
+                            .help(directory.indexState.title)
                     }
                 }
             }
@@ -2086,6 +2094,8 @@ struct SettingsView: View {
             switch result {
             case let .completed(_, _, items):
                 fileIndexMessage = L10n.tr("%@ 索引完成：%d 项", title, items)
+            case .limited:
+                fileIndexMessage = L10n.tr("索引达到容量上限，部分项目未收录；请在设置中缩小搜索范围或添加排除目录。")
             case .noChanges:
                 fileIndexMessage = L10n.tr("%@ 没有可索引内容", title)
             case .deferred:
@@ -2119,6 +2129,7 @@ struct SettingsView: View {
     }
 
     private var indexConnectionText: String {
+        if indexMetadata?.phase == .limited { return L10n.tr("索引容量已满") }
         if isIndexUpdating { return L10n.tr("索引更新中") }
         switch indexMetadata?.phase {
         case .ready: return L10n.tr("已连接")
@@ -2130,6 +2141,7 @@ struct SettingsView: View {
     }
 
     private var indexConnectionColor: Color {
+        if indexMetadata?.phase == .limited { return .orange }
         if isIndexUpdating { return .blue }
         switch indexMetadata?.phase {
         case .ready: return .green
@@ -2140,14 +2152,14 @@ struct SettingsView: View {
     }
 
     private var isIndexUpdating: Bool {
-        initialIndexProgress != nil
+        (initialIndexProgress != nil && initialIndexProgress?.phase != .failed && initialIndexProgress?.phase != .limited)
             || (indexMetadata?.indexingRootCount ?? 0) > 0
             || rootIndexStatuses.values.contains(where: \.isIndexing)
     }
 
     private var indexProgressStatusText: String {
         if let initialIndexProgress {
-            return initialIndexProgress.localizedStatusMessage
+            return initialIndexProgress.localizedCompactTitle
         }
         if isIndexUpdating {
             return L10n.tr("正在后台更新索引；已完成的内容仍可搜索")
@@ -2157,15 +2169,7 @@ struct SettingsView: View {
 
     private var indexProgressPercentageText: String? {
         guard let progress = initialIndexProgress else { return nil }
-        if progress.discoveredItems > 0 {
-            return L10n.tr(
-                "已索引 %lld / 已发现 %lld",
-                Int64(progress.indexedItems),
-                Int64(progress.discoveredItems)
-            )
-        }
-        guard let fraction = progress.fractionCompleted else { return nil }
-        return "\(Int((fraction * 100).rounded()))%"
+        return progress.localizedCompactDetail
     }
 
     private var indexLogLines: [String] {
@@ -2187,24 +2191,30 @@ struct SettingsView: View {
             return lines
         }
         if let metadata = indexMetadata {
-            return [
+            var lines = [
                 L10n.tr("当前没有正在运行的索引任务。"),
                 L10n.tr("已提交：%lld 项", Int64(metadata.statistics.indexedItems)),
                 L10n.tr("上次完成：%@", formattedLastIndexDate)
             ]
+            lines += rootIndexStatuses.values
+                .filter { $0.inaccessibleLocationCount > 0 }
+                .sorted { $0.rootPath < $1.rootPath }
+                .map {
+                    L10n.tr(
+                        "%@：跳过 %d 处受限位置；已有索引保留",
+                        displayPath($0.rootPath), $0.inaccessibleLocationCount
+                    )
+                }
+            return lines
         }
         return [L10n.tr("正在读取索引状态")]
     }
 
     @ViewBuilder
     private var indexProgressBar: some View {
-        if let fraction = initialIndexProgress?.fractionCompleted {
-            ProgressView(value: fraction, total: 1)
-                .progressViewStyle(.linear)
-        } else {
-            ProgressView()
-                .progressViewStyle(.linear)
-        }
+        FileSearchProgressTrack(value: initialIndexProgress?.progressBarValue ?? 0,
+            isWarning: indexMetadata?.phase == .limited || initialIndexProgress?.phase == .failed)
+            .help(initialIndexProgress?.localizedStatusMessage ?? indexConnectionText)
     }
 
     private var indexPhaseIcon: String {

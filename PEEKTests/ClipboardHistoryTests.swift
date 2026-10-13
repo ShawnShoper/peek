@@ -262,6 +262,31 @@ final class ClipboardHistoryStoreTests: XCTestCase {
 
 @MainActor
 final class ClipboardHistoryCaptureTests: XCTestCase {
+    func testSensitiveMarkersRejectEntirePasteboardOwnershipChange() {
+        for marker in ClipboardHistoryPrivacy.excludedTypes {
+            let pasteboard = NSPasteboard.withUniqueName()
+            defer { pasteboard.releaseGlobally() }
+            let first = NSPasteboardItem()
+            first.setString("synthetic test value", forType: .string)
+            let protected = NSPasteboardItem()
+            protected.setData(Data(), forType: .init(marker))
+            protected.setString("synthetic second value", forType: .string)
+            XCTAssertTrue(pasteboard.writeObjects([first, protected]))
+            XCTAssertNil(ClipboardHistoryMonitor.capture(from: pasteboard, sourceApplication: nil), marker)
+        }
+    }
+
+    func testSensitiveSnapshotCannotBypassLivePasteboardFilter() {
+        for marker in ClipboardHistoryPrivacy.excludedTypes {
+            let protected = ClipboardHistoryPasteboardItemSnapshot(values: [
+                marker: Data(), NSPasteboard.PasteboardType.string.rawValue: Data("synthetic".utf8)
+            ])
+            XCTAssertNil(ClipboardHistoryMonitor.capture(
+                items: [snapshot(type: .fileURL, string: "file:///tmp/example.txt"), protected],
+                sourceApplicationName: nil, sourceBundleIdentifier: nil))
+        }
+    }
+
     func testPlainTextCapturePreservesTextAndMetadata() throws {
         let capture = try XCTUnwrap(
             ClipboardHistoryMonitor.capture(

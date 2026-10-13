@@ -2,6 +2,12 @@ import AppKit
 import Foundation
 @preconcurrency import QuickLookThumbnailing
 
+protocol SearchPanelInitialIndexProgressProviding: Sendable {
+    func snapshot() async -> FileSearchInitialIndexProgressSnapshot?
+}
+
+extension FileSearchInitialIndexProgressTracker: SearchPanelInitialIndexProgressProviding {}
+
 @MainActor
 final class SearchPanelViewModel: ObservableObject {
     @Published var query = "" {
@@ -41,6 +47,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var feedbackMessage: String?
     @Published private(set) var indexStatusMessage: String?
+    @Published private(set) var initialIndexProgress: FileSearchInitialIndexProgressSnapshot?
     @Published private(set) var isPanelActive = false
 
     var onRequestClose: (() -> Void)?
@@ -48,7 +55,10 @@ final class SearchPanelViewModel: ObservableObject {
     private let provider: any SearchPanelProviding
     private let actionHandler: any SearchPanelActionHandling
     private let applicationUsageTracker: any SearchApplicationUsageTracking
+    private let initialIndexProgressProvider: any SearchPanelInitialIndexProgressProviding
+    private let initialIndexProgressPollingIntervalNanoseconds: UInt64
     private var searchTask: Task<Void, Never>?
+    private var initialIndexProgressTask: Task<Void, Never>?
     private var actionTask: Task<Void, Never>?
     private var capabilityTask: Task<Void, Never>?
     private var previewRequest: QLThumbnailGenerator.Request?
@@ -63,7 +73,9 @@ final class SearchPanelViewModel: ObservableObject {
     init(
         provider: any SearchPanelProviding,
         actionHandler: (any SearchPanelActionHandling)? = nil,
-        applicationUsageTracker: any SearchApplicationUsageTracking = SearchApplicationUsageStore.shared
+        applicationUsageTracker: any SearchApplicationUsageTracking = SearchApplicationUsageStore.shared,
+        initialIndexProgressProvider: any SearchPanelInitialIndexProgressProviding = FileSearchInitialIndexProgressTracker.shared,
+        initialIndexProgressPollingIntervalNanoseconds: UInt64 = 250_000_000
     ) {
         let preferences = SearchPanelPreferences.current()
         let initialQuery = preferences.retainsLastQuery
@@ -74,6 +86,11 @@ final class SearchPanelViewModel: ObservableObject {
         self.provider = provider
         self.actionHandler = actionHandler ?? DefaultSearchPanelActionHandler()
         self.applicationUsageTracker = applicationUsageTracker
+        self.initialIndexProgressProvider = initialIndexProgressProvider
+        self.initialIndexProgressPollingIntervalNanoseconds = max(
+            10_000_000,
+            initialIndexProgressPollingIntervalNanoseconds
+        )
         selectedCategory = preferences.defaultCategory
         includesHiddenFiles = preferences.includesHiddenFiles
         query = initialQuery
@@ -81,6 +98,7 @@ final class SearchPanelViewModel: ObservableObject {
 
     deinit {
         searchTask?.cancel()
+        initialIndexProgressTask?.cancel()
         actionTask?.cancel()
         capabilityTask?.cancel()
         previewTask?.cancel()
@@ -115,14 +133,19 @@ final class SearchPanelViewModel: ObservableObject {
             $0.category == .files || $0.category == .folders
         }
         return [
-            SearchPanelResultGroup(kind: .tools, items: tools),
             SearchPanelResultGroup(kind: .applications, items: applications),
+            SearchPanelResultGroup(kind: .tools, items: tools),
             SearchPanelResultGroup(kind: .documents, items: documents)
         ].filter { !$0.items.isEmpty }
     }
 
     var orderedResults: [SearchPanelItem] {
         resultGroups.flatMap(\.items)
+    }
+
+    var visibleActions: [SearchPanelFileAction] {
+        selectedItem?.launchBehavior.isPEEKBuiltInTool == true
+            ? [.open] : SearchPanelFileAction.allCases
     }
 
     var browserHistoryNotice: String? {
@@ -170,6 +193,7 @@ final class SearchPanelViewModel: ObservableObject {
     }
 
     var unavailableActionMessage: String? {
+        guard selectedItem?.launchBehavior.isPEEKBuiltInTool != true else { return nil }
         let actions: [SearchPanelFileAction] = [.moveTo, .airDrop]
         let messages = actions.compactMap { action -> String? in
             let capability = capability(for: action)
@@ -195,6 +219,7 @@ final class SearchPanelViewModel: ObservableObject {
         }
         let wasActive = isPanelActive
         isPanelActive = true
+        startInitialIndexProgressUpdates()
         if selectedItemID == nil {
             selectedItemID = orderedResults.first?.id
         }
@@ -208,6 +233,7 @@ final class SearchPanelViewModel: ObservableObject {
     func pauseForPanel() {
         guard isPanelActive else { return }
         isPanelActive = false
+        stopInitialIndexProgressUpdates()
         persistQueryPreference()
         searchGeneration &+= 1
         searchTask?.cancel()
@@ -231,6 +257,7 @@ final class SearchPanelViewModel: ObservableObject {
 
     func shutdown() {
         isPanelActive = false
+        stopInitialIndexProgressUpdates()
         persistQueryPreference()
         searchGeneration &+= 1
         searchTask?.cancel()
@@ -253,6 +280,41 @@ final class SearchPanelViewModel: ObservableObject {
         actionTask?.cancel()
         actionTask = nil
         isPerformingAction = false
+    }
+
+    private func startInitialIndexProgressUpdates() {
+        initialIndexProgressTask?.cancel()
+        let provider = initialIndexProgressProvider
+        let pollingInterval = initialIndexProgressPollingIntervalNanoseconds
+        initialIndexProgressTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                let progress = await provider.snapshot()
+                guard !Task.isCancelled,
+                      self?.isPanelActive == true else {
+                    return
+                }
+                if let current = self?.initialIndexProgress, let progress {
+                    if !current.hasSamePresentation(as: progress) {
+                        self?.initialIndexProgress = progress
+                    }
+                } else if self?.initialIndexProgress != nil || progress != nil {
+                    self?.initialIndexProgress = progress
+                }
+                do {
+                    try await Task<Never, Never>.sleep(
+                        nanoseconds: pollingInterval
+                    )
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopInitialIndexProgressUpdates() {
+        initialIndexProgressTask?.cancel()
+        initialIndexProgressTask = nil
+        initialIndexProgress = nil
     }
 
     private func persistQueryPreference() {

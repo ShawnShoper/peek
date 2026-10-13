@@ -58,7 +58,8 @@ final class FileSearchPanelProvider: SearchPanelProviding {
                         if !builtInItems.isEmpty {
                             let identifiers = Set(builtInItems.map(\.id))
                             items.removeAll { identifiers.contains($0.id) }
-                            items.insert(contentsOf: builtInItems, at: 0)
+                            let firstDocument = items.firstIndex { $0.category != .applications } ?? items.count
+                            items.insert(contentsOf: builtInItems, at: firstDocument)
                             items = Array(items.prefix(preferences.resultLimit))
                         }
                         continuation.yield(SearchPanelSearchUpdate(

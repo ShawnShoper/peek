@@ -20,6 +20,8 @@ To improve local ranking, PEEK may store how often an app is opened through PEEK
 
 ### Clipboard history
 
+PEEK ignores clipboard content marked as concealed, transient, auto-generated, or from 1Password. This depends on the source app supplying the marker and cannot identify all unmarked sensitive information; exclude sensitive apps when appropriate. Ordinary history is stored in the local sandbox without additional encryption. Updating PEEK does not automatically clear older history; you can clear it in Settings.
+
 When Clipboard History is enabled, PEEK observes system clipboard changes in the background and stores supported text, rich text, images, web addresses, and file or folder references inside the app sandbox. History keeps at most 100 items and is protected by a 256 MB local storage limit. The oldest items are removed when either limit is reached, and individual items larger than 32 MB are not saved.
 
 Clipboard history is not uploaded as synchronization data or stored in Keychain. You can pause recording, exclude chosen apps, delete an item, or clear all history at any time. PEEK restores history to the system clipboard only when you request it. Copy and Paste uses Accessibility permission to send one `Command + V` to the app you were previously using. When you select a web-address item in the history panel, PEEK parses it locally and displays an offline link card without contacting the destination. The URL is handed to your external browser only after you choose Open in Browser.

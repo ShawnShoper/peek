@@ -54,6 +54,10 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
     private let defaultsStore: FileSearchIndexDefaultsStore
 
     private var firstRunTask: Task<Void, Never>?
+    private var eventRunTask: Task<Void, Never>?
+    private var pendingEventRun = false
+    private var pendingApplicationPaths: Set<String> = []
+    private var eventMonitoringAvailable = false
     private var activeRunTask: Task<FileSearchBackgroundIndexRunResult, Never>?
     private var activeRunID: UUID?
     private var isStarted = false
@@ -107,9 +111,12 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
             Task {
                 let result = await self.runIfPossible(requireStarted: true)
                 switch result {
-                case .deferred, .failed:
+                case .deferred:
                     completion(.deferred)
-                case .completed, .noChanges:
+                case .completed, .limited, .noChanges, .failed:
+                    // Failures are not system workload deferrals. Report the
+                    // failure in UI, but do not request an immediate retry of
+                    // the same broken full pass from the OS scheduler.
                     completion(.finished)
                 }
             }
@@ -133,6 +140,10 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         isStarted = false
         firstRunTask?.cancel()
         firstRunTask = nil
+        eventRunTask?.cancel()
+        eventRunTask = nil
+        pendingEventRun = false
+        pendingApplicationPaths.removeAll()
         activeRunTask?.cancel()
         activeRunTask = nil
         activeRunID = nil
@@ -144,6 +155,57 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
     @discardableResult
     func runNow() async -> FileSearchBackgroundIndexRunResult {
         await runIfPossible(requireStarted: false)
+    }
+
+    /// Coalesce ordinary events; application changes can preempt a long scan.
+    /// Cancellation never publishes a partial generation, and all events stay
+    /// durable until their replacement metadata is committed.
+    func fileEventsDidArrive(applicationPaths: Set<String> = []) {
+        guard isStarted else { return }
+        pendingEventRun = true
+        pendingApplicationPaths.formUnion(applicationPaths)
+        if !applicationPaths.isEmpty { activeRunTask?.cancel() }
+        guard eventRunTask == nil else { return }
+        eventRunTask = Task { [weak self] in
+            await self?.drainFileEvents()
+        }
+    }
+
+    func setEventMonitoringAvailable(_ available: Bool) {
+        eventMonitoringAvailable = available
+    }
+
+    private func drainFileEvents() async {
+        defer { eventRunTask = nil }
+        while pendingEventRun && isStarted && !Task.isCancelled {
+            pendingEventRun = false
+            do { try await Task<Never, Never>.sleep(nanoseconds: 2_000_000_000) }
+            catch { return }
+            var applications = pendingApplicationPaths
+            pendingApplicationPaths.removeAll()
+            if !applications.isEmpty { activeRunTask?.cancel() }
+            while let activeRunTask, isStarted, !Task.isCancelled {
+                _ = await activeRunTask.value
+                await Task.yield()
+            }
+            applications.formUnion(pendingApplicationPaths)
+            pendingApplicationPaths.removeAll()
+            guard isStarted, !Task.isCancelled else { return }
+            let result = await runIfPossible(requireStarted: true, forcedMode: .incremental,
+                resourceProfile: applications.isEmpty ? .automatic : .fast,
+                requestedChangePaths: applications.isEmpty ? nil : applications)
+            if case .deferred = result {
+                // The normal background schedule retries blocked work. Do not
+                // spin while capture, OCR or system pressure holds the gate.
+                return
+            }
+            if case .completed = result, (try? await indexer.hasPendingChanges()) == true {
+                pendingEventRun = true
+            }
+            if !applications.isEmpty, (try? await indexer.hasPendingChanges()) == true {
+                pendingEventRun = true
+            }
+        }
     }
 
     /// Explicit settings action. Unlike a query, this is a user-authorized
@@ -192,7 +254,8 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         requireStarted: Bool,
         forcedMode: FileSearchBackgroundIndexMode? = nil,
         resourceProfile: FileSearchIndexResourceProfile = .automatic,
-        requestedRootPaths: Set<String>? = nil
+        requestedRootPaths: Set<String>? = nil,
+        requestedChangePaths: Set<String>? = nil
     ) async -> FileSearchBackgroundIndexRunResult {
         guard !requireStarted || isStarted else { return .deferred }
         guard activeRunTask == nil else { return .deferred }
@@ -200,6 +263,10 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         let mode: FileSearchBackgroundIndexMode
         if let forcedMode {
             mode = forcedMode
+        } else if requireStarted && !eventMonitoringAvailable {
+            // A stream failure must not silently turn off routine discovery.
+            // Keep the slower scheduled fallback until monitoring is restored.
+            mode = .full
         } else {
             mode = await nextMode()
         }
@@ -210,7 +277,8 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
             await indexer.run(
                 mode: mode,
                 resourceProfile: resourceProfile,
-                requestedRootPaths: requestedRootPaths
+                requestedRootPaths: requestedRootPaths,
+                requestedChangePaths: requestedChangePaths
             )
         }
         let runID = UUID()
@@ -232,6 +300,10 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
                 forKey: configuration.lastFullIndexDefaultsKey
             )
         }
+        if case .limited(mode: .full, _, _) = result {
+            defaultsStore.set(Date().timeIntervalSince1970,
+                forKey: configuration.lastFullIndexDefaultsKey + ".limitedAttempt")
+        }
         return result
     }
 
@@ -245,9 +317,9 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         guard lastCommittedIndex != nil else {
             return .full
         }
-        let storedTimestamp = defaultsStore.double(
+        let storedTimestamp = max(defaultsStore.double(
             forKey: configuration.lastFullIndexDefaultsKey
-        )
+        ), defaultsStore.double(forKey: configuration.lastFullIndexDefaultsKey + ".limitedAttempt"))
         guard storedTimestamp > 0 else { return .full }
         let lastFullDate = Date(timeIntervalSince1970: storedTimestamp)
         return Date().timeIntervalSince(lastFullDate) >= configuration.fullIndexInterval

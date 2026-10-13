@@ -1,13 +1,49 @@
 import Darwin
 import Foundation
 
+/// Only explicitly measured synchronous indexing work contributes to this
+/// counter. Never measure across `await`: an actor may resume on another thread.
+final class FileSearchCPUWorkMeter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var accumulated: TimeInterval = 0
+
+    var totalCPUTime: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulated
+    }
+
+    func measure<T>(_ work: () throws -> T) rethrows -> T {
+        let start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+        defer {
+            let end = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+            let elapsed = end >= start ? Double(end - start) / 1_000_000_000 : 0
+            lock.lock()
+            accumulated += elapsed
+            lock.unlock()
+        }
+        return try work()
+    }
+}
+
+enum FileSearchCPUWork {
+    // Task-local context follows indexing calls across actor hops, without
+    // charging independent UI, clipboard, query or translation tasks.
+    @TaskLocal static var meter: FileSearchCPUWorkMeter?
+
+    static func measure<T>(_ work: () throws -> T) rethrows -> T {
+        guard let meter else { return try work() }
+        return try meter.measure(work)
+    }
+}
+
 struct FileSearchCPUBudgetSnapshot: Equatable, Sendable {
     let targetFraction: Double
     let measuredFraction: Double
 }
 
-/// Feedback throttle based on process CPU time. The standard target is 0.6%
-/// of one core, leaving margin below the 1% product ceiling over a 60s window.
+/// Feedback throttle for measured indexing CPU, not total app CPU. Maintenance
+/// targets 0.6% of one core; full/recovery/manual passes use a bounded fast tier.
 actor FileSearchCPUBudget {
     let targetFraction: Double
     let microBatchSize: Int
@@ -16,26 +52,29 @@ actor FileSearchCPUBudget {
     private var baselineWallTime: TimeInterval
     private var baselineCPUTime: TimeInterval
     private var measuredFraction: Double = 0
+    private let workMeter: FileSearchCPUWorkMeter
 
     init(
         targetFraction: Double = 0.006,
         microBatchSize: Int = 24,
         windowDuration: TimeInterval = 60,
         maximumTargetFraction: Double = 0.009,
-        maximumMicroBatchSize: Int = 32
+        maximumMicroBatchSize: Int = 32,
+        workMeter: FileSearchCPUWorkMeter = FileSearchCPUWorkMeter()
     ) {
         let targetCeiling = min(max(maximumTargetFraction, 0.009), 0.25)
         let batchCeiling = min(max(maximumMicroBatchSize, 32), 512)
         self.targetFraction = min(max(targetFraction, 0.001), targetCeiling)
         self.microBatchSize = min(max(microBatchSize, 16), batchCeiling)
         self.windowDuration = max(10, windowDuration)
+        self.workMeter = workMeter
         baselineWallTime = ProcessInfo.processInfo.systemUptime
-        baselineCPUTime = Self.processCPUTime()
+        baselineCPUTime = workMeter.totalCPUTime
     }
 
     func reset() {
         baselineWallTime = ProcessInfo.processInfo.systemUptime
-        baselineCPUTime = Self.processCPUTime()
+        baselineCPUTime = workMeter.totalCPUTime
         measuredFraction = 0
     }
 
@@ -51,7 +90,7 @@ actor FileSearchCPUBudget {
     func throttleAfterBatch() async throws {
         try Task.checkCancellation()
         let nowWall = ProcessInfo.processInfo.systemUptime
-        let nowCPU = Self.processCPUTime()
+        let nowCPU = workMeter.totalCPUTime
         let elapsedWall = max(nowWall - baselineWallTime, 0.000_001)
         let elapsedCPU = max(nowCPU - baselineCPUTime, 0)
         measuredFraction = elapsedCPU / elapsedWall
@@ -73,10 +112,10 @@ actor FileSearchCPUBudget {
 
         let finishedWall = ProcessInfo.processInfo.systemUptime
         let totalWall = max(finishedWall - baselineWallTime, 0.000_001)
-        measuredFraction = max(Self.processCPUTime() - baselineCPUTime, 0) / totalWall
+        measuredFraction = max(workMeter.totalCPUTime - baselineCPUTime, 0) / totalWall
         if totalWall >= windowDuration {
             baselineWallTime = finishedWall
-            baselineCPUTime = Self.processCPUTime()
+            baselineCPUTime = workMeter.totalCPUTime
             measuredFraction = 0
         }
     }
@@ -102,21 +141,12 @@ actor FileSearchCPUBudget {
         return min(remainingForTarget, remainingInWindow)
     }
 
-    private nonisolated static func processCPUTime() -> TimeInterval {
-        var usage = rusage()
-        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
-        let user = TimeInterval(usage.ru_utime.tv_sec)
-            + TimeInterval(usage.ru_utime.tv_usec) / 1_000_000
-        let system = TimeInterval(usage.ru_stime.tv_sec)
-            + TimeInterval(usage.ru_stime.tv_usec) / 1_000_000
-        return user + system
-    }
 }
 
 /// Disk activity is approximated by visited filesystem entries instead of
 /// bytes. Directory enumeration is metadata-heavy, so a token rate provides a
-/// stable ceiling without reading file contents or issuing a second pre-count
-/// pass. The fast bootstrap and low-impact incremental modes use independent
+/// stable ceiling without reading file contents. Both counting and indexing
+/// visits are charged. Fast and low-impact modes use independent
 /// instances and rates.
 actor FileSearchIOBudget {
     let maximumEntriesPerSecond: Double

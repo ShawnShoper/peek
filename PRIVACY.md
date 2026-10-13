@@ -31,6 +31,10 @@ To improve local ranking, PEEK may store how often an app is opened through PEEK
 
 ### 剪贴板历史 / Clipboard history
 
+PEEK 会忽略带有保密、临时、自动生成或 1Password 标记的内容。来源应用未提供标记时，仍可能记录敏感信息，建议排除敏感应用。普通历史仅保存在本地沙盒，未额外加密；升级不会自动清空旧历史，可在设置中主动清空。
+
+PEEK ignores concealed, transient, auto-generated, and 1Password-marked clipboard content. Unmarked sensitive information may still be recorded; exclude sensitive apps when appropriate. Ordinary history is stored locally without additional encryption. Updating does not automatically clear older history; you can clear it in Settings.
+
 启用剪贴板历史后，PEEK 会在后台观察系统剪贴板变化，并把支持的文字、富文本、图片、网址以及文件或文件夹引用保存在应用沙盒内。历史最多保留 100 条并受 256 MB 本地空间上限保护；单条超过 32 MB 的内容不会保存。你可以暂停记录、排除指定应用、删除单条记录或清空全部记录。
 
 当你在剪贴板历史中选择网址记录时，PEEK 只在本地解析网址并显示离线链接卡片，不会连接目标网站。只有当你主动选择“在浏览器中打开”后，网址才会交给外部浏览器。

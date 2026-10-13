@@ -14,9 +14,67 @@ struct SearchPanelLowerContentPolicy: Equatable, Sendable {
     }
 }
 
+struct SearchPanelIndexProgressRow: View {
+    let progress: FileSearchInitialIndexProgressSnapshot
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 12) {
+                Text(progress.localizedCompactTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+
+                Spacer(minLength: 8)
+
+                Text(progress.localizedCompactDetail)
+                    .font(.caption2.weight(.medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+
+            // Render a fixed track even before the total is known. An explicit
+            // fill avoids the native indeterminate bar's moving blue segment.
+            FileSearchProgressTrack(value: progress.progressBarValue,
+                isWarning: progress.phase == .failed || progress.phase == .limited)
+        }
+        .padding(.horizontal, 15)
+        .frame(height: SearchPanelLayout.indexProgressHeight)
+        .transaction { $0.animation = nil }
+        .help(progress.localizedStatusMessage)
+        // Read the actual state, not a misleading 0% while counting or waiting.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(progress.localizedStatusMessage)
+    }
+}
+
+/// Shared by search and settings. Unknown totals use an empty static track,
+/// never a looping native indeterminate animation or a fabricated percentage.
+struct FileSearchProgressTrack: View {
+    let value: Double
+    var isWarning = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            Capsule().fill(Color.primary.opacity(0.16))
+                .overlay(alignment: .leading) {
+                    Capsule().fill(isWarning ? Color.orange : Color.blue)
+                        .frame(width: geometry.size.width * min(1, max(0, value)))
+                }
+        }
+        .frame(height: 6)
+        .transaction { $0.animation = nil }
+        .accessibilityHidden(true)
+    }
+}
+
 struct SearchPanelView: View {
     @ObservedObject var viewModel: SearchPanelViewModel
     var onExpansionChanged: (Bool) -> Void = { _ in }
+    var onIndexProgressVisibilityChanged: (Bool) -> Void = { _ in }
     @FocusState private var searchFieldFocused: Bool
     @State private var hoveredAction: SearchPanelFileAction?
     @State private var showsNumericShortcuts = false
@@ -63,6 +121,7 @@ struct SearchPanelView: View {
         )
         .onAppear {
             onExpansionChanged(isExpanded)
+            onIndexProgressVisibilityChanged(showsIndexProgress)
             guard viewModel.isPanelActive else { return }
             DispatchQueue.main.async { searchFieldFocused = true }
         }
@@ -70,6 +129,9 @@ struct SearchPanelView: View {
             onExpansionChanged(expanded)
             guard !expanded, viewModel.isPanelActive else { return }
             DispatchQueue.main.async { searchFieldFocused = true }
+        }
+        .onChange(of: showsIndexProgress) { isVisible in
+            onIndexProgressVisibilityChanged(isVisible)
         }
         .onChange(of: viewModel.isPanelActive) { isActive in
             showsNumericShortcuts = false
@@ -83,6 +145,10 @@ struct SearchPanelView: View {
 
     private var isExpanded: Bool {
         viewModel.hasVisibleQuery
+    }
+
+    private var showsIndexProgress: Bool {
+        viewModel.initialIndexProgress != nil
     }
 
     private var lowerContent: some View {
@@ -120,49 +186,59 @@ struct SearchPanelView: View {
     }
 
     private var searchHeader: some View {
-        HStack(spacing: 12) {
-            TextField(L10n.tr("搜索应用、文件或文件夹"), text: $viewModel.query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 18, weight: .regular))
-                .focused($searchFieldFocused)
-                .accessibilityLabel(L10n.tr("搜索应用、文件或文件夹"))
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                TextField(L10n.tr("搜索应用、文件或文件夹"), text: $viewModel.query)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 18, weight: .regular))
+                    .focused($searchFieldFocused)
+                    .accessibilityLabel(L10n.tr("搜索应用、文件或文件夹"))
 
-            if viewModel.isSearching {
-                ProgressView()
-                    .controlSize(.small)
-            } else if !viewModel.query.isEmpty {
+                if viewModel.isSearching {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if !viewModel.query.isEmpty {
+                    Button {
+                        viewModel.query = ""
+                        searchFieldFocused = true
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(L10n.tr("清空搜索"))
+                }
+
+                searchOptionsMenu
+
+                Image(nsImage: NSApplication.shared.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 24, height: 24)
+                    .accessibilityLabel("PEEK")
+
                 Button {
-                    viewModel.query = ""
-                    searchFieldFocused = true
+                    showsPreview.toggle()
                 } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.tertiary)
+                    Image(systemName: showsPreview ? "pin.fill" : "pin")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(showsPreview ? Color.accentColor : Color.secondary)
+                        .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(L10n.tr("清空搜索"))
+                .help(showsPreview ? L10n.tr("隐藏预览") : L10n.tr("显示预览"))
+                .accessibilityLabel(showsPreview ? L10n.tr("隐藏预览") : L10n.tr("显示预览"))
             }
+            .padding(.horizontal, 15)
+            .frame(height: SearchPanelLayout.collapsedHeight)
 
-            searchOptionsMenu
-
-            Image(nsImage: NSApplication.shared.applicationIconImage)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: 24, height: 24)
-                .accessibilityLabel("PEEK")
-
-            Button {
-                showsPreview.toggle()
-            } label: {
-                Image(systemName: showsPreview ? "pin.fill" : "pin")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(showsPreview ? Color.accentColor : Color.secondary)
-                    .frame(width: 24, height: 24)
+            if let progress = viewModel.initialIndexProgress {
+                SearchPanelIndexProgressRow(progress: progress)
+                    .overlay(alignment: .top) {
+                        Divider().opacity(0.55)
+                    }
             }
-            .buttonStyle(.plain)
-            .help(showsPreview ? L10n.tr("隐藏预览") : L10n.tr("显示预览"))
         }
-        .padding(.horizontal, 15)
-        .frame(height: 58)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.26))
     }
 
@@ -187,6 +263,8 @@ struct SearchPanelView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(viewModel.selectedCategory.title)
+        .accessibilityLabel(L10n.tr("搜索范围"))
+        .accessibilityValue(viewModel.selectedCategory.title)
     }
 
     private var resultList: some View {
@@ -684,7 +762,7 @@ struct SearchPanelView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
-                ForEach(SearchPanelFileAction.allCases) { action in
+                ForEach(viewModel.visibleActions) { action in
                     actionButton(action)
                 }
                 Spacer(minLength: 0)

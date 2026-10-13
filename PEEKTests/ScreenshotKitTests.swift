@@ -808,6 +808,67 @@ final class ScreenshotKitTests: XCTestCase {
         )
     }
 
+    func testFrozenDesktopUsesDisplayScreenshotWithoutApplicationFiltering() {
+        XCTAssertTrue(screenCaptureUsesDesktopScreenshot(
+            sourceRect: nil,
+            excludingCurrentApplication: false
+        ))
+    }
+
+    func testLiveRegionCaptureKeepsExistingFilter() {
+        let region = CGRect(x: -1_280, y: 120, width: 640, height: 480)
+        for excludingCurrentApplication in [false, true] {
+            XCTAssertFalse(screenCaptureUsesDesktopScreenshot(
+                sourceRect: region,
+                excludingCurrentApplication: excludingCurrentApplication
+            ))
+        }
+    }
+
+    func testApplicationExclusionNeverUsesUnfilteredDesktopScreenshot() {
+        XCTAssertFalse(screenCaptureUsesDesktopScreenshot(
+            sourceRect: nil,
+            excludingCurrentApplication: true
+        ))
+    }
+
+    func testDesktopScreenshotPreservesDisplayPixelDimensions() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("The display-space screenshot configuration requires macOS 26")
+        }
+        for (size, scale, expected) in [
+            (CGSize(width: 2_560, height: 1_440), CGFloat(2),
+             ScreenCapturePixelDimensions(width: 5_120, height: 2_880)),
+            (CGSize(width: 3_440, height: 1_440), CGFloat(1),
+             ScreenCapturePixelDimensions(width: 3_440, height: 1_440)),
+            (CGSize(width: 801, height: 601), CGFloat(1.5),
+             ScreenCapturePixelDimensions(width: 1_202, height: 902))
+        ] {
+            let configuration = makeDesktopScreenshotConfiguration(
+                pixelDimensions: screenCapturePixelDimensions(
+                    logicalSize: size,
+                    pointPixelScale: scale
+                )
+            )
+            XCTAssertEqual(configuration.width, expected.width)
+            XCTAssertEqual(configuration.height, expected.height)
+        }
+    }
+
+    func testDesktopScreenshotExcludesCursorAndDoesNotExportOrCropTwice() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("The display-space screenshot configuration requires macOS 26")
+        }
+        let configuration = makeDesktopScreenshotConfiguration(
+            pixelDimensions: ScreenCapturePixelDimensions(width: 5_120, height: 2_880)
+        )
+        XCTAssertFalse(configuration.showsCursor)
+        XCTAssertEqual(configuration.dynamicRange, .sdr)
+        XCTAssertNil(configuration.fileURL)
+        XCTAssertTrue(configuration.sourceRect.isNull)
+        XCTAssertTrue(configuration.destinationRect.isNull)
+    }
+
     func testLongImageEditorKeepsToolbarBelowSystemTitleBar() {
         XCTAssertTrue(ScreenshotEditorWindowLayout.styleMask.contains(.titled))
         XCTAssertFalse(

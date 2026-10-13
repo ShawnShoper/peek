@@ -1,6 +1,93 @@
 {
   "sourceLanguage" : "zh-Hans",
   "strings" : {
+    "容量已满 · %@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Capacity reached · %@" } } }
+    },
+    "结果不完整 · 请调整搜索范围" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Incomplete results · Adjust search scope" } } }
+    },
+    "索引达到容量上限，部分项目未收录；请在设置中缩小搜索范围或添加排除目录。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Index capacity reached. Some items are missing; reduce the search scope or add exclusions in Settings." } } }
+    },
+    "文件变化监听不可用；将保留定期校验，请尝试重启应用。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "File change monitoring is unavailable. Periodic checks remain enabled; try restarting the app." } } }
+    },
+    "已有索引 · %d 处受限" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Existing index · %d restricted locations" } } }
+    },
+    "已有索引可用" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Existing index available" } } }
+    },
+    "未完整收录" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Partially indexed" } } }
+    },
+    "统计总量" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Counting Items" } } }
+    },
+    "已发现 %lld 项" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld items found" } } }
+    },
+    "索引容量不足，无法安全保留受限目录的旧索引" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Not enough index capacity to safely preserve existing entries in restricted folders" } } }
+    },
+    "已完成 · %d 处受限" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Done · %d restricted" } } }
+    },
+    "%@：跳过 %d 处受限位置；已有索引保留" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@: skipped %d restricted locations; existing entries preserved" } } }
+    },
+    "索引未完成" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Index Incomplete" } } }
+    },
+    "悬停查看原因" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Hover for Details" } } }
+    },
+    "无法索引 %@：%@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Cannot index %@: %@" } } }
+    },
+    "%@：%@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@: %@" } } }
+    },
+    "%lld / %lld 项 · %d%%" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld / %lld items · %d%%" } } }
+    },
+    "%lld / %lld 项 · %d%% · 目录 %d/%d" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld / %lld items · %d%% · folder %d/%d" } } }
+    },
+    "%lld 项" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld items" } } }
+    },
+    "%lld 项 · 目录 %d/%d" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld items · folder %d/%d" } } }
+    },
+    "个人目录" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Home Folder" } } }
+    },
+    "准备索引" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing Index" } } }
+    },
+    "用户应用" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "User Apps" } } }
+    },
+    "稍后自动重试" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Retrying Automatically Soon" } } }
+    },
+    "等待系统空闲" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for System Idle" } } }
+    },
+    "系统应用" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "System Apps" } } }
+    },
+    "索引" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Indexing" } } }
+    },
+    "统计" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Counting" } } }
+    },
+    "预计 %@" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "About %@" } } }
+    },
     "PEEK 是菜单栏应用，全部功能入口如下" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK is a menu-bar app. Every feature is listed below." } } }
     },
@@ -1209,6 +1296,16 @@
         }
       }
     },
+    "，已处理 %lld / %lld 项" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : ", processed %lld / %lld items"
+          }
+        }
+      }
+    },
     "，目录 %d/%d" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -1216,6 +1313,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : ", folder %d/%d"
+          }
+        }
+      }
+    },
+    "，正在处理目录 %d/%d" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : ", processing folder %d/%d"
+          }
+        }
+      }
+    },
+    "，正在统计目录 %d/%d" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : ", scanning folder %d/%d"
           }
         }
       }
@@ -5583,6 +5700,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Recognizing text…"
+          }
+        }
+      }
+    },
+    "正在统计文件%@，已发现 %lld 项%@" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Counting files%@, discovered %lld items%@"
           }
         }
       }

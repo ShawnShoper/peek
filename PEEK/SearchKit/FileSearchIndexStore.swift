@@ -61,6 +61,18 @@ struct FileSearchRootIndexStatus: Equatable, Sendable {
     let isIndexing: Bool
     let indexedItemCount: Int
     let lastSuccessfulIndexAt: Date?
+    let inaccessibleLocationCount: Int
+    var reachedLimit: Bool = false
+}
+
+struct FileSearchPreservedEntry: Equatable, Sendable {
+    let path: String
+    let kind: FileSearchItemKind
+}
+
+struct FileSearchPreservedEntryBatch: Sendable {
+    var entries: [FileSearchPreservedEntry] = []
+    var hasMore = false
 }
 
 struct FileSearchIndexQueryResult: Sendable {
@@ -237,6 +249,85 @@ actor FileSearchIndexStore {
         }
     }
 
+    /// Copy only previously committed metadata under an unreadable descendant.
+    /// Paging keeps this work cancellable/budgeted by the caller. New readable
+    /// entries win, explicit exclusions still apply, and no filesystem access
+    /// or broader authorization is implied by preserving existing metadata.
+    func preserveCommittedEntries(
+        under path: String,
+        excluding excludedPaths: [String],
+        in token: FileSearchRootGeneration,
+        afterPath: String?,
+        limit: Int
+    ) throws -> FileSearchPreservedEntryBatch {
+        guard path.hasPrefix(token.rootPath + "/") else {
+            throw FileSearchIndexStoreError.unavailable("Cannot preserve entries outside the indexed root")
+        }
+        let batchLimit = min(max(0, limit), 512)
+        return try transaction {
+            try validate(token)
+            var bindings: [SQLiteBinding] = [
+                .text(token.rootPath), .int64(token.generation), .text(path),
+                .text(path + "0"), afterPath.map(SQLiteBinding.text) ?? .null,
+                .int64(Int64(batchLimit + 1))
+            ]
+            var exclusions = ""
+            for excluded in Set(excludedPaths).sorted() {
+                bindings.append(.text(excluded))
+                let parameter = "?\(bindings.count)"
+                exclusions += " AND NOT (source.path = \(parameter) OR substr(source.path, 1, length(\(parameter)) + 1) = \(parameter) || '/')"
+            }
+            // '/' sorts immediately before '0' under SQLite's BINARY collation.
+            // The bounded path range enables keyset paging without LIKE escaping
+            // bugs for directory names containing %, _ or non-ASCII characters.
+            let selection = """
+            FROM entries AS source
+            WHERE source.root_path = ?1
+              AND source.generation = (SELECT active_generation FROM roots WHERE root_path = ?1)
+              AND source.path >= ?3 AND source.path < ?4
+              AND (source.path = ?3 OR substr(source.path, 1, length(?3) + 1) = ?3 || '/')
+              AND (?5 IS NULL OR source.path > ?5)
+              AND NOT EXISTS (
+                SELECT 1 FROM entries AS staged
+                WHERE staged.root_path = ?1 AND staged.generation = ?2 AND staged.path = source.path
+              )
+              \(exclusions)
+            ORDER BY source.path LIMIT ?6
+            """
+            let statement = try prepare("SELECT source.path, source.kind " + selection)
+            defer { sqlite3_finalize(statement) }
+            try bind(bindings, to: statement)
+            var entries: [FileSearchPreservedEntry] = []
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
+                guard let path = columnText(statement, index: 0),
+                      let kind = FileSearchItemKind(rawValue: Int(sqlite3_column_int(statement, 1))) else {
+                    throw FileSearchIndexStoreError.unavailable("Invalid preserved index entry")
+                }
+                entries.append(FileSearchPreservedEntry(path: path, kind: kind))
+                step = sqlite3_step(statement)
+            }
+            guard step == SQLITE_DONE else { throw sqliteError() }
+            let hasMore = entries.count > batchLimit
+            if hasMore { entries.removeLast() }
+            guard !entries.isEmpty else { return FileSearchPreservedEntryBatch(hasMore: hasMore) }
+            try Task.checkCancellation()
+            bindings[5] = .int64(Int64(entries.count))
+            let columns = """
+            path, display_name, kind, type_description, is_hidden, file_size,
+            created_at, modified_at, last_opened_at, application_version,
+            normalized_name, normalized_path, compact_pinyin, pinyin_initials,
+            word_initials, normalized_aliases, compact_alias_pinyin,
+            alias_pinyin_initials, alias_word_initials
+            """
+            try execute(
+                "INSERT INTO entries(root_path, generation, \(columns)) SELECT source.root_path, ?2, \(columns) " + selection,
+                bindings: bindings
+            )
+            return FileSearchPreservedEntryBatch(entries: entries, hasMore: hasMore)
+        }
+    }
+
     func commitRootGeneration(
         _ token: FileSearchRootGeneration,
         statistics: FileSearchRootCommitStatistics = .init(),
@@ -287,6 +378,12 @@ actor FileSearchIndexStore {
                 DELETE FROM dirty_paths
                 WHERE revision <= ?2
                   AND (path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/')
+                  AND NOT EXISTS (
+                    SELECT 1 FROM roots nested WHERE nested.root_path <> ?1
+                      AND substr(nested.root_path, 1, length(?1) + 1) = ?1 || '/'
+                      AND (dirty_paths.path = nested.root_path
+                        OR substr(dirty_paths.path, 1, length(nested.root_path) + 1) = nested.root_path || '/')
+                  )
                 """,
                 bindings: [.text(token.rootPath), .int64(token.dirtyCutoff)]
             )
@@ -442,7 +539,9 @@ actor FileSearchIndexStore {
                 active_generation IS NOT NULL,
                 staging_generation IS NOT NULL,
                 indexed_applications + indexed_files + indexed_folders,
-                last_success
+                last_success,
+                inaccessible,
+                reached_limit
             FROM roots
             ORDER BY root_path COLLATE NOCASE
             """
@@ -458,7 +557,9 @@ actor FileSearchIndexStore {
                     hasCommittedGeneration: sqlite3_column_int(statement, 1) != 0,
                     isIndexing: sqlite3_column_int(statement, 2) != 0,
                     indexedItemCount: Int(sqlite3_column_int64(statement, 3)),
-                    lastSuccessfulIndexAt: optionalDate(statement, index: 4)
+                    lastSuccessfulIndexAt: optionalDate(statement, index: 4),
+                    inaccessibleLocationCount: Int(sqlite3_column_int64(statement, 5)),
+                    reachedLimit: sqlite3_column_int(statement, 6) != 0
                 ))
             }
             stepResult = sqlite3_step(statement)
@@ -496,11 +597,13 @@ actor FileSearchIndexStore {
             let suffix = includingDescendants
                 ? " OR substr(path, 1, length(?1) + 1) = ?1 || '/'"
                 : ""
+            let affected = try rows("SELECT DISTINCT root_path FROM entries WHERE path = ?1\(suffix)", bindings: [.text(path)])
             try execute(
                 "DELETE FROM entries WHERE path = ?1\(suffix)",
                 bindings: [.text(path)]
             )
             try insertDirtyPath(path)
+            for row in affected { if let root = row[0].text { try refreshCommittedCounts(root) } }
         }
     }
 
@@ -512,6 +615,11 @@ actor FileSearchIndexStore {
         let destination = destinationURL.standardizedFileURL.path
         guard source != destination else { return }
         try transaction {
+            let affected = try rows("""
+                SELECT DISTINCT root_path FROM entries
+                WHERE path = ?1 OR substr(path, 1, length(?1) + 1) = ?1 || '/'
+                   OR path = ?2 OR substr(path, 1, length(?2) + 1) = ?2 || '/'
+                """, bindings: [.text(source), .text(destination)])
             let sourceRoot = try scalarText(
                 """
                 SELECT root_path FROM entries
@@ -547,6 +655,7 @@ actor FileSearchIndexStore {
             }
             try insertDirtyPath(source)
             try insertDirtyPath(destination)
+            for row in affected { if let root = row[0].text { try refreshCommittedCounts(root) } }
         }
     }
 
@@ -554,9 +663,99 @@ actor FileSearchIndexStore {
         try insertDirtyPath(url.standardizedFileURL.path)
     }
 
+    /// Cursor and dirty paths advance atomically: a crash may replay work but
+    /// cannot acknowledge filesystem events that have not reached SQLite.
+    func recordFileEvents(_ urls: [URL], cursor: UInt64) throws {
+        try transaction {
+            for url in urls { try insertDirtyPath(url.standardizedFileURL.path) }
+            try execute("INSERT INTO index_state(key, int_value) VALUES('event_cursor', ?1) ON CONFLICT(key) DO UPDATE SET int_value = max(int_value, excluded.int_value)",
+                        bindings: [.int64(Int64(clamping: cursor))])
+        }
+    }
+
+    func fileEventCursor() throws -> UInt64? {
+        try scalarInt64("SELECT int_value FROM index_state WHERE key = 'event_cursor'")
+            .map { UInt64(max(0, $0)) }
+    }
+
+    func committedItemCount(under path: String, rootPath: String) throws -> Int {
+        Int(try scalarInt64("""
+            SELECT count(*) FROM entries e JOIN roots r ON r.root_path = e.root_path
+            WHERE e.root_path = ?1 AND e.generation = r.active_generation
+              AND (e.path = ?2 OR e.path >= ?2 || '/' AND e.path < ?2 || '0')
+            """, strings: [rootPath, path]) ?? 0)
+    }
+
+    /// Evict only cached non-application metadata, never filesystem content.
+    /// Broad roots yield first; restricted roots are never used as donors.
+    func reclaimFileEntries(excludingRootPath: String, limit: Int) throws -> Int {
+        try transaction {
+            let victims = try rows("""
+                SELECT e.path, e.root_path, e.generation FROM entries e JOIN roots r ON r.root_path = e.root_path
+                WHERE e.generation = r.active_generation AND e.kind <> ?1
+                  AND e.root_path <> ?2 AND r.staging_generation IS NULL AND r.inaccessible = 0
+                ORDER BY length(e.root_path), e.path DESC LIMIT ?3
+                """, bindings: [.int64(Int64(FileSearchItemKind.application.rawValue)),
+                                 .text(excludingRootPath), .int64(Int64(min(512, max(0, limit))))])
+            var affected = Set<String>()
+            for row in victims {
+                guard let path = row[0].text, let root = row[1].text, let generation = row[2].int64 else { continue }
+                try execute("DELETE FROM entries WHERE root_path = ?1 AND generation = ?2 AND path = ?3",
+                            bindings: [.text(root), .int64(generation), .text(path)])
+                affected.insert(root)
+            }
+            for root in affected {
+                try refreshCommittedCounts(root)
+                try execute("UPDATE roots SET reached_limit = 1 WHERE root_path = ?1", bindings: [.text(root)])
+            }
+            if !victims.isEmpty { try setGlobalLimitReachedInTransaction() }
+            return victims.count
+        }
+    }
+
+    private func setGlobalLimitReachedInTransaction() throws {
+        try execute("INSERT INTO index_state(key, int_value) VALUES('global_limit_reached', 1) ON CONFLICT(key) DO UPDATE SET int_value = 1")
+    }
+
+    private func refreshCommittedCounts(_ root: String) throws {
+        try execute("""
+            UPDATE roots SET
+              indexed_applications = (SELECT count(*) FROM entries WHERE root_path = ?1 AND generation = roots.active_generation AND kind = 0),
+              indexed_files = (SELECT count(*) FROM entries WHERE root_path = ?1 AND generation = roots.active_generation AND kind = 1),
+              indexed_folders = (SELECT count(*) FROM entries WHERE root_path = ?1 AND generation = roots.active_generation AND kind = 2)
+            WHERE root_path = ?1
+            """, bindings: [.text(root)])
+    }
+
+    /// Publish just one changed subtree, keeping unrelated rows and generation
+    /// stable. Revision cutoffs preserve events arriving while it is scanned.
+    func commitSubtreeGeneration(_ token: FileSearchRootGeneration, path: String) throws {
+        guard path != token.rootPath, path.hasPrefix(token.rootPath + "/") else {
+            throw FileSearchIndexStoreError.staleGeneration
+        }
+        try transaction {
+            try validate(token)
+            guard let active = try scalarInt64("SELECT active_generation FROM roots WHERE root_path = ?1", strings: [token.rootPath]) else {
+                throw FileSearchIndexStoreError.staleGeneration
+            }
+            try execute("""
+                DELETE FROM entries WHERE root_path = ?1 AND generation = ?2
+                  AND (path = ?3 OR path >= ?3 || '/' AND path < ?3 || '0')
+                """, bindings: [.text(token.rootPath), .int64(active), .text(path)])
+            try execute("UPDATE entries SET generation = ?3 WHERE root_path = ?1 AND generation = ?2",
+                        bindings: [.text(token.rootPath), .int64(token.generation), .int64(active)])
+            try execute("UPDATE roots SET staging_generation = NULL WHERE root_path = ?1", bindings: [.text(token.rootPath)])
+            try refreshCommittedCounts(token.rootPath)
+            try execute("""
+                DELETE FROM dirty_paths WHERE revision <= ?2
+                  AND (path = ?1 OR path >= ?1 || '/' AND path < ?1 || '0')
+                """, bindings: [.text(path), .int64(token.dirtyCutoff)])
+        }
+    }
+
     func dirtyPaths(limit: Int = 1_000) throws -> [URL] {
         let statement = try prepare(
-            "SELECT path FROM dirty_paths ORDER BY revision ASC LIMIT ?1"
+            "SELECT path FROM dirty_paths ORDER BY CASE WHEN lower(path) LIKE '%.app' THEN 0 ELSE 1 END, revision ASC LIMIT ?1"
         )
         defer { sqlite3_finalize(statement) }
         try bind([.int64(Int64(max(1, min(limit, 10_000))))], to: statement)
@@ -1368,14 +1567,16 @@ actor FileSearchIndexStore {
     }
 
     private func transaction<T>(_ body: () throws -> T) throws -> T {
-        try execute("BEGIN IMMEDIATE")
-        do {
-            let result = try body()
-            try execute("COMMIT")
-            return result
-        } catch {
-            try? execute("ROLLBACK")
-            throw error
+        try FileSearchCPUWork.measure {
+            try execute("BEGIN IMMEDIATE")
+            do {
+                let result = try body()
+                try execute("COMMIT")
+                return result
+            } catch {
+                try? execute("ROLLBACK")
+                throw error
+            }
         }
     }
 
@@ -1451,12 +1652,16 @@ actor FileSearchIndexStore {
         _ sql: String,
         bindings: [SQLiteBinding] = []
     ) throws -> Int {
-        let database = try requireDatabase()
-        let statement = try prepare(sql)
-        defer { sqlite3_finalize(statement) }
-        try bind(bindings, to: statement)
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
-        return Int(sqlite3_changes(database))
+        // The two bounded generation-cleanup deletes run outside transaction().
+        // They still belong to the background indexer's measured CPU budget.
+        try FileSearchCPUWork.measure {
+            let database = try requireDatabase()
+            let statement = try prepare(sql)
+            defer { sqlite3_finalize(statement) }
+            try bind(bindings, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw sqliteError() }
+            return Int(sqlite3_changes(database))
+        }
     }
 
     private func scalarInt64(
@@ -1503,11 +1708,13 @@ actor FileSearchIndexStore {
 
     private func rows(
         _ sql: String,
+        bindings: [SQLiteBinding] = [],
         database explicitDatabase: OpaquePointer? = nil
     ) throws -> [[SQLiteColumn]] {
         let database = try explicitDatabase ?? requireDatabase()
         let statement = try prepare(sql, database: database)
         defer { sqlite3_finalize(statement) }
+        try bind(bindings, to: statement)
         var result: [[SQLiteColumn]] = []
         while true {
             let step = sqlite3_step(statement)
@@ -1783,6 +1990,11 @@ private enum SQLiteColumn {
     case int64(Int64)
     case double(Double)
     case null
+
+    var text: String? {
+        if case let .text(value) = self { return value }
+        return nil
+    }
 
     var int64: Int64? {
         if case let .int64(value) = self { return value }

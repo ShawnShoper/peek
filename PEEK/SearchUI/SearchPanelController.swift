@@ -86,12 +86,17 @@ private final class SearchPanelContentViewController: NSViewController {
 enum SearchPanelLayout {
     static let width: CGFloat = 920
     static let collapsedHeight: CGFloat = 58
+    static let indexProgressHeight: CGFloat = 42
     static let expandedHeight: CGFloat = 680
     static let minimumWidth: CGFloat = 840
     static let expansionDuration: TimeInterval = 0.20
     static let collapseDuration: TimeInterval = 0.16
     static let screenMargin: CGFloat = 16
     static let cornerRadius: CGFloat = 16
+
+    static func compactHeight(showsIndexProgress: Bool) -> CGFloat {
+        collapsedHeight + (showsIndexProgress ? indexProgressHeight : 0)
+    }
 
     /// The SwiftUI scene is laid out once at its expanded size. The AppKit
     /// chrome clips this top-anchored canvas as the window height changes.
@@ -141,21 +146,25 @@ enum SearchPanelLayout {
 
     static func centeredFrame(
         expanded: Bool,
+        showsIndexProgress: Bool = false,
         in visibleFrame: CGRect
     ) -> CGRect {
         let reference = centeredExpandedFrame(in: visibleFrame)
         guard !expanded else { return reference }
         return CGRect(
             x: reference.minX,
-            y: reference.maxY - collapsedHeight,
+            y: reference.maxY - compactHeight(
+                showsIndexProgress: showsIndexProgress
+            ),
             width: reference.width,
-            height: collapsedHeight
+            height: compactHeight(showsIndexProgress: showsIndexProgress)
         )
     }
 
     static func frame(
         from currentFrame: CGRect,
         expanded: Bool,
+        showsIndexProgress: Bool = false,
         visibleFrame: CGRect?
     ) -> CGRect {
         let maximumExpandedHeight = visibleFrame.map {
@@ -163,7 +172,7 @@ enum SearchPanelLayout {
         } ?? expandedHeight
         let targetHeight = expanded
             ? min(expandedHeight, maximumExpandedHeight)
-            : collapsedHeight
+            : compactHeight(showsIndexProgress: showsIndexProgress)
         var targetFrame = currentFrame
         targetFrame.size.height = targetHeight
         targetFrame.origin.y = currentFrame.maxY - targetHeight
@@ -189,6 +198,7 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
     private var panel: SearchFloatingPanel?
     private var viewModel: SearchPanelViewModel?
     private var panelIsExpanded: Bool?
+    private var panelShowsIndexProgress = false
     private var panelAnimationGeneration = 0
 
     override init() {
@@ -325,6 +335,9 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
                 viewModel: viewModel,
                 onExpansionChanged: { [weak self] expanded in
                     self?.setPanelExpanded(expanded, animated: true)
+                },
+                onIndexProgressVisibilityChanged: { [weak self] isVisible in
+                    self?.setIndexProgressVisible(isVisible, animated: true)
                 }
             )
         )
@@ -387,12 +400,14 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
            let visibleFrame = screen?.visibleFrame {
             targetFrame = SearchPanelLayout.centeredFrame(
                 expanded: expanded,
+                showsIndexProgress: panelShowsIndexProgress,
                 in: visibleFrame
             )
         } else {
             targetFrame = SearchPanelLayout.frame(
                 from: panel.frame,
                 expanded: expanded,
+                showsIndexProgress: panelShowsIndexProgress,
                 visibleFrame: screen?.visibleFrame
             )
         }
@@ -446,6 +461,15 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
         )
     }
 
+    private func setIndexProgressVisible(_ isVisible: Bool, animated: Bool) {
+        guard panelShowsIndexProgress != isVisible else { return }
+        panelShowsIndexProgress = isVisible
+        setPanelExpanded(
+            panelIsExpanded ?? viewModel?.hasVisibleQuery ?? false,
+            animated: animated
+        )
+    }
+
     private func preferredScreen(
         for preference: SearchWindowScreenPreference
     ) -> NSScreen? {
@@ -475,6 +499,7 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
         panel.setFrame(
             SearchPanelLayout.centeredFrame(
                 expanded: expanded,
+                showsIndexProgress: panelShowsIndexProgress,
                 in: visibleFrame
             ),
             display: false

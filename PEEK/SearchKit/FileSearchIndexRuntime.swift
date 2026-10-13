@@ -1,5 +1,94 @@
 import Foundation
+import CoreServices
 import OSLog
+
+struct FileSearchFileEvent: Sendable {
+    let path: String
+    let flags: FSEventStreamEventFlags
+    let id: FSEventStreamEventId
+}
+
+/// The stream owns its callback box, while the runtime owns the stream and
+/// its security-scoped lease. No event causes new filesystem authorization.
+final class FileSearchEventStream {
+    private final class CallbackBox {
+        let receive: @Sendable ([FileSearchFileEvent]) -> Void
+        let pathMappings: [(observed: String, requested: String)]
+        init(roots: [URL], receive: @escaping @Sendable ([FileSearchFileEvent]) -> Void) {
+            self.receive = receive
+            pathMappings = roots.map { ($0.resolvingSymlinksInPath().path, $0.standardizedFileURL.path) }
+                .sorted { $0.observed.count > $1.observed.count }
+        }
+    }
+    private var stream: FSEventStreamRef?
+    private let queue = DispatchQueue(label: "com.shawnshoper.peek.file-events", qos: .utility)
+
+    init(roots: [URL], since cursor: UInt64, receive: @escaping @Sendable ([FileSearchFileEvent]) -> Void) {
+        guard !roots.isEmpty else { return }
+        let box = CallbackBox(roots: roots, receive: receive)
+        var context = FSEventStreamContext(version: 0,
+            info: Unmanaged.passUnretained(box).toOpaque(),
+            retain: { pointer in
+                guard let pointer else { return nil }
+                _ = Unmanaged<CallbackBox>.fromOpaque(pointer).retain()
+                return pointer
+            }, release: { pointer in
+                if let pointer { Unmanaged<CallbackBox>.fromOpaque(pointer).release() }
+            }, copyDescription: nil)
+        stream = FSEventStreamCreate(nil, { _, info, count, rawPaths, flags, ids in
+            guard let info else { return }
+            let box = Unmanaged<CallbackBox>.fromOpaque(info).takeUnretainedValue()
+            let paths = unsafeBitCast(rawPaths, to: NSArray.self) as! [String]
+            let events = (0..<min(count, paths.count)).map {
+                let raw = paths[$0]
+                let mapping = box.pathMappings.first { raw == $0.observed || raw.hasPrefix($0.observed + "/") }
+                let path = mapping.map { $0.requested + raw.dropFirst($0.observed.count) } ?? raw
+                return FileSearchFileEvent(path: path, flags: flags[$0], id: ids[$0])
+            }
+            box.receive(events)
+        }, &context, box.pathMappings.map(\.observed) as CFArray, cursor, 1,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes
+                | kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot))
+        if let stream { FSEventStreamSetDispatchQueue(stream, queue) }
+    }
+
+    func start() -> Bool { stream.map { FSEventStreamStart($0) } ?? false }
+    func stop() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
+    }
+    deinit { stop() }
+
+    static func changedURLs(_ events: [FileSearchFileEvent], roots: [FileSearchBackgroundRoot],
+                            policy: FileSearchExclusionPolicy) -> [URL] {
+        let lost = FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagKernelDropped | kFSEventStreamEventFlagEventIdsWrapped
+            | kFSEventStreamEventFlagRootChanged)
+        if events.contains(where: { $0.flags & lost != 0 }) { return roots.map(\.url) }
+        let structural = FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated
+            | kFSEventStreamEventFlagItemRemoved | kFSEventStreamEventFlagItemRenamed
+            | kFSEventStreamEventFlagMustScanSubDirs)
+        let ownStorage = FileSearchIndexStore.defaultDatabaseURL.deletingLastPathComponent().standardizedFileURL.path
+        let urls = events.compactMap { event -> URL? in
+            if event.flags & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) != 0 { return nil }
+            // Parent mtime events accompany child writes. FileEvents already
+            // supplies the changed children; don't turn them into root scans.
+            if event.flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0,
+               event.flags & structural == 0 { return nil }
+            let url = URL(fileURLWithPath: event.path).standardizedFileURL
+            if url.path == ownStorage || url.path.hasPrefix(ownStorage + "/") { return nil }
+            guard let owner = roots.filter({ url.path == $0.url.path || url.path.hasPrefix($0.url.path + "/") })
+                .max(by: { $0.url.path.count < $1.url.path.count }),
+                !FileSearchBackgroundIndexer<FileSearchIndexStore>.isExcludedChange(url, owner: owner, policy: policy)
+            else { return nil }
+            return url
+        }
+        return FileSearchBackgroundIndexer<FileSearchIndexStore>.coalescedChangePaths(urls, roots: roots)
+    }
+}
 
 /// Bounded backoff for an explicit per-folder refresh that is waiting behind
 /// another index pass. The old fixed 350 ms poll could live forever after the
@@ -83,6 +172,11 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     private var lifecycleTask: Task<Void, Never>?
     private var activityTask: Task<Void, Never>?
     private var captureActivityTask: Task<Void, Never>?
+    private var eventSetupTask: Task<Void, Never>?
+    private var eventDeliveryTask: Task<Void, Never>?
+    private var eventStream: FileSearchEventStream?
+    private var eventLease: FileSearchBackgroundRootLease?
+    private var eventSession = UUID()
 
     private init() {
         let store = FileSearchIndexStore()
@@ -94,6 +188,7 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     }
 
     func start() {
+        restartEventMonitoring()
         let retainedRoots = retainedRootURLs()
         let applicationRootCount = FileSearchApplicationRootStore.shared.roots
             .filter { $0.status.isAuthorized }.count
@@ -126,6 +221,8 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
                     delay: coordinatorConfiguration.firstRunDelay
                         + indexerConfiguration.initialUserIdleDuration
                 )
+            } else if metadata?.phase == .limited {
+                await FileSearchInitialIndexProgressTracker.shared.limitReached()
             } else {
                 await FileSearchInitialIndexProgressTracker.shared.clear()
             }
@@ -134,6 +231,7 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     }
 
     func stop() {
+        stopEventMonitoring()
         enqueueLifecycle { coordinator in
             await coordinator.stop()
         }
@@ -238,6 +336,7 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
     /// filesystem scan. New roots are marked dirty for the next scheduled
     /// incremental cycle; removed roots stop appearing in search at once.
     func authorizedRootsDidChange() {
+        restartEventMonitoring()
         let retainedRoots = retainedRootURLs()
         let precedingTask = lifecycleTask
         let store = store
@@ -276,6 +375,85 @@ final class FileSearchIndexRuntime: FileSearchIndexActivityControlling {
                 root.status.isAuthorized ? root.url : nil
             }
         return applicationRoots + documentRoots
+    }
+
+    private func stopEventMonitoring() {
+        eventSession = UUID()
+        eventSetupTask?.cancel()
+        eventSetupTask = nil
+        eventStream?.stop()
+        eventStream = nil
+        if let lease = eventLease { Task { await lease.release() } }
+        eventLease = nil
+    }
+
+    private func restartEventMonitoring() {
+        stopEventMonitoring()
+        let session = eventSession
+        let store = store
+        eventSetupTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let lease = try await Self.makeRootProvider(store: store)(.incremental)
+                guard !Task.isCancelled, self.eventSession == session else {
+                    await lease.release()
+                    return
+                }
+                self.eventLease = lease
+                let cursor = try await store.fileEventCursor()
+                let startID = cursor ?? FSEventsGetCurrentEventId()
+                if cursor == nil {
+                    // One catch-up pass when migrating a pre-watcher index.
+                    // Persist the baseline before starting the stream so a
+                    // crash/restart replays changes during setup as well.
+                    try await store.recordFileEvents(lease.roots.map(\.url), cursor: startID)
+                }
+                guard !Task.isCancelled, self.eventSession == session else { return }
+                let stream = FileSearchEventStream(roots: lease.roots.map(\.url), since: startID) { [weak self] events in
+                    Task { @MainActor in
+                        guard let self, self.eventSession == session else { return }
+                        self.receiveFileEvents(events, roots: lease.roots)
+                    }
+                }
+                guard stream.start() else {
+                    throw FileSearchIndexStoreError.unavailable(L10n.tr("文件变化监听不可用；将保留定期校验，请尝试重启应用。"))
+                }
+                self.eventStream = stream
+                await self.coordinator.setEventMonitoringAvailable(true)
+            } catch {
+                guard self.eventSession == session else { return }
+                Self.logger.error("File event monitoring failed: \(error.localizedDescription, privacy: .private)")
+                await self.coordinator.setEventMonitoringAvailable(false)
+                await FileSearchInitialIndexProgressTracker.shared.fail(error.localizedDescription)
+                if let lease = self.eventLease { await lease.release() }
+                self.eventLease = nil
+            }
+        }
+    }
+
+    private func receiveFileEvents(_ events: [FileSearchFileEvent], roots: [FileSearchBackgroundRoot]) {
+        let policy = FileSearchExclusionSettings.shared.policy
+        let previous = eventDeliveryTask
+        let store = store
+        let coordinator = coordinator
+        eventDeliveryTask = Task.detached(priority: .utility) {
+            _ = await previous?.value
+            let applications = FileSearchEventStream.changedURLs(events.filter { event in
+                URL(fileURLWithPath: event.path).pathComponents.contains { $0.lowercased().hasSuffix(".app") }
+            }, roots: roots, policy: policy).filter { $0.pathExtension.lowercased() == "app" }
+            let paths = Array(Set(FileSearchEventStream.changedURLs(events, roots: roots, policy: policy) + applications))
+            // In particular, never persist a cursor for our own SQLite/WAL
+            // changes: that write would create another event forever.
+            guard !paths.isEmpty else { return }
+            let cursor = events.map(\.id).max() ?? 0
+            do {
+                try await store.recordFileEvents(paths, cursor: cursor)
+                await coordinator.fileEventsDidArrive(applicationPaths: Set(applications.map(\.path)))
+            } catch {
+                Self.logger.error("Unable to persist file events: \(error.localizedDescription, privacy: .private)")
+                await FileSearchInitialIndexProgressTracker.shared.fail(error.localizedDescription)
+            }
+        }
     }
 
     private func enqueueLifecycle(

@@ -233,6 +233,51 @@ private enum FileSearchBackgroundIndexControl: Error {
     case deferred
 }
 
+/// A restricted descendant is a local warning, not a failure of its parent.
+/// Root-level denial and unexpected I/O failures still abort the generation.
+/// Used only by one synchronous FileManager enumeration at a time.
+final class FileSearchTraversalIssues {
+    private(set) var inaccessiblePaths: Set<String> = []
+    private(set) var fatalError: Error?
+
+    func continueAfter(_ error: Error, at url: URL, root: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(root.standardizedFileURL.path + "/") else {
+            fatalError = error
+            return false
+        }
+        var underlying = error as NSError
+        for _ in 0..<8 {
+            if (underlying.domain == NSCocoaErrorDomain && underlying.code == CocoaError.fileReadNoPermission.rawValue)
+                || (underlying.domain == NSPOSIXErrorDomain && [Int(EACCES), Int(EPERM)].contains(underlying.code)) {
+                inaccessiblePaths.insert(path)
+                return true
+            }
+            if (underlying.domain == NSCocoaErrorDomain && [CocoaError.fileNoSuchFile.rawValue, CocoaError.fileReadNoSuchFile.rawValue].contains(underlying.code))
+                || (underlying.domain == NSPOSIXErrorDomain && underlying.code == Int(ENOENT)) {
+                // A descendant removed during enumeration is not permission
+                // loss: allow its old metadata to disappear normally.
+                return true
+            }
+            guard let next = underlying.userInfo[NSUnderlyingErrorKey] as? NSError else { break }
+            underlying = next
+        }
+        fatalError = error
+        return false
+    }
+
+    var distinctInaccessiblePaths: [String] {
+        inaccessiblePaths.filter { candidate in
+            var parent = (candidate as NSString).deletingLastPathComponent
+            while parent != "/" && !parent.isEmpty {
+                if inaccessiblePaths.contains(parent) { return false }
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+            return true
+        }.sorted()
+    }
+}
+
 private struct FileSearchBackgroundRootScanResult {
     var indexedItems = 0
     var statistics = FileSearchRootCommitStatistics(
@@ -242,6 +287,22 @@ private struct FileSearchBackgroundRootScanResult {
     )
     var reachedLimit = false
     var rootChangedDuringScan = false
+    var unencounteredItems = 0
+}
+
+/// The bounded count-pass inventory distinguishes newly-created entries from
+/// entries belonging to later roots. Counts alone cannot make that distinction.
+private struct FileSearchRootProgress {
+    var remainingPaths: Set<String>
+    var encountered = 0
+    var skipped = 0
+    var additional = 0
+
+    mutating func encounter(_ path: String, skipped: Bool = false) {
+        encountered += 1
+        if remainingPaths.remove(path) == nil { additional += 1 }
+        if skipped { self.skipped += 1 }
+    }
 }
 
 private struct FileSearchIndexExecutionPolicy: Sendable {
@@ -254,10 +315,10 @@ private struct FileSearchIndexExecutionPolicy: Sendable {
     var ignoredActivityBlockers: Set<FileSearchActivityBlocker> {
         // Keyboard and pointer activity must not starve indexing on a machine
         // that is used throughout the day. Both execution profiles may keep
-        // advancing under their own CPU and I/O budgets. Explicit PEEK work
-        // (search, capture, OCR and file operations) and system pressure remain
-        // hard blockers because they are not included in this allow-list.
-        [.userActive]
+        // advancing under their own CPU and I/O budgets, including while the
+        // search panel reads committed SQLite generations. Capture, OCR, file
+        // operations and system pressure remain hard blockers.
+        [.userActive, .searchPanel]
     }
 }
 
@@ -273,6 +334,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
     private let sink: Sink
     private let rootProvider: FileSearchBackgroundRootProvider
     private let activityGate: FileSearchActivityGate
+    private let cpuWorkMeter: FileSearchCPUWorkMeter
     private let incrementalCPUBudget: FileSearchCPUBudget
     private let fastCPUBudget: FileSearchCPUBudget
     private let incrementalIOBudget: FileSearchIOBudget
@@ -308,15 +370,19 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         successfulRootScanDates = defaultsStore?.rootScanDates(
             forKey: rootScanHistoryDefaultsKey
         ) ?? [:]
+        let workMeter = FileSearchCPUWorkMeter()
+        cpuWorkMeter = workMeter
         incrementalCPUBudget = FileSearchCPUBudget(
             targetFraction: configuration.targetCPUFraction,
-            microBatchSize: configuration.microBatchSize
+            microBatchSize: configuration.microBatchSize,
+            workMeter: workMeter
         )
         fastCPUBudget = FileSearchCPUBudget(
             targetFraction: configuration.initialTargetCPUFraction,
             microBatchSize: configuration.initialMicroBatchSize,
-            maximumTargetFraction: 0.05,
-            maximumMicroBatchSize: 512
+            maximumTargetFraction: 0.25,
+            maximumMicroBatchSize: 512,
+            workMeter: workMeter
         )
         incrementalIOBudget = FileSearchIOBudget(
             maximumEntriesPerSecond: configuration.incrementalMaximumEntriesPerSecond
@@ -330,25 +396,25 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         try await sink.lastSuccessfulIndexDate()
     }
 
+    func hasPendingChanges() async throws -> Bool {
+        try await !sink.dirtyPaths(limit: 1).isEmpty
+    }
+
     func run(
         mode: FileSearchBackgroundIndexMode,
         resourceProfile: FileSearchIndexResourceProfile = .automatic,
-        requestedRootPaths: Set<String>? = nil
+        requestedRootPaths: Set<String>? = nil,
+        requestedChangePaths: Set<String>? = nil
     ) async -> FileSearchBackgroundIndexRunResult {
-        let isInitialBuild: Bool
-        let policy: FileSearchIndexExecutionPolicy
+        var policy: FileSearchIndexExecutionPolicy
         do {
-            let lastSuccessfulIndexDate = try await sink.lastSuccessfulIndexDate()
-            isInitialBuild = mode == .full && lastSuccessfulIndexDate == nil
-            let isFast = isInitialBuild || resourceProfile == .fast
-            policy = FileSearchIndexExecutionPolicy(
+            await initialIndexProgress.setCapacityWarning(try await sink.hasReachedLimit())
+            // A partially built/full index must not fall back to the very
+            // slow maintenance tier just because one app root committed.
+            let isFast = mode == .full || resourceProfile == .fast
+            policy = executionPolicy(
                 isFast: isFast,
-                ignoresSystemDeferral: resourceProfile == .fast,
-                batchSize: isFast
-                    ? configuration.initialMicroBatchSize
-                    : configuration.microBatchSize,
-                cpuBudget: isFast ? fastCPUBudget : incrementalCPUBudget,
-                ioBudget: isFast ? fastIOBudget : incrementalIOBudget
+                ignoresSystemDeferral: resourceProfile == .fast
             )
             await activityGate.setRequiredIdleDuration(
                 isFast
@@ -360,8 +426,8 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             }
             try checkSystemDeferral(policy: policy)
             // Start CPU accounting before bookmark resolution/reconciliation.
-            // General keyboard and pointer activity is allowed, while explicit
-            // PEEK work and system pressure still keep the gate closed.
+            // Search and keyboard/pointer activity are allowed. Capture/OCR,
+            // file operations and system pressure still keep the gate closed.
             await policy.cpuBudget.reset()
             await policy.ioBudget.reset()
         } catch {
@@ -369,6 +435,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                 || error is FileSearchBackgroundIndexControl {
                 return .deferred
             }
+            await initialIndexProgress.fail(error.localizedDescription)
             return .failed(error.localizedDescription)
         }
 
@@ -376,21 +443,46 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         do {
             // Root providers may resolve bookmarks and reconcile SQLite, so
             // they must run only after both the idle and CPU-budget checks.
-            lease = try await rootProvider(mode)
+            lease = try await FileSearchCPUWork.$meter.withValue(cpuWorkMeter) {
+                try await rootProvider(mode)
+            }
         } catch is CancellationError {
             return .deferred
         } catch {
+            await initialIndexProgress.fail(error.localizedDescription)
             return .failed(error.localizedDescription)
         }
 
         let result: FileSearchBackgroundIndexRunResult
         do {
-            result = try await execute(
-                mode: mode,
-                availableRoots: lease.roots,
-                policy: policy,
-                requestedRootPaths: requestedRootPaths
-            )
+            if !policy.isFast {
+                let unindexed = try await sink.hasUnindexedRoots(lease.roots.map(\.url))
+                let rootPaths = Set(lease.roots.map(\.url.path))
+                let rootRecovery = try await sink.dirtyPaths(limit: configuration.dirtyPathLimit)
+                    .contains { rootPaths.contains($0.standardizedFileURL.path) }
+                if unindexed || rootRecovery {
+                    // Migration, event loss and changed authorization require
+                    // bounded recovery, not a multi-hour maintenance crawl.
+                    policy = executionPolicy(isFast: true, ignoresSystemDeferral: false)
+                    await policy.cpuBudget.reset()
+                    await policy.ioBudget.reset()
+                }
+            }
+            Self.logger.info("Index mode=\(mode.rawValue, privacy: .public) fast=\(policy.isFast, privacy: .public)")
+            result = try await FileSearchCPUWork.$meter.withValue(cpuWorkMeter) {
+                if let requestedChangePaths {
+                    // A small application event must not wait behind cleanup
+                    // or counting of a cancelled, broad file generation.
+                    return try await updateChangedPaths(requestedChangePaths.map { URL(fileURLWithPath: $0) },
+                        roots: lease.roots, policy: policy)
+                }
+                return try await execute(
+                    mode: mode,
+                    availableRoots: lease.roots,
+                    policy: policy,
+                    requestedRootPaths: requestedRootPaths
+                )
+            }
         } catch is CancellationError {
             result = .deferred
         } catch FileSearchBackgroundIndexControl.deferred {
@@ -398,45 +490,87 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         } catch {
             result = .failed(error.localizedDescription)
         }
-        if isInitialBuild {
-            switch result {
-            case .deferred, .failed:
-                await initialIndexProgress.waitToRetry()
-            case .completed, .noChanges:
-                break
-            }
-        } else if case .deferred = result {
-            await initialIndexProgress.clear()
-        } else if case .failed = result {
-            await initialIndexProgress.clear()
+        switch result {
+        case .failed(let message):
+            await initialIndexProgress.fail(message)
+        case .deferred:
+            await initialIndexProgress.waitToRetry()
+        case .limited:
+            await initialIndexProgress.limitReached()
+        case .completed, .noChanges:
+            break
         }
         await lease.release()
         return result
+    }
+
+    private func executionPolicy(
+        isFast: Bool,
+        ignoresSystemDeferral: Bool
+    ) -> FileSearchIndexExecutionPolicy {
+        FileSearchIndexExecutionPolicy(
+            isFast: isFast,
+            ignoresSystemDeferral: ignoresSystemDeferral,
+            batchSize: isFast ? configuration.initialMicroBatchSize : configuration.microBatchSize,
+            cpuBudget: isFast ? fastCPUBudget : incrementalCPUBudget,
+            ioBudget: isFast ? fastIOBudget : incrementalIOBudget
+        )
     }
 
     private func execute(
         mode: FileSearchBackgroundIndexMode,
         availableRoots: [FileSearchBackgroundRoot],
         policy: FileSearchIndexExecutionPolicy,
-        requestedRootPaths: Set<String>?
+        requestedRootPaths: Set<String>?,
+        finalizeProgress: Bool = true
     ) async throws -> FileSearchBackgroundIndexRunResult {
         try await purgeOrphanedRows(policy: policy)
         let orderedRoots = Self.orderedDistinctRoots(availableRoots)
-        let dirtyPaths: [URL]
+        // Finish the small application phase before counting a potentially
+        // huge personal folder. Each phase has a real measured denominator.
+        if mode == .full, requestedRootPaths == nil,
+           orderedRoots.contains(where: { $0.scope == .applications }),
+           orderedRoots.contains(where: { $0.scope == .files }) {
+            var completed = 0
+            var items = 0
+            var limited = false
+            var failures: [String] = []
+            for scope in [FileSearchBackgroundRootScope.applications, .files] {
+                let result = try await execute(mode: mode, availableRoots: availableRoots, policy: policy,
+                    requestedRootPaths: Set(orderedRoots.filter { $0.scope == scope }.map(\.url.path)),
+                    finalizeProgress: false)
+                switch result {
+                case let .completed(_, count, indexed): completed += count; items += indexed
+                case let .limited(_, count, indexed): completed += count; items += indexed; limited = true
+                case .failed(let message): failures.append(message)
+                case .deferred: return .deferred
+                case .noChanges: break
+                }
+            }
+            if !failures.isEmpty { return .failed(failures.joined(separator: "\n")) }
+            if !limited, completed == orderedRoots.count {
+                try await sink.setGlobalLimitReached(false)
+                await initialIndexProgress.finish()
+                return .completed(mode: mode, roots: completed, items: items)
+            }
+            await initialIndexProgress.limitReached()
+            return .limited(mode: mode, roots: completed, items: items)
+        }
         let roots: [FileSearchBackgroundRoot]
         if let requestedRootPaths {
-            dirtyPaths = []
             roots = orderedRoots.filter {
                 requestedRootPaths.contains($0.url.standardizedFileURL.path)
             }
         } else { switch mode {
         case .full:
-            dirtyPaths = []
             roots = orderedRoots
         case .incremental:
-            dirtyPaths = try await sink.dirtyPaths(
+            let dirtyPaths = try await sink.dirtyPaths(
                 limit: configuration.dirtyPathLimit
             )
+            if try await !sink.hasUnindexedRoots(orderedRoots.map(\.url)) {
+                return try await updateChangedPaths(dirtyPaths, roots: orderedRoots, policy: policy)
+            }
             var selectedRootPaths = Set(dirtyPaths.compactMap { dirty -> String? in
                 let dirtyPath = dirty.standardizedFileURL.path
                 return orderedRoots
@@ -447,16 +581,8 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                     .url.path
             })
 
-            // Dirty markers cover app-owned mutations. Finder, browsers and
-            // downloaders do not notify this process, so every periodic
-            // incremental run also refreshes exactly one clean retained root.
-            // Persisted per-root success times make the choice survive relaunch
-            // without turning a 30-minute pass into a full scan.
-            let cleanRoots = orderedRoots.filter {
-                !selectedRootPaths.contains($0.url.path)
-            }
-            if let oldestCleanRoot = oldestSuccessfullyScannedRoot(in: cleanRoots) {
-                selectedRootPaths.insert(oldestCleanRoot.url.path)
+            for root in orderedRoots where try await sink.hasUnindexedRoots([root.url]) {
+                selectedRootPaths.insert(root.url.path)
             }
             roots = orderedRoots.filter {
                 selectedRootPaths.contains($0.url.path)
@@ -469,17 +595,57 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             return .completed(mode: mode, roots: 0, items: 0)
         }
 
-        await initialIndexProgress.begin(
-            rootCount: roots.count,
-            phase: policy.isFast ? .indexingApplications : .indexingFiles
-        )
-
         var completedRoots = 0
         var totalItems = 0
         var reachedGlobalLimit = false
         let everyAvailableRootPath = orderedRoots.map(\.url.path)
 
+        // Establish a real denominator before indexing. This count pass uses
+        // only classification metadata, applies the same exclusions as the
+        // index pass, and remains subject to the same activity/CPU/I/O gates.
+        await initialIndexProgress.beginCounting(rootCount: roots.count)
+        var countedItems = 0
+        var inventories: [String: Set<String>] = [:]
+        var failedRootPaths: Set<String> = []
+        var failures: [String] = []
         for root in roots {
+            try Task.checkCancellation()
+            let nestedRootsToExclude = everyAvailableRootPath.filter {
+                $0 != root.url.path
+                    && Self.path($0, isEqualToOrDescendantOf: root.url.path)
+            }
+            await initialIndexProgress.beginRoot(named: root.url.path)
+            do {
+                let paths = try await countIndexableItems(
+                    in: root,
+                    excludedSubtrees: nestedRootsToExclude,
+                    maximumItems: max(0, configuration.maximumIndexedItems - countedItems),
+                    policy: policy
+                )
+                inventories[root.url.path] = paths
+                countedItems += paths.count
+            } catch {
+                // A denied/missing directory must not stop unrelated roots.
+                // Cancellation and workload deferral still stop the whole run.
+                if error is CancellationError || error is FileSearchBackgroundIndexControl {
+                    throw error
+                }
+                failedRootPaths.insert(root.url.path)
+                failures.append(Self.rootFailureMessage(root, error: error))
+                try await sink.markDirty(root.url)
+            }
+            await initialIndexProgress.completeRoot()
+            if countedItems >= configuration.maximumIndexedItems { break }
+        }
+        await initialIndexProgress.beginIndexing(
+            rootCount: roots.count - failedRootPaths.count,
+            totalItemCount: countedItems,
+            phase: roots.first?.scope == .applications
+                ? .indexingApplications
+                : .indexingFiles
+        )
+
+        for root in roots where !failedRootPaths.contains(root.url.path) {
             // Preserve older committed generations for lower-priority roots
             // when the global cap is reached. Committing an empty generation
             // here would erase still-useful search results.
@@ -488,18 +654,23 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             guard try await waitForActivityGate(policy: policy) else {
                 throw FileSearchBackgroundIndexControl.deferred
             }
-            await initialIndexProgress.beginRoot(
-                named: root.url.lastPathComponent.isEmpty
-                    ? root.url.path
-                    : root.url.lastPathComponent,
-                phase: root.scope == .applications
-                    ? .indexingApplications
-                    : .indexingFiles
-            )
-
-            let retainedItemCount = try await sink.committedItemCount(
+            var retainedItemCount = try await sink.committedItemCount(
                 excludingRootPath: root.url.path
             )
+            let countedPaths = inventories.removeValue(forKey: root.url.path) ?? []
+            if root.scope == .applications {
+                let needed = min(configuration.maximumIndexedItems, countedPaths.count)
+                while configuration.maximumIndexedItems - retainedItemCount < needed {
+                    let reclaimed = try await sink.reclaimFileEntries(
+                        excludingRootPath: root.url.path,
+                        limit: min(512, needed - (configuration.maximumIndexedItems - retainedItemCount))
+                    )
+                    guard reclaimed > 0 else { break }
+                    retainedItemCount -= reclaimed
+                    await initialIndexProgress.setCapacityWarning(true)
+                    try await throttleAfterWork(processedEntries: reclaimed, policy: policy)
+                }
+            }
             let remainingCapacity = configuration.maximumIndexedItems
                 - retainedItemCount
             guard remainingCapacity > 0 else {
@@ -508,7 +679,13 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                 break
             }
 
+            await initialIndexProgress.beginRoot(
+                named: root.url.path,
+                phase: root.scope == .applications ? .indexingApplications : .indexingFiles,
+                countedItemCount: countedPaths.count
+            )
             let token = try await sink.beginRootGeneration(rootURL: root.url)
+            var committed = false
             do {
                 let nestedRootsToExclude = everyAvailableRootPath.filter {
                     $0 != root.url.path
@@ -519,6 +696,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                     token: token,
                     excludedSubtrees: nestedRootsToExclude,
                     remainingCapacity: remainingCapacity,
+                    countedPaths: countedPaths,
                     policy: policy
                 )
                 try await sink.commitRootGeneration(
@@ -526,13 +704,16 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                     statistics: result.statistics,
                     reachedLimit: result.reachedLimit
                 )
+                committed = true
                 if result.rootChangedDuringScan {
                     // The generation is internally valid, but the directory
                     // changed while it was being walked. Keep a dirty marker
                     // so the next incremental cycle performs a catch-up pass.
                     try await sink.markDirty(root.url)
                 }
-                await initialIndexProgress.completeApplicationRoot()
+                await initialIndexProgress.completeRoot(
+                    unencounteredItems: result.unencounteredItems
+                )
                 recordSuccessfulScan(of: root)
                 try await purgeObsoleteRows(for: token, policy: policy)
                 completedRoots += 1
@@ -543,6 +724,9 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                     break
                 }
             } catch {
+                // Once committed, a maintenance failure must not pretend that
+                // the new generation was rolled back.
+                if committed { throw error }
                 do {
                     try await sink.abortRootGeneration(token)
                 } catch let abortError {
@@ -550,7 +734,12 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
                         "Abort staging generation failed root=\(token.rootPath, privacy: .private): \(abortError.localizedDescription, privacy: .private)"
                     )
                 }
-                throw error
+                if error is CancellationError || error is FileSearchBackgroundIndexControl {
+                    throw error
+                }
+                failures.append(Self.rootFailureMessage(root, error: error))
+                try await sink.markDirty(root.url)
+                await initialIndexProgress.completeRoot(failed: true)
             }
         }
 
@@ -561,7 +750,210 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             try await sink.setGlobalLimitReached(false)
         }
 
+        // Files may have disappeared after the count pass. Reconcile the
+        // denominator to the work actually encountered, then hide progress
+        // only after every successful commit/limit decision has completed.
+        await initialIndexProgress.reconcileTotalWithEncounteredItems()
+        guard failures.isEmpty else {
+            // Healthy roots are already committed; failed roots retain their
+            // old generation and dirty marker for a later/manual retry.
+            return .failed(failures.joined(separator: "\n"))
+        }
+        let storedLimit = try await sink.hasReachedLimit()
+        if reachedGlobalLimit || (finalizeProgress && storedLimit) {
+            await initialIndexProgress.limitReached()
+            return .limited(mode: mode, roots: completedRoots, items: totalItems)
+        }
+        if finalizeProgress { await initialIndexProgress.finish() }
+
         return .completed(mode: mode, roots: completedRoots, items: totalItems)
+    }
+
+    /// A filesystem event replaces only the affected subtree. The staging
+    /// generation is never published if a partial scan hits capacity or fails.
+    private func updateChangedPaths(
+        _ urls: [URL],
+        roots: [FileSearchBackgroundRoot],
+        policy: FileSearchIndexExecutionPolicy
+    ) async throws -> FileSearchBackgroundIndexRunResult {
+        let targets = Self.coalescedChangePaths(urls, roots: roots)
+        guard !targets.isEmpty else {
+            if try await sink.hasReachedLimit() { await initialIndexProgress.limitReached() }
+            return .noChanges
+        }
+        var completed = 0
+        var processed = 0
+        var limited = false
+        var failures: [String] = []
+        for target in targets {
+            try Task.checkCancellation()
+            guard let owner = roots.filter({ Self.path(target.path, isEqualToOrDescendantOf: $0.url.path) })
+                .max(by: { $0.url.path.count < $1.url.path.count }) else { continue }
+            if target.path == owner.url.path {
+                let result = try await execute(
+                    mode: .incremental, availableRoots: roots, policy: policy,
+                    requestedRootPaths: [owner.url.path]
+                )
+                switch result {
+                case let .completed(_, count, items): completed += count; processed += items
+                case let .limited(_, count, items): completed += count; processed += items; limited = true
+                case .failed(let message): failures.append(message)
+                case .deferred: throw FileSearchBackgroundIndexControl.deferred
+                case .noChanges: break
+                }
+                continue
+            }
+            let subtree = FileSearchBackgroundRoot(url: target, scope: owner.scope)
+            let nested = roots.map(\.url.path).filter {
+                $0 != owner.url.path && Self.path($0, isEqualToOrDescendantOf: target.path)
+            }
+            var token: FileSearchRootGeneration?
+            do {
+                let exclusions = await MainActor.run { FileSearchExclusionSettings.shared.policy }
+                let excluded = Self.isExcludedChange(target, owner: owner, policy: exclusions)
+                var missing = false
+                do { _ = try target.resourceValues(forKeys: Self.countResourceKeys) }
+                catch {
+                    guard Self.isMissing(error) else { throw error }
+                    missing = true
+                }
+                await initialIndexProgress.beginCounting(rootCount: 1)
+                await initialIndexProgress.beginRoot(named: target.path)
+                let inventory = missing || excluded ? Set<String>() : try await countIndexableItems(
+                    in: subtree, excludedSubtrees: nested,
+                    maximumItems: configuration.maximumIndexedItems, policy: policy
+                )
+                let oldCount = try await sink.committedItemCount(under: target.path, rootPath: owner.url.path)
+                var retained = try await sink.committedItemCount(excludingRootPath: nil) - oldCount
+                if owner.scope == .applications || target.pathExtension.lowercased() == "app" {
+                    while configuration.maximumIndexedItems - retained < inventory.count {
+                        let freed = try await sink.reclaimFileEntries(
+                            excludingRootPath: owner.url.path,
+                            limit: min(512, inventory.count - (configuration.maximumIndexedItems - retained))
+                        )
+                        guard freed > 0 else { break }
+                        retained -= freed
+                        try await throttleAfterWork(processedEntries: freed, policy: policy)
+                    }
+                }
+                let capacity = max(0, configuration.maximumIndexedItems - retained)
+                guard inventory.isEmpty || capacity >= inventory.count else {
+                    limited = true
+                    try await sink.setGlobalLimitReached(true)
+                    continue
+                }
+                await initialIndexProgress.beginIndexing(rootCount: 1, totalItemCount: inventory.count,
+                    phase: owner.scope == .applications ? .indexingApplications : .indexingFiles)
+                await initialIndexProgress.beginRoot(named: target.path, countedItemCount: inventory.count)
+                let generation = try await sink.beginRootGeneration(rootURL: owner.url)
+                token = generation
+                var result = FileSearchBackgroundRootScanResult()
+                if !missing && !excluded {
+                    result = try await scanRoot(subtree, token: generation, excludedSubtrees: nested,
+                        remainingCapacity: capacity, countedPaths: inventory, policy: policy)
+                }
+                guard !result.reachedLimit else {
+                    try await sink.abortRootGeneration(generation)
+                    token = nil
+                    try await sink.setGlobalLimitReached(true)
+                    limited = true
+                    continue
+                }
+                try await sink.commitSubtreeGeneration(generation, path: target.path)
+                token = nil
+                if result.rootChangedDuringScan { try await sink.markDirty(target) }
+                await initialIndexProgress.completeRoot(unencounteredItems: result.unencounteredItems)
+                completed += 1
+                processed += result.indexedItems
+            } catch {
+                if let token { try? await sink.abortRootGeneration(token) }
+                if error is CancellationError || error is FileSearchBackgroundIndexControl { throw error }
+                failures.append(Self.rootFailureMessage(subtree, error: error))
+            }
+        }
+        if !failures.isEmpty { return .failed(failures.joined(separator: "\n")) }
+        let storedLimit = try await sink.hasReachedLimit()
+        if limited || storedLimit {
+            await initialIndexProgress.limitReached()
+            return .limited(mode: .incremental, roots: completed, items: processed)
+        }
+        await initialIndexProgress.finish()
+        return .completed(mode: .incremental, roots: completed, items: processed)
+    }
+
+    nonisolated static func coalescedChangePaths(
+        _ urls: [URL], roots: [FileSearchBackgroundRoot]
+    ) -> [URL] {
+        var paths = Set<String>()
+        for url in urls {
+            var candidate = url.standardizedFileURL
+            // Changes inside an application invalidate its bundle metadata,
+            // not thousands of package descendants.
+            while candidate.pathComponents.count > 1 {
+                if candidate.pathExtension.lowercased() == "app" { break }
+                if candidate.deletingLastPathComponent().path == "/" { candidate = url.standardizedFileURL; break }
+                candidate.deleteLastPathComponent()
+            }
+            if candidate.pathExtension.lowercased() != "app" { candidate = url.standardizedFileURL }
+            guard roots.contains(where: { Self.path(candidate.path, isEqualToOrDescendantOf: $0.url.path) }) else { continue }
+            paths.insert(candidate.path)
+        }
+        func ownerPath(_ path: String) -> String? {
+            roots.filter { Self.path(path, isEqualToOrDescendantOf: $0.url.path) }
+                .max { $0.url.path.count < $1.url.path.count }?.url.path
+        }
+        var selected: [String] = []
+        for path in paths.sorted(by: { $0.count == $1.count ? $0 < $1 : $0.count < $1.count }) {
+            if !selected.contains(where: {
+                ownerPath(path) == ownerPath($0) && Self.path(path, isEqualToOrDescendantOf: $0)
+            }) { selected.append(path) }
+        }
+        let orderedRoots = Self.orderedDistinctRoots(roots)
+        let changedApplications = urls.compactMap { url -> String? in
+            var candidate = url.standardizedFileURL
+            while candidate.pathComponents.count > 1 {
+                if candidate.pathExtension.lowercased() == "app" { return candidate.path }
+                candidate.deleteLastPathComponent()
+            }
+            return nil
+        }
+        func priority(_ path: String) -> Int {
+            // A pending ancestor refresh may absorb a newly installed app's
+            // event. Preserve that event's priority after coalescing as well.
+            if changedApplications.contains(where: {
+                ownerPath($0) == ownerPath(path) && Self.path($0, isEqualToOrDescendantOf: path)
+            }) { return -1 }
+            let owner = ownerPath(path)
+            return orderedRoots.firstIndex { $0.url.path == owner } ?? orderedRoots.count
+        }
+        return selected.sorted {
+            priority($0) == priority($1) ? $0 < $1 : priority($0) < priority($1)
+        }.map { URL(fileURLWithPath: $0) }
+    }
+
+    nonisolated static func isExcludedChange(
+        _ url: URL, owner: FileSearchBackgroundRoot, policy: FileSearchExclusionPolicy
+    ) -> Bool {
+        var candidate = url.standardizedFileURL
+        while candidate.path != owner.url.path && candidate.pathComponents.count > 1 {
+            if shouldSkipDescendants(of: candidate, scanningRoot: owner.url)
+                || (owner.scope == .files && policy.excludes(candidate, isDirectory: true)) { return true }
+            candidate.deleteLastPathComponent()
+        }
+        return false
+    }
+
+    private nonisolated static func isMissing(_ error: Error) -> Bool {
+        let value = error as NSError
+        return (value.domain == NSCocoaErrorDomain && [CocoaError.fileNoSuchFile.rawValue, CocoaError.fileReadNoSuchFile.rawValue].contains(value.code))
+            || (value.domain == NSPOSIXErrorDomain && value.code == Int(ENOENT))
+    }
+
+    private static func rootFailureMessage(
+        _ root: FileSearchBackgroundRoot,
+        error: Error
+    ) -> String {
+        L10n.tr("无法索引 %@：%@", root.url.path, error.localizedDescription)
     }
 
     private func purgeObsoleteRows(
@@ -604,11 +996,126 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         }
     }
 
+    private func countIndexableItems(
+        in root: FileSearchBackgroundRoot,
+        excludedSubtrees: [String],
+        maximumItems: Int,
+        policy: FileSearchIndexExecutionPolicy
+    ) async throws -> Set<String> {
+        guard maximumItems > 0 else { return [] }
+
+        let fileManager = FileManager()
+        guard fileManager.fileExists(atPath: root.url.path) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let exclusionPolicy = root.scope == .files
+            ? await MainActor.run { FileSearchExclusionSettings.shared.policy }
+            : FileSearchExclusionPolicy(paths: [])
+        var paths: Set<String> = []
+        var discoveredSinceProgressUpdate = 0
+        var visitedSinceThrottle = 0
+
+        if let values = try? root.url.resourceValues(
+               forKeys: Self.countResourceKeys
+           ),
+           Self.indexableKind(
+               url: root.url,
+               values: values,
+               scope: root.scope
+           ) != nil {
+            paths.insert(root.url.path)
+            discoveredSinceProgressUpdate += 1
+        }
+
+        let rootValues = try root.url.resourceValues(forKeys: Self.countResourceKeys)
+        if paths.count < maximumItems, rootValues.isDirectory == true,
+           rootValues.isPackage != true, root.url.pathExtension.lowercased() != "app" {
+            let issues = FileSearchTraversalIssues()
+            guard let enumerator = fileManager.enumerator(
+                at: root.url,
+                includingPropertiesForKeys: Array(Self.countResourceKeys),
+                options: [.skipsPackageDescendants],
+                errorHandler: { url, error in
+                    issues.continueAfter(error, at: url, root: root.url)
+                }
+            ) else {
+                throw CocoaError(.fileReadNoPermission)
+            }
+
+            while let url = FileSearchCPUWork.measure({ enumerator.nextObject() as? URL }) {
+                try Task.checkCancellation()
+                if paths.count >= maximumItems { break }
+                visitedSinceThrottle += 1
+                try await checkActivityAfterVisitIfNeeded(
+                    visitedSinceThrottle,
+                    policy: policy
+                )
+
+                try FileSearchCPUWork.measure {
+                    let path = url.standardizedFileURL.path
+                    if excludedSubtrees.contains(where: {
+                        Self.path(path, isEqualToOrDescendantOf: $0)
+                    }) {
+                        if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                            enumerator.skipDescendants()
+                        }
+                    } else if Self.shouldSkipDescendants(of: url, scanningRoot: root.url) {
+                        enumerator.skipDescendants()
+                    } else {
+                        do {
+                            let values = try url.resourceValues(forKeys: Self.countResourceKeys)
+                            if root.scope == .files,
+                               exclusionPolicy.excludes(url, isDirectory: values.isDirectory == true) {
+                                if values.isDirectory == true { enumerator.skipDescendants() }
+                            } else if Self.indexableKind(url: url, values: values, scope: root.scope) != nil {
+                                paths.insert(path)
+                                discoveredSinceProgressUpdate += 1
+                            }
+                        } catch {
+                            guard issues.continueAfter(error, at: url, root: root.url) else { throw error }
+                            enumerator.skipDescendants()
+                        }
+                    }
+                }
+
+                if visitedSinceThrottle >= policy.batchSize {
+                    if discoveredSinceProgressUpdate > 0 {
+                        await initialIndexProgress.recordDiscovered(
+                            discoveredSinceProgressUpdate
+                        )
+                        discoveredSinceProgressUpdate = 0
+                    }
+                    try await throttleAfterWork(
+                        processedEntries: visitedSinceThrottle,
+                        policy: policy
+                    )
+                    visitedSinceThrottle = 0
+                }
+            }
+
+            if let error = issues.fatalError { throw error }
+        }
+
+        if discoveredSinceProgressUpdate > 0 {
+            await initialIndexProgress.recordDiscovered(
+                discoveredSinceProgressUpdate
+            )
+        }
+        if visitedSinceThrottle > 0 {
+            try await throttleAfterWork(
+                processedEntries: visitedSinceThrottle,
+                policy: policy
+            )
+        }
+        return paths
+    }
+
     private func scanRoot(
         _ root: FileSearchBackgroundRoot,
         token: FileSearchRootGeneration,
         excludedSubtrees: [String],
         remainingCapacity: Int,
+        countedPaths: Set<String>,
         policy: FileSearchIndexExecutionPolicy
     ) async throws -> FileSearchBackgroundRootScanResult {
         guard remainingCapacity > 0 else {
@@ -620,6 +1127,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             throw CocoaError(.fileNoSuchFile)
         }
         let keys = Self.resourceKeys
+        let traversalKeys = root.scope == .applications ? Self.countResourceKeys : keys
         let rootModificationAtStart = try? root.url.resourceValues(
             forKeys: [.contentModificationDateKey]
         ).contentModificationDate
@@ -629,141 +1137,110 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         var result = FileSearchBackgroundRootScanResult()
         var batch: [FileSearchItem] = []
         batch.reserveCapacity(policy.batchSize)
-        var discoveredSinceProgressUpdate = 0
+        var progress = FileSearchRootProgress(remainingPaths: countedPaths)
 
-        if root.scope == .files {
-            do {
-                let values = try root.url.resourceValues(forKeys: keys)
-                if let rootItem = Self.makeItem(
-                    url: root.url,
-                    values: values,
-                    fileManager: fileManager
-                ) {
-                    batch.append(rootItem)
-                    discoveredSinceProgressUpdate += 1
-                    result.indexedItems += 1
-                    Self.record(rootItem.kind, in: &result.statistics)
+        let rootValues = try root.url.resourceValues(forKeys: keys)
+        if Self.indexableKind(url: root.url, values: rootValues, scope: root.scope) != nil {
+            FileSearchCPUWork.measure {
+                do {
+                    let values = try root.url.resourceValues(forKeys: keys)
+                    if let rootItem = Self.makeItem(url: root.url, values: values, fileManager: fileManager) {
+                        batch.append(rootItem)
+                        progress.encounter(root.url.path)
+                        result.indexedItems += 1
+                        Self.record(rootItem.kind, in: &result.statistics)
+                    }
+                } catch {
+                    // Metadata failures are counted but do not invalidate a walk.
+                    result.statistics.inaccessibleLocations += 1
+                    progress.encounter(root.url.path, skipped: true)
                 }
-            } catch {
-                // A single item's metadata failure is not an enumerator
-                // integrity failure. Count it and continue with descendants.
-                result.statistics.inaccessibleLocations += 1
             }
         }
 
-        var enumerationError: Error?
+        if rootValues.isDirectory != true || rootValues.isPackage == true
+            || root.url.pathExtension.lowercased() == "app" {
+            await publishProgress(&progress)
+            if !batch.isEmpty {
+                try await flush(&batch, token: token, processedEntries: batch.count, policy: policy)
+            }
+            return result
+        }
+
+        let issues = FileSearchTraversalIssues()
         var visitedSinceThrottle = 0
         guard let enumerator = fileManager.enumerator(
             at: root.url,
-            includingPropertiesForKeys: Array(keys),
+            includingPropertiesForKeys: Array(traversalKeys),
             options: [.skipsPackageDescendants],
-            errorHandler: { _, error in
-                enumerationError = error
-                // A traversal error means the generation is incomplete. Stop
-                // immediately; the caller aborts staging and retains the old
-                // committed generation.
-                return false
+            errorHandler: { url, error in
+                issues.continueAfter(error, at: url, root: root.url)
             }
         ) else {
             throw CocoaError(.fileReadNoPermission)
         }
 
-        while let url = enumerator.nextObject() as? URL {
+        while let url = FileSearchCPUWork.measure({ enumerator.nextObject() as? URL }) {
             try Task.checkCancellation()
-            if result.indexedItems >= remainingCapacity {
-                result.reachedLimit = true
-                break
-            }
             visitedSinceThrottle += 1
             try await checkActivityAfterVisitIfNeeded(
                 visitedSinceThrottle,
                 policy: policy
             )
 
-            let path = url.standardizedFileURL.path
-            if excludedSubtrees.contains(where: {
-                Self.path(path, isEqualToOrDescendantOf: $0)
-            }) {
-                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                    enumerator.skipDescendants()
-                }
-                try await throttleIfNeededAfterVisit(
-                    &visitedSinceThrottle,
-                    discoveredSinceProgressUpdate: &discoveredSinceProgressUpdate,
-                    batch: &batch,
-                    token: token,
-                    policy: policy
-                )
-                continue
-            }
-            if Self.shouldSkipDescendants(of: url, scanningRoot: root.url) {
-                enumerator.skipDescendants()
-                result.statistics.skippedGeneratedDirectories += 1
-                try await throttleIfNeededAfterVisit(
-                    &visitedSinceThrottle,
-                    discoveredSinceProgressUpdate: &discoveredSinceProgressUpdate,
-                    batch: &batch,
-                    token: token,
-                    policy: policy
-                )
-                continue
-            }
-
-            do {
-                let values = try url.resourceValues(forKeys: keys)
-                if root.scope == .files,
-                   exclusionPolicy.excludes(
-                       url,
-                       isDirectory: values.isDirectory == true
-                   ) {
-                    if values.isDirectory == true {
+            try FileSearchCPUWork.measure {
+                let path = url.standardizedFileURL.path
+                if excludedSubtrees.contains(where: { Self.path(path, isEqualToOrDescendantOf: $0) }) {
+                    if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
                         enumerator.skipDescendants()
                     }
-                    try await throttleIfNeededAfterVisit(
-                        &visitedSinceThrottle,
-                        discoveredSinceProgressUpdate: &discoveredSinceProgressUpdate,
-                        batch: &batch,
-                        token: token,
-                        policy: policy
-                    )
-                    continue
+                    return
                 }
-                if let item = Self.makeItem(
-                    url: url,
-                    values: values,
-                    fileManager: fileManager
-                ), root.scope != .applications || item.kind == .application {
-                    batch.append(item)
-                    discoveredSinceProgressUpdate += 1
-                    result.indexedItems += 1
-                    Self.record(item.kind, in: &result.statistics)
+                if Self.shouldSkipDescendants(of: url, scanningRoot: root.url) {
+                    enumerator.skipDescendants()
+                    result.statistics.skippedGeneratedDirectories += 1
+                    return
                 }
-            } catch {
-                result.statistics.inaccessibleLocations += 1
+                do {
+                    var values = try url.resourceValues(forKeys: traversalKeys)
+                    if root.scope == .files,
+                       exclusionPolicy.excludes(url, isDirectory: values.isDirectory == true) {
+                        if values.isDirectory == true { enumerator.skipDescendants() }
+                        return
+                    }
+                    // Do not resolve localized names/types for ordinary system
+                    // files that cannot appear in an applications-only index.
+                    guard Self.indexableKind(url: url, values: values, scope: root.scope) != nil else { return }
+                    guard result.indexedItems < remainingCapacity else {
+                        result.reachedLimit = true
+                        return
+                    }
+                    if root.scope == .applications { values = try url.resourceValues(forKeys: keys) }
+                    if let item = Self.makeItem(url: url, values: values, fileManager: fileManager) {
+                        batch.append(item)
+                        progress.encounter(path)
+                        result.indexedItems += 1
+                        Self.record(item.kind, in: &result.statistics)
+                    }
+                } catch {
+                    guard issues.continueAfter(error, at: url, root: root.url) else { throw error }
+                    enumerator.skipDescendants()
+                }
             }
+
+            if result.reachedLimit { break }
 
             try await throttleIfNeededAfterVisit(
                 &visitedSinceThrottle,
-                discoveredSinceProgressUpdate: &discoveredSinceProgressUpdate,
+                progress: &progress,
                 batch: &batch,
                 token: token,
                 policy: policy
             )
         }
 
-        if let enumerationError {
-            result.statistics.inaccessibleLocations += 1
-            throw enumerationError
-        }
-        if result.indexedItems >= remainingCapacity {
-            result.reachedLimit = true
-        }
-        if discoveredSinceProgressUpdate > 0 {
-            await initialIndexProgress.recordDiscovered(
-                discoveredSinceProgressUpdate
-            )
-            discoveredSinceProgressUpdate = 0
-        }
+        if let error = issues.fatalError { throw error }
+        await publishProgress(&progress)
         if !batch.isEmpty {
             try await flush(
                 &batch,
@@ -779,27 +1256,65 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             )
             visitedSinceThrottle = 0
         }
+
+        let inaccessiblePaths = issues.distinctInaccessiblePaths
+        result.statistics.inaccessibleLocations += inaccessiblePaths.count
+        // Keep only old metadata below unreadable descendants. Never copy an
+        // entire old generation, which would resurrect files deleted elsewhere.
+        for path in inaccessiblePaths {
+            var afterPath: String?
+            while true {
+                try Task.checkCancellation()
+                try checkSystemDeferral(policy: policy)
+                guard try await waitForActivityGate(policy: policy) else {
+                    throw FileSearchBackgroundIndexControl.deferred
+                }
+                let preserved = try await sink.preserveCommittedEntries(
+                    under: path,
+                    excluding: excludedSubtrees + exclusionPolicy.paths,
+                    in: token,
+                    afterPath: afterPath,
+                    limit: min(policy.batchSize, max(0, remainingCapacity - result.indexedItems))
+                )
+                for entry in preserved.entries {
+                    progress.encounter(entry.path)
+                    Self.record(entry.kind, in: &result.statistics)
+                }
+                result.indexedItems += preserved.entries.count
+                await publishProgress(&progress)
+                await initialIndexProgress.recordIndexed(preserved.entries.count)
+                try await throttleAfterWork(processedEntries: preserved.entries.count, policy: policy)
+                guard preserved.hasMore else { break }
+                guard result.indexedItems < remainingCapacity else {
+                    // Abort rather than silently dropping protected old rows
+                    // or exceeding the global item limit.
+                    throw FileSearchIndexStoreError.unavailable(
+                        L10n.tr("索引容量不足，无法安全保留受限目录的旧索引")
+                    )
+                }
+                afterPath = preserved.entries.last?.path
+            }
+        }
+        if result.indexedItems >= remainingCapacity { result.reachedLimit = true }
         let rootModificationAtEnd = try? root.url.resourceValues(
             forKeys: [.contentModificationDateKey]
         ).contentModificationDate
         result.rootChangedDuringScan = rootModificationAtStart != rootModificationAtEnd
+        // Unseen inventory entries were removed or became excluded after the
+        // count pass. Reconcile only a complete walk, never a capped one.
+        result.unencounteredItems = result.reachedLimit ? 0 : progress.remainingPaths.count
         return result
     }
 
     private func throttleIfNeededAfterVisit(
         _ visitedCount: inout Int,
-        discoveredSinceProgressUpdate: inout Int,
+        progress: inout FileSearchRootProgress,
         batch: inout [FileSearchItem],
         token: FileSearchRootGeneration,
         policy: FileSearchIndexExecutionPolicy
     ) async throws {
         guard visitedCount >= policy.batchSize else { return }
-        if discoveredSinceProgressUpdate > 0 {
-            await initialIndexProgress.recordDiscovered(
-                discoveredSinceProgressUpdate
-            )
-            discoveredSinceProgressUpdate = 0
-        }
+        await publishProgress(&progress)
         if batch.isEmpty {
             try await throttleAfterWork(
                 processedEntries: visitedCount,
@@ -814,6 +1329,17 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             )
         }
         visitedCount = 0
+    }
+
+    private func publishProgress(_ progress: inout FileSearchRootProgress) async {
+        await initialIndexProgress.recordEncountered(
+            progress.encountered,
+            newlyDiscovered: progress.additional
+        )
+        await initialIndexProgress.recordSkipped(progress.skipped)
+        progress.encountered = 0
+        progress.skipped = 0
+        progress.additional = 0
     }
 
     /// The commit batch can be large during the first index, but explicit PEEK
@@ -923,8 +1449,14 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             .fileSizeKey,
             .creationDateKey,
             .contentModificationDateKey,
-            .contentAccessDateKey
+            .contentAccessDateKey,
+            .localizedNameKey,
+            .localizedTypeDescriptionKey
         ]
+    }
+
+    private nonisolated static var countResourceKeys: Set<URLResourceKey> {
+        [.isDirectoryKey, .isPackageKey, .isRegularFileKey]
     }
 
     nonisolated static func orderedDistinctRoots(
@@ -986,21 +1518,14 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         values: URLResourceValues,
         fileManager: FileManager
     ) -> FileSearchItem? {
-        let isApplication = url.pathExtension.caseInsensitiveCompare("app") == .orderedSame
-        let isDirectory = values.isDirectory == true
-        let isPackage = values.isPackage == true
-        let kind: FileSearchItemKind
-        if isApplication {
-            kind = .application
-        } else if isDirectory && !isPackage {
-            kind = .folder
-        } else if values.isRegularFile == true || isPackage {
-            kind = .file
-        } else {
-            return nil
-        }
+        guard let kind = indexableKind(
+            url: url,
+            values: values,
+            scope: .files
+        ) else { return nil }
+        let isApplication = kind == .application
 
-        let displayedName = fileManager.displayName(atPath: url.path)
+        let displayedName = values.localizedName ?? fileManager.displayName(atPath: url.path)
         let applicationNames = isApplication
             ? FileSearchApplicationNameResolver.resolve(
                 url: url,
@@ -1024,9 +1549,7 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         case .file: fallbackType = L10n.tr("文件")
         case .folder: fallbackType = L10n.tr("文件夹")
         }
-        let localizedType = (try? url.resourceValues(
-            forKeys: [.localizedTypeDescriptionKey]
-        ))?.localizedTypeDescription
+        let localizedType = values.localizedTypeDescription
 
         return FileSearchItem(
             url: url,
@@ -1042,6 +1565,26 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
             applicationVersion: applicationVersion,
             searchAliases: applicationNames?.aliases ?? []
         )
+    }
+
+    private nonisolated static func indexableKind(
+        url: URL,
+        values: URLResourceValues,
+        scope: FileSearchBackgroundRootScope
+    ) -> FileSearchItemKind? {
+        let isApplication = url.pathExtension.caseInsensitiveCompare("app") == .orderedSame
+        let kind: FileSearchItemKind?
+        if isApplication {
+            kind = .application
+        } else if values.isDirectory == true, values.isPackage != true {
+            kind = .folder
+        } else if values.isRegularFile == true || values.isPackage == true {
+            kind = .file
+        } else {
+            kind = nil
+        }
+        guard scope != .applications || kind == .application else { return nil }
+        return kind
     }
 
     private nonisolated static func record(

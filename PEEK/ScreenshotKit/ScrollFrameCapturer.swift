@@ -52,6 +52,32 @@ struct ScreenCapturePixelDimensions: Equatable, Sendable {
     let height: Int
 }
 
+/// Only the initial frozen desktop should use the display-space screenshot
+/// API. Live regions must retain their filter so PEEK's scrolling indicator
+/// and overlays remain excluded from subsequent frames.
+func screenCaptureUsesDesktopScreenshot(
+    sourceRect: CGRect?,
+    excludingCurrentApplication: Bool
+) -> Bool {
+    sourceRect == nil && !excludingCurrentApplication
+}
+
+@available(macOS 26.0, *)
+func makeDesktopScreenshotConfiguration(
+    pixelDimensions: ScreenCapturePixelDimensions
+) -> SCScreenshotConfiguration {
+    let configuration = SCScreenshotConfiguration()
+    configuration.width = pixelDimensions.width
+    configuration.height = pixelDimensions.height
+    configuration.showsCursor = false
+    configuration.dynamicRange = .sdr
+    // The global rectangle is passed to captureScreenshot(rect:...). Do not
+    // apply it again as a display-local sourceRect or write desktop pixels
+    // to a file; the existing editor owns cropping and explicit export.
+    configuration.fileURL = nil
+    return configuration
+}
+
 /// Geometry carried by a ScreenCaptureKit metadata snapshot or read from the
 /// live Core Graphics display state. Desktop pixels are never retained here.
 struct ScreenCaptureDisplayGeometry: Equatable, Sendable {
@@ -684,16 +710,39 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
         configuration.height = pixelDimensions.height
 
         let startedAt = ProcessInfo.processInfo.systemUptime
+        var backend = "filtered_frame"
         do {
-            let image = try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            )
+            let image: CGImage
+            if #available(macOS 26.0, *), screenCaptureUsesDesktopScreenshot(
+                sourceRect: sourceRect,
+                excludingCurrentApplication: excludingCurrentApplication
+            ) {
+                // A frozen desktop is a screenshot of the display, not an
+                // application-sharing session. The latter can omit visible
+                // windows using legacy sharingType protection (e.g. WeChat).
+                // Use the public screenshot API without mutating those apps.
+                backend = "desktop_screenshot"
+                let output = try await SCScreenshotManager.captureScreenshot(
+                    rect: displayFrame,
+                    configuration: makeDesktopScreenshotConfiguration(
+                        pixelDimensions: pixelDimensions
+                    )
+                )
+                guard let desktopImage = output.sdrImage else {
+                    throw ScreenImageCaptureError.captureReturnedNoImage
+                }
+                image = desktopImage
+            } else {
+                image = try await SCScreenshotManager.captureImage(
+                    contentFilter: filter,
+                    configuration: configuration
+                )
+            }
             let elapsedMilliseconds = Int(
                 ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
             )
             ScreenCaptureShareableContentStore.logger.info(
-                "stage=capture_frame result=success elapsed_ms=\(elapsedMilliseconds, privacy: .public) display_id=\(display.displayID, privacy: .public) pixels=\(image.width, privacy: .public)x\(image.height, privacy: .public)"
+                "stage=capture_frame result=success backend=\(backend, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public) display_id=\(display.displayID, privacy: .public) pixels=\(image.width, privacy: .public)x\(image.height, privacy: .public)"
             )
             return image
         } catch {
@@ -701,7 +750,7 @@ struct SystemScreenImageCapturer: ScreenImageCapturing {
                 ((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000).rounded()
             )
             ScreenCaptureShareableContentStore.logger.error(
-                "stage=capture_frame result=failure elapsed_ms=\(elapsedMilliseconds, privacy: .public) display_id=\(display.displayID, privacy: .public) error=\(error.localizedDescription, privacy: .private)"
+                "stage=capture_frame result=failure backend=\(backend, privacy: .public) elapsed_ms=\(elapsedMilliseconds, privacy: .public) display_id=\(display.displayID, privacy: .public) error=\(error.localizedDescription, privacy: .private)"
             )
             throw error
         }
