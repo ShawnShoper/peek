@@ -30,7 +30,8 @@ test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app_path/Co
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$app_path/Contents/Info.plist")" = "public.app-category.productivity"
 test "$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$app_path/Contents/Info.plist")" = "false"
 test "$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$app_path/Contents/Info.plist")" = "Copyright © 2026 ShawnShoper. All rights reserved."
-lipo "$app_path/Contents/MacOS/PEEK" -verify_arch x86_64 arm64
+lipo -verify_arch x86_64 "$app_path/Contents/MacOS/PEEK"
+lipo -verify_arch arm64 "$app_path/Contents/MacOS/PEEK"
 if ! signature_result="$(codesign --verify --deep --strict --verbose=2 "$app_path" 2>&1)"; then
   print -r -- "$signature_result" >&2
   if [[ "$signature_result" == *"CSSMERR_TP_NOT_TRUSTED"* ]]; then

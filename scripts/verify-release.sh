@@ -46,7 +46,8 @@ xcodebuild \
   CODE_SIGNING_ALLOWED=NO \
   build
 
-lipo "$release_app/Contents/MacOS/PEEK" -verify_arch x86_64 arm64
+lipo -verify_arch x86_64 "$release_app/Contents/MacOS/PEEK"
+lipo -verify_arch arm64 "$release_app/Contents/MacOS/PEEK"
 test -f "$release_app/Contents/Resources/Assets.car"
 test -s "$release_app/Contents/Resources/PrivacyPolicy.zh-Hans.md"
 test -s "$release_app/Contents/Resources/PrivacyPolicy.en.md"

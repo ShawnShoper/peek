@@ -102,7 +102,8 @@ signature_details="$(codesign --display --verbose=4 "$signed_app" 2>&1)"
   || fail "Hardened Runtime is missing."
 [[ "$signature_details" == *"Timestamp="* ]] \
   || fail "Trusted timestamp is missing."
-lipo "$signed_app/Contents/MacOS/PEEK" -verify_arch arm64 x86_64
+lipo -verify_arch arm64 "$signed_app/Contents/MacOS/PEEK"
+lipo -verify_arch x86_64 "$signed_app/Contents/MacOS/PEEK"
 
 ditto -c -k --sequesterRsrc --keepParent "$signed_app" "$app_notary_zip"
 xcrun notarytool submit "$app_notary_zip" \
