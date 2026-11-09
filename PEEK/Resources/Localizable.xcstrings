@@ -6655,13 +6655,13 @@
         }
       }
     },
-    "索引已达到 30 万项上限，结果可能不完整" : {
+    "索引已达到 %lld 项上限，结果可能不完整" : {
       "extractionState" : "stale",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The index reached the 300,000-item limit; results may be incomplete"
+            "value" : "The index reached the %lld-item limit; results may be incomplete"
           }
         }
       }

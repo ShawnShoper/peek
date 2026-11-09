@@ -396,6 +396,10 @@ actor FileSearchBackgroundIndexer<Sink: FileSearchBackgroundIndexSink> {
         try await sink.lastSuccessfulIndexDate()
     }
 
+    func hasReachedLimit() async throws -> Bool {
+        try await sink.hasReachedLimit()
+    }
+
     func hasPendingChanges() async throws -> Bool {
         try await !sink.dirtyPaths(limit: 1).isEmpty
     }

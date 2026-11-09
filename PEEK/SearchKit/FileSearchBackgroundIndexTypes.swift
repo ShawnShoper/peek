@@ -127,7 +127,7 @@ struct FileSearchBackgroundIndexerConfiguration: Sendable {
     var dirtyPathLimit: Int
 
     init(
-        maximumIndexedItems: Int = 300_000,
+        maximumIndexedItems: Int = 1_000_000,
         microBatchSize: Int = 24,
         targetCPUFraction: Double = 0.006,
         initialMicroBatchSize: Int = 128,

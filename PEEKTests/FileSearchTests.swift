@@ -7,6 +7,98 @@ import XCTest
 @testable import PEEK
 
 final class FileSearchTests: XCTestCase {
+    func testDefaultIndexCapacityIsOneMillionItems() {
+        XCTAssertEqual(FileSearchBackgroundIndexerConfiguration().maximumIndexedItems, 1_000_000)
+        XCTAssertEqual(FileSearchBackgroundIndexerConfiguration.standard.maximumIndexedItems, 1_000_000)
+        XCTAssertEqual(FileSearchBackgroundIndexerConfiguration(maximumIndexedItems: 1_000).maximumIndexedItems, 1_000)
+    }
+
+    @MainActor
+    func testCapacityStatusUsesCurrentConfiguredLimit() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        let store = FileSearchIndexStore(databaseURL: context.databaseURL)
+        let token = try await store.beginRootGeneration(rootURL: context.directory)
+        try await store.commitRootGeneration(token, reachedLimit: true)
+        await FileSearchInitialIndexProgressTracker.shared.clear()
+        let provider = FileSearchPanelProvider(service: FileSearchService(store: store))
+        var message: String?
+        for try await update in provider.search(query: "", category: .files, includeHidden: true) {
+            message = update.statusMessage
+            break
+        }
+        XCTAssertEqual(message, L10n.tr("索引已达到 %lld 项上限，结果可能不完整", Int64(1_000_000)))
+        await store.close()
+    }
+
+    func testIncreasedCapacityRecoversLimitedIndexOnceIncludingLegacyInstalls() async throws {
+        for keepsRecordedLimit in [true, false] {
+            let context = makeContext()
+            defer { try? FileManager.default.removeItem(at: context.directory) }
+            let root = context.directory.appendingPathComponent("Files", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            for index in 0..<1_001 {
+                try Data().write(to: root.appendingPathComponent("file-\(index).txt"))
+            }
+            let suite = "PEEK-CapacityUpgrade-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let limitKey = FileSearchIndexCoordinatorConfiguration.standard.lastFullIndexDefaultsKey
+                + ".maximumIndexedItems"
+            let store = FileSearchIndexStore(databaseURL: context.databaseURL)
+            let provider: FileSearchBackgroundRootProvider = { _ in
+                FileSearchBackgroundRootLease(roots: [.init(url: root, scope: .files)])
+            }
+            let original = FileSearchIndexCoordinator(
+                sink: store, rootProvider: provider,
+                activityGate: FileSearchActivityGate(requiredIdleDuration: 0),
+                indexerConfiguration: indexingTestConfiguration,
+                userDefaults: try XCTUnwrap(UserDefaults(suiteName: suite))
+            )
+            let limited = await original.runNow()
+            guard case .limited(mode: .full, roots: 1, items: 1_000) = limited else {
+                await store.close()
+                return XCTFail("Expected the original capacity to be reached: \(limited)")
+            }
+            XCTAssertEqual(defaults.double(forKey: limitKey), 1_000)
+            let unchanged = await original.runNow()
+            XCTAssertEqual(unchanged, .noChanges, "An unchanged capacity must not cause repeated full scans")
+
+            if !keepsRecordedLimit { defaults.removeObject(forKey: limitKey) }
+            let previousLimit = defaults.double(forKey: limitKey)
+            let gate = FileSearchActivityGate(requiredIdleDuration: 0)
+            let upgraded = FileSearchIndexCoordinator(
+                sink: store, rootProvider: provider, activityGate: gate,
+                indexerConfiguration: .init(initialMaximumEntriesPerSecond: 10_000, maximumActivityPause: 1),
+                userDefaults: try XCTUnwrap(UserDefaults(suiteName: suite))
+            )
+            await gate.setActivity(true, blocker: .capture)
+            let deferred = await upgraded.runNow()
+            XCTAssertEqual(deferred, .deferred)
+            XCTAssertEqual(defaults.double(forKey: limitKey), previousLimit,
+                "Deferring recovery must not consume the capacity-upgrade retry")
+            let retainedCount = try await store.committedItemCount()
+            XCTAssertEqual(retainedCount, 1_000, "The previous searchable index must remain available")
+            await gate.setActivity(false, blocker: .capture)
+
+            let recovered = await upgraded.runNow()
+            XCTAssertEqual(recovered, .completed(mode: .full, roots: 1, items: 1_002))
+            let metadata = try await store.metadata()
+            XCTAssertEqual(metadata.phase, .ready)
+            XCTAssertEqual(metadata.statistics.indexedItems, 1_002)
+            XCTAssertEqual(defaults.double(forKey: limitKey), 1_000_000)
+
+            let restarted = FileSearchIndexCoordinator(
+                sink: store, rootProvider: provider,
+                activityGate: FileSearchActivityGate(requiredIdleDuration: 0),
+                userDefaults: try XCTUnwrap(UserDefaults(suiteName: suite))
+            )
+            let nextRun = await restarted.runNow()
+            XCTAssertEqual(nextRun, .noChanges, "Restarting after recovery must return to incremental updates")
+            await store.close()
+        }
+    }
+
     func testPriorityApplicationEventDoesNotWaitForDirtyPersonalRootRecovery() async throws {
         let context = makeContext()
         let apps = context.directory.appendingPathComponent("Applications")

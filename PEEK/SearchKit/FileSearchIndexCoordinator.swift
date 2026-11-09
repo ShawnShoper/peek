@@ -47,6 +47,7 @@ struct FileSearchIndexCoordinatorConfiguration: Sendable {
 /// timing, while the indexer applies the stricter app-level CPU budget.
 actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
     private let configuration: FileSearchIndexCoordinatorConfiguration
+    private let maximumIndexedItems: Int
     private let activityGate: FileSearchActivityGate
     private let indexer: FileSearchBackgroundIndexer<Sink>
     private let scheduler: NSBackgroundActivityScheduler
@@ -71,6 +72,7 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
         userDefaults: UserDefaults = .standard
     ) {
         configuration = coordinatorConfiguration
+        maximumIndexedItems = indexerConfiguration.maximumIndexedItems
         self.activityGate = activityGate
         let defaultsStore = FileSearchIndexDefaultsStore(defaults: userDefaults)
         self.defaultsStore = defaultsStore
@@ -299,12 +301,18 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
                 Date().timeIntervalSince1970,
                 forKey: configuration.lastFullIndexDefaultsKey
             )
+            defaultsStore.set(Double(maximumIndexedItems), forKey: completedCapacityDefaultsKey)
         }
         if case .limited(mode: .full, _, _) = result {
             defaultsStore.set(Date().timeIntervalSince1970,
                 forKey: configuration.lastFullIndexDefaultsKey + ".limitedAttempt")
+            defaultsStore.set(Double(maximumIndexedItems), forKey: completedCapacityDefaultsKey)
         }
         return result
+    }
+
+    private var completedCapacityDefaultsKey: String {
+        configuration.lastFullIndexDefaultsKey + ".maximumIndexedItems"
     }
 
     private func nextMode() async -> FileSearchBackgroundIndexMode {
@@ -315,6 +323,13 @@ actor FileSearchIndexCoordinator<Sink: FileSearchBackgroundIndexSink> {
             return .full
         }
         guard lastCommittedIndex != nil else {
+            return .full
+        }
+        // Legacy installs have no saved capacity. Retry a limited index once
+        // under the larger budget, retaining its committed results until each
+        // root is replaced. A deferred/failed pass must remain retryable.
+        if defaultsStore.double(forKey: completedCapacityDefaultsKey) < Double(maximumIndexedItems),
+           (try? await indexer.hasReachedLimit()) == true {
             return .full
         }
         let storedTimestamp = max(defaultsStore.double(

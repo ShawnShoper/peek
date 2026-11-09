@@ -104,7 +104,10 @@ final class FileSearchPanelProvider: SearchPanelProviding {
                 )
                 : L10n.tr("已提交本地索引（%lld 项）", Int64(count))
         case .limited:
-            return L10n.tr("索引已达到 30 万项上限，结果可能不完整")
+            return L10n.tr(
+                "索引已达到 %lld 项上限，结果可能不完整",
+                Int64(FileSearchBackgroundIndexerConfiguration.standard.maximumIndexedItems)
+            )
         }
     }
 
