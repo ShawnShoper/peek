@@ -140,6 +140,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
         Task { [weak self, monitor] in
             do {
                 try await monitor.restore(record)
+                PEEKUsageStore.shared.recordUse()
                 try await MainActor.run {
                     guard let self else { return }
                     if andPaste {

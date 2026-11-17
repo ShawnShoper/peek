@@ -8,9 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		B00000000000000000000001 /* PEEKApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000001 /* PEEKApp.swift */; };
+		B00000000000000000000091 /* PEEKUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000091 /* PEEKUsageStore.swift */; };
 		B00000000000000000000005 /* ScreenshotService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000005 /* ScreenshotService.swift */; };
 		B00000000000000000000009 /* MenuBarMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000009 /* MenuBarMenuView.swift */; };
 		B0000000000000000000000E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000000E /* SettingsView.swift */; };
+		B00000000000000000000092 /* UsageSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000092 /* UsageSettingsView.swift */; };
 		B0000000000000000000000F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0000000000000000000000F /* Assets.xcassets */; };
 		B00000000000000000000012 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F00000000000000000000013 /* XCTest.framework */; };
 		B00000000000000000000020 /* ScreenshotCaptureModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000020 /* ScreenshotCaptureModels.swift */; };
@@ -72,6 +74,7 @@
 		B00000000000000000000074 /* PrivacyPolicy.en.md in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000074 /* PrivacyPolicy.en.md */; };
 		B00000000000000000000075 /* OnboardingGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000075 /* OnboardingGuideView.swift */; };
 		B00000000000000000000076 /* OnboardingGuideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000076 /* OnboardingGuideTests.swift */; };
+		B00000000000000000000093 /* PEEKUsageStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000093 /* PEEKUsageStoreTests.swift */; };
 		B00000000000000000000077 /* ScrollPositionProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000077 /* ScrollPositionProbe.swift */; };
 		B00000000000000000000078 /* ClipboardHistoryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000078 /* ClipboardHistoryModels.swift */; };
 		B00000000000000000000079 /* ClipboardHistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000079 /* ClipboardHistoryStore.swift */; };
@@ -102,9 +105,11 @@
 
 /* Begin PBXFileReference section */
 		F00000000000000000000001 /* PEEKApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKApp.swift; sourceTree = "<group>"; };
+		F00000000000000000000091 /* PEEKUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKUsageStore.swift; sourceTree = "<group>"; };
 		F00000000000000000000005 /* ScreenshotService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotService.swift; sourceTree = "<group>"; };
 		F00000000000000000000009 /* MenuBarMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarMenuView.swift; sourceTree = "<group>"; };
 		F0000000000000000000000E /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		F00000000000000000000092 /* UsageSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageSettingsView.swift; sourceTree = "<group>"; };
 		F0000000000000000000000F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F00000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F00000000000000000000013 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
@@ -168,6 +173,7 @@
 		F00000000000000000000074 /* PrivacyPolicy.en.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = PrivacyPolicy.en.md; sourceTree = "<group>"; };
 		F00000000000000000000075 /* OnboardingGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingGuideView.swift; sourceTree = "<group>"; };
 		F00000000000000000000076 /* OnboardingGuideTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingGuideTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000093 /* PEEKUsageStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PEEKUsageStoreTests.swift; sourceTree = "<group>"; };
 		F00000000000000000000077 /* ScrollPositionProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPositionProbe.swift; sourceTree = "<group>"; };
 		F00000000000000000000078 /* ClipboardHistoryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryModels.swift; sourceTree = "<group>"; };
 		F00000000000000000000079 /* ClipboardHistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardHistoryStore.swift; sourceTree = "<group>"; };
@@ -239,6 +245,7 @@
 			isa = PBXGroup;
 			children = (
 				F00000000000000000000001 /* PEEKApp.swift */,
+				F00000000000000000000091 /* PEEKUsageStore.swift */,
 				F00000000000000000000081 /* PEEKHealthDiagnostics.swift */,
 				F00000000000000000000050 /* PEEKPreferences.swift */,
 				F00000000000000000000053 /* PEEKLocalization.swift */,
@@ -264,6 +271,7 @@
 				F00000000000000000000075 /* OnboardingGuideView.swift */,
 				F00000000000000000000072 /* PrivacyPolicyView.swift */,
 				F0000000000000000000000E /* SettingsView.swift */,
+				F00000000000000000000092 /* UsageSettingsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -377,6 +385,7 @@
 				F00000000000000000000040 /* FileSearchTests.swift */,
 				F00000000000000000000071 /* HotKeyRecorderTests.swift */,
 				F00000000000000000000076 /* OnboardingGuideTests.swift */,
+				F00000000000000000000093 /* PEEKUsageStoreTests.swift */,
 				F0000000000000000000007E /* ClipboardHistoryTests.swift */,
 				F00000000000000000000031 /* ScreenshotKitTests.swift */,
 				F00000000000000000000085 /* ScreenshotOutputPipelineTests.swift */,
@@ -509,6 +518,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000001 /* PEEKApp.swift in Sources */,
+				B00000000000000000000091 /* PEEKUsageStore.swift in Sources */,
 				B00000000000000000000081 /* PEEKHealthDiagnostics.swift in Sources */,
 				B00000000000000000000050 /* PEEKPreferences.swift in Sources */,
 				B00000000000000000000053 /* PEEKLocalization.swift in Sources */,
@@ -518,6 +528,7 @@
 				B00000000000000000000033 /* HotKeyRecorderView.swift in Sources */,
 				B00000000000000000000009 /* MenuBarMenuView.swift in Sources */,
 				B0000000000000000000000E /* SettingsView.swift in Sources */,
+				B00000000000000000000092 /* UsageSettingsView.swift in Sources */,
 				B00000000000000000000075 /* OnboardingGuideView.swift in Sources */,
 				B00000000000000000000072 /* PrivacyPolicyView.swift in Sources */,
 				B00000000000000000000020 /* ScreenshotCaptureModels.swift in Sources */,
@@ -584,6 +595,7 @@
 				B00000000000000000000040 /* FileSearchTests.swift in Sources */,
 				B00000000000000000000071 /* HotKeyRecorderTests.swift in Sources */,
 				B00000000000000000000076 /* OnboardingGuideTests.swift in Sources */,
+				B00000000000000000000093 /* PEEKUsageStoreTests.swift in Sources */,
 				B0000000000000000000007E /* ClipboardHistoryTests.swift in Sources */,
 				B00000000000000000000031 /* ScreenshotKitTests.swift in Sources */,
 				B00000000000000000000085 /* ScreenshotOutputPipelineTests.swift in Sources */,

@@ -133,7 +133,11 @@ PEEK does not bypass protected windows, DRM content, files blocked by macOS, or 
 
 ## 7. 诊断信息 / Diagnostics
 
+“用量”在本机按日保存成功操作的次数，用于展示每日用量和解锁勋章。记录中只有日期和次数，不含操作内容，也不会上传。
+
 PEEK 不集成第三方崩溃上报或用户行为分析服务。应用和 macOS 可能在本机保存运行日志。PEEK 的可复制诊断信息包含版本、索引状态和使用 `~` 隐去账户名的本地索引数据库路径；不包含文件正文、截图、搜索词或 API 密钥。你仍应在主动提交问题前检查准备分享的内容。
+
+Usage stores a date and a count of completed actions on this Mac to display daily activity and unlock medals. These counts contain no action content and are never uploaded.
 
 PEEK does not integrate third-party crash reporting or behavioral analytics services. The app and macOS may keep operational logs locally. PEEK's copyable diagnostics include the version, index status, and the local index database path with the account name abbreviated as `~`; they do not include document contents, screenshots, search terms, or API keys. You should still review anything before sharing it in a support request.
 

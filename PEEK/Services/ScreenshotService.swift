@@ -114,31 +114,7 @@ final class ScreenshotService: ObservableObject {
                 presentationDelayNanoseconds: presentationDelayNanoseconds,
                 requestToken: captureRequest,
                 onAction: { [weak self] action in
-                    guard let self else { return }
-                    self.editorActionOccurred = true
-                    switch action {
-                    case .pinRequested(let rendered):
-                        _ = PEEKPinboard.shared.pin(image: rendered)
-                        self.lastMessage = L10n.tr("截图已钉在桌面上")
-                    case .ocrRequested(let rendered):
-                        self.shouldReactivateOriginalApplication = false
-                        Task { @MainActor [weak self] in
-                            await self?.recognizeText(in: rendered, title: L10n.tr("截图 OCR"))
-                        }
-                    case .qrCodeRequested(let rendered):
-                        self.shouldReactivateOriginalApplication = false
-                        Task { @MainActor [weak self] in
-                            await self?.recognizeQRCode(in: rendered)
-                        }
-                    case .copied:
-                        self.lastMessage = L10n.tr("截图已复制到剪贴板")
-                    case .saved(_, let url):
-                        self.lastMessage = L10n.tr("截图已保存到 %@", url.lastPathComponent)
-                    case .scrollCaptureRequested:
-                        break
-                    case .scrollCaptureRequestedInSelection(_, let selectionRect):
-                        self.pendingScrollRect = selectionRect
-                    }
+                    self?.handleEditorAction(action)
                 }
             ) != nil else {
                 guard !captureRequest.isCancelled else { return }
@@ -558,31 +534,37 @@ final class ScreenshotService: ObservableObject {
     private func edit(_ image: NSImage, sourceSelectionRect: CGRect) async -> NSImage? {
         editorActionOccurred = false
         return await editorController.edit(image: image) { [weak self] action in
-            guard let self else { return }
-            self.editorActionOccurred = true
-            switch action {
-            case .pinRequested(let rendered):
-                _ = PEEKPinboard.shared.pin(image: rendered)
-                self.lastMessage = L10n.tr("截图已钉在桌面上")
-            case .ocrRequested(let rendered):
-                self.shouldReactivateOriginalApplication = false
-                Task { @MainActor [weak self] in
-                    await self?.recognizeText(in: rendered, title: L10n.tr("截图 OCR"))
-                }
-            case .qrCodeRequested(let rendered):
-                self.shouldReactivateOriginalApplication = false
-                Task { @MainActor [weak self] in
-                    await self?.recognizeQRCode(in: rendered)
-                }
-            case .scrollCaptureRequested:
-                self.pendingScrollRect = sourceSelectionRect
-            case .scrollCaptureRequestedInSelection(_, let selectionRect):
-                self.pendingScrollRect = selectionRect
-            case .copied:
-                self.lastMessage = L10n.tr("截图已复制到剪贴板")
-            case .saved(_, let url):
-                self.lastMessage = L10n.tr("截图已保存到 %@", url.lastPathComponent)
+            self?.handleEditorAction(action, sourceSelectionRect: sourceSelectionRect)
+        }
+    }
+
+    private func handleEditorAction(_ action: ScreenshotEditorAction, sourceSelectionRect: CGRect? = nil) {
+        editorActionOccurred = true
+        switch action {
+        case .pinRequested(let rendered):
+            _ = PEEKPinboard.shared.pin(image: rendered)
+            PEEKUsageStore.shared.recordUse()
+            lastMessage = L10n.tr("截图已钉在桌面上")
+        case .ocrRequested(let rendered):
+            shouldReactivateOriginalApplication = false
+            Task { @MainActor [weak self] in
+                await self?.recognizeText(in: rendered, title: L10n.tr("截图 OCR"))
             }
+        case .qrCodeRequested(let rendered):
+            shouldReactivateOriginalApplication = false
+            Task { @MainActor [weak self] in
+                await self?.recognizeQRCode(in: rendered)
+            }
+        case .scrollCaptureRequested:
+            if let sourceSelectionRect { pendingScrollRect = sourceSelectionRect }
+        case .scrollCaptureRequestedInSelection(_, let selectionRect):
+            pendingScrollRect = selectionRect
+        case .copied:
+            PEEKUsageStore.shared.recordUse()
+            lastMessage = L10n.tr("截图已复制到剪贴板")
+        case .saved(_, let url):
+            PEEKUsageStore.shared.recordUse()
+            lastMessage = L10n.tr("截图已保存到 %@", url.lastPathComponent)
         }
     }
 
@@ -704,6 +686,7 @@ final class ScreenshotService: ObservableObject {
         guard copyToPasteboard(edited) else {
             throw ScreenshotCaptureError.imageRenderingFailed
         }
+        PEEKUsageStore.shared.recordUse()
         lastMessage = L10n.tr("滚动截图已复制到剪贴板")
         if result.warnings.contains(where: { $0.contains(L10n.tr("固定标题栏或侧栏")) }) {
             lastMessage = L10n.tr("滚动截图已复制；已自动排除固定标题栏或侧栏")
@@ -729,6 +712,7 @@ final class ScreenshotService: ObservableObject {
         guard copyToPasteboard(edited) else {
             throw ScreenshotCaptureError.imageRenderingFailed
         }
+        PEEKUsageStore.shared.recordUse()
         lastMessage = L10n.tr(
             "已复制失败前可靠采集的 %d 帧部分结果",
             result.acceptedFrameCount
@@ -755,6 +739,7 @@ final class ScreenshotService: ObservableObject {
                 image: image,
                 title: title
             )
+            PEEKUsageStore.shared.recordUse()
             lastMessage = L10n.tr(
                 "OCR 完成，识别到 %d 个文本区域",
                 result.observations.count
@@ -783,6 +768,7 @@ final class ScreenshotService: ObservableObject {
                 result: result,
                 image: image
             )
+            PEEKUsageStore.shared.recordUse()
             lastMessage = L10n.tr(
                 "二维码识别完成，共识别到 %d 个结果",
                 result.observations.count

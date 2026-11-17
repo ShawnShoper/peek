@@ -80,6 +80,8 @@ PEEK does not bypass protected windows, DRM content, files blocked by macOS, or 
 
 ## 7. Diagnostics
 
+Usage stores a date and a count of completed actions on this Mac to display daily activity and unlock medals. These counts contain no action content and are never uploaded.
+
 PEEK does not integrate third-party crash reporting or behavioral analytics services. The app and macOS may keep operational logs locally. PEEK's copyable diagnostics include the version, index status, and the local index database path with the account name abbreviated as `~`; they do not include document contents, screenshots, search terms, or API keys. You should still review anything before sharing it in a support request.
 
 ## 8. Children's privacy

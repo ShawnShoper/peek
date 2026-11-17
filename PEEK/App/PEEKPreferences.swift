@@ -13,6 +13,7 @@ enum PEEKPreferenceKey {
     static let searchWindowOpacity = "search.windowOpacity"
     static let searchShowsPreview = "search.showsPreview"
     static let searchResultDensity = "search.resultDensity"
+    static let showUsageMedal = "usage.showMedal"
     static let appearanceMode = "appearance.mode"
     static let appLanguage = "app.language"
     static let exclusionPaths = "search.exclusions.paths"

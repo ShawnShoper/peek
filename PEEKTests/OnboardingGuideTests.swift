@@ -132,23 +132,14 @@ final class OnboardingGuideTests: XCTestCase {
     func testGuideStepsCoverEverySettingsFeatureGroupInStableOrder() {
         let steps = OnboardingGuideStep.allCases
 
-        XCTAssertEqual(steps.count, 11)
+        XCTAssertEqual(steps.count, 12)
         XCTAssertEqual(steps.first, .welcome)
         XCTAssertEqual(steps.last, .complete)
         XCTAssertEqual(Set(steps.map(\.id)).count, steps.count)
         XCTAssertEqual(Set(steps.map(\.target)).count, steps.count)
         XCTAssertEqual(
             Set(steps.map(\.destination.rawValue)),
-            Set([
-                "general",
-                "search",
-                "clipboard",
-                "shortcuts",
-                "translation",
-                "capture",
-                "appearance",
-                "about",
-            ])
+            Set(PEEKSettingsDestination.allCases.map(\.rawValue))
         )
     }
 
