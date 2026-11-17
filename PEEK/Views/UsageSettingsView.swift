@@ -201,7 +201,7 @@ private struct UsageMedalArtwork: View {
     }
 }
 
-private struct UsageHeatmap: View {
+struct UsageHeatmap: View {
     let snapshot: PEEKUsageSnapshot
     let today: Date
     @Environment(\.locale) private var locale
@@ -213,10 +213,29 @@ private struct UsageHeatmap: View {
         return value
     }
 
+    static func monthLabels(for weeks: [Date], through today: Date, calendar: Calendar) -> [Date: Date] {
+        guard let firstWeek = weeks.first, firstWeek <= today else { return [:] }
+        var labels = [firstWeek: firstWeek]
+        var lastLabel = firstWeek
+
+        // The first column names its starting month. If it crosses a month
+        // boundary, the next column can still display the new month's name.
+        for week in weeks.dropFirst() where week <= today {
+            guard let sunday = calendar.date(byAdding: .day, value: 6, to: week) else { continue }
+            let lastVisibleDay = min(sunday, today)
+            if !calendar.isDate(lastLabel, equalTo: lastVisibleDay, toGranularity: .month) {
+                labels[week] = lastVisibleDay
+                lastLabel = lastVisibleDay
+            }
+        }
+        return labels
+    }
+
     var body: some View {
         let calendar = calendar
         let currentWeek = calendar.dateInterval(of: .weekOfYear, for: today)?.start ?? calendar.startOfDay(for: today)
         let weeks = (-21...0).compactMap { calendar.date(byAdding: .weekOfYear, value: $0, to: currentWeek) }
+        let monthLabels = Self.monthLabels(for: weeks, through: today, calendar: calendar)
         VStack(alignment: .trailing, spacing: 8) {
             GeometryReader { proxy in
                 let columnWidth = proxy.size.width / CGFloat(weeks.count)
@@ -225,10 +244,7 @@ private struct UsageHeatmap: View {
                     ForEach(weeks, id: \.self) { week in
                         let days = (0..<7).compactMap { calendar.date(byAdding: .day, value: $0, to: week) }
                         VStack(spacing: 4) {
-                            let month = week == weeks.first ? days.first : days.first {
-                                $0 <= today && calendar.component(.day, from: $0) == 1
-                            }
-                            Text(month.map { $0.formatted(.dateTime.month(.abbreviated).locale(locale)) } ?? "")
+                            Text(monthLabels[week].map { $0.formatted(.dateTime.month(.abbreviated).locale(locale)) } ?? "")
                                 .font(.caption).foregroundStyle(.secondary)
                                 .fixedSize().frame(width: columnWidth, height: 18)
                                 .accessibilityHidden(true)

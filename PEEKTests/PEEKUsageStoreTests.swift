@@ -62,4 +62,48 @@ final class PEEKUsageStoreTests: XCTestCase {
             XCTAssertEqual(UsageMedal.highestEarned(in: store.snapshot), expected)
         }
     }
+
+    @MainActor
+    func testHeatmapPreservesBothMonthsWhenFirstWeekSpansJuneAndJuly() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        calendar.firstWeekday = 2
+        let firstWeek = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 6, day: 29)))
+        let today = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 23)))
+        let weeks = try (0..<22).map { offset in
+            try XCTUnwrap(calendar.date(byAdding: .weekOfYear, value: offset, to: firstWeek))
+        }
+        XCTAssertEqual(weeks.last, today)
+
+        let labels = UsageHeatmap.monthLabels(for: weeks, through: today, calendar: calendar)
+        let monthsByWeek = labels.mapValues { calendar.component(.month, from: $0) }
+
+        XCTAssertEqual(monthsByWeek[weeks[0]], 6)
+        XCTAssertEqual(monthsByWeek[weeks[1]], 7)
+        XCTAssertEqual(weeks.compactMap { monthsByWeek[$0] }, [6, 7, 8, 9, 10, 11])
+    }
+
+    @MainActor
+    func testHeatmapShowsJanuaryInCurrentWeekOnlyAfterNewYearStarts() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .gmt
+        calendar.firstWeekday = 2
+        let firstWeek = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 21)))
+        let currentWeek = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 28)))
+        let weeks = [firstWeek, currentWeek]
+        let newYearsEve = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 12, day: 31)))
+        let newYearsDay = try XCTUnwrap(calendar.date(from: DateComponents(year: 2027, month: 1, day: 1)))
+
+        let before = UsageHeatmap.monthLabels(for: weeks, through: newYearsEve, calendar: calendar)
+        XCTAssertEqual(before.count, 1)
+        XCTAssertEqual(calendar.component(.month, from: try XCTUnwrap(before[firstWeek])), 12)
+        XCTAssertNil(before[currentWeek])
+
+        let after = UsageHeatmap.monthLabels(for: weeks, through: newYearsDay, calendar: calendar)
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(after[firstWeek], before[firstWeek])
+        let january = try XCTUnwrap(after[currentWeek])
+        XCTAssertEqual(calendar.component(.year, from: january), 2027)
+        XCTAssertEqual(calendar.component(.month, from: january), 1)
+    }
 }
