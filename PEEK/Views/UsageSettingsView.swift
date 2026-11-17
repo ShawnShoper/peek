@@ -96,6 +96,7 @@ struct UsageSettingsView: View {
             HStack(spacing: 4) {
                 Image(systemName: earned ? "checkmark.circle.fill" : "lock.fill")
                     .font(.caption2)
+                    .foregroundStyle(earned ? Color.green : Color.secondary)
                 Text(medal.requirement)
             }
             .font(.caption)
