@@ -64,9 +64,9 @@ if grep -Fq \
   echo "Settings must open the bundled privacy policy instead of GitHub." >&2
   exit 1
 fi
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")" = "0.3.1"
-test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$release_app/Contents/Info.plist")" = "5"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$release_app/Contents/Info.plist")" = "0.4.0"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$release_app/Contents/Info.plist")" = "6"
 test "$(/usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$release_app/Contents/Info.plist")" = "public.app-category.productivity"
 test "$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$release_app/Contents/Info.plist")" = "false"
 
-echo "PEEK verification passed: localization, tests, Release Analyze, Universal 2, AppIcon assets, bundled privacy policies, privacy manifest, version 0.3.1 (5)."
+echo "PEEK verification passed: localization, tests, Release Analyze, Universal 2, AppIcon assets, bundled privacy policies, privacy manifest, version 0.4.0 (6)."
