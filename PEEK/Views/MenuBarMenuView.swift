@@ -7,6 +7,9 @@ struct MenuBarMenuView: View {
     @ObservedObject private var hotKeyManager = ScreenshotGlobalHotKeyManager.shared
     @ObservedObject private var clipboardHistoryMonitor = ClipboardHistoryMonitor.shared
 
+    @ObservedObject private var usageStore = PEEKUsageStore.shared
+    @AppStorage(PEEKPreferenceKey.showUsageMedal) private var showUsageMedal = true
+
     var body: some View {
         Text(L10n.tr("PEEK 是菜单栏应用，全部功能入口如下"))
 
@@ -95,6 +98,15 @@ struct MenuBarMenuView: View {
             Label(L10n.tr("设置…"), systemImage: "gearshape")
         }
         .keyboardShortcut(",", modifiers: [.command])
+
+        if showUsageMedal, let medal = UsageMedal.highestEarned(in: usageStore.snapshot) {
+            Button {
+                PEEKSettingsRouteCoordinator.shared.request(.usage)
+                PEEKSettingsWindowPresenter.show()
+            } label: {
+                Label(medal.title, systemImage: medal.systemImage)
+            }
+        }
 
         Text(versionLabel)
 

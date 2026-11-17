@@ -1,6 +1,75 @@
 {
   "sourceLanguage" : "zh-Hans",
   "strings" : {
+    "种子勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Seed Medal" } } }
+    },
+    "效率新人勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Newcomer Medal" } } }
+    },
+    "效率职人勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Practitioner Medal" } } }
+    },
+    "效率达人勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Expert Medal" } } }
+    },
+    "首次使用获得" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Complete your first action" } } }
+    },
+    "使用 %lld 次获得" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Earned after %lld actions" } } }
+    },
+    "荣誉勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Achievement medals" } } }
+    },
+    "挂载勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Display medal in menu" } } }
+    },
+    "在 PEEK 菜单中展示已获得的最高勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Show your highest earned medal in the PEEK menu" } } }
+    },
+    "每日用量" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Daily usage" } } }
+    },
+    "最近 22 周" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Last 22 weeks" } } }
+    },
+    "已获得" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Earned" } } }
+    },
+    "未获得" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Locked" } } }
+    },
+    "首次完成操作后，这里会显示累计次数和日均用量。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Complete your first action to see your total and daily average." } } }
+    },
+    "自 %@ 起，PEEK 已为你完成 %@ 次操作，平均每天 %@ 次。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Since %@, you’ve completed %@ actions with PEEK, averaging %@ per day." } } }
+    },
+    "少" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Less" } } }
+    },
+    "多" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "More" } } }
+    },
+    "颜色越深表示当天使用次数越多" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Stronger colors indicate more actions on that day" } } }
+    },
+    "%@，使用 %lld 次" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%@, %lld actions" } } }
+    },
+    "用量" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Usage" } } }
+    },
+    "查看每日用量与勋章" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "View daily activity and medals" } } }
+    },
+    "PEEK 在本机按天累计成功操作的次数，达到里程碑时解锁勋章。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "PEEK counts completed actions by day on this Mac. Reach a milestone to unlock a medal." } } }
+    },
+    "将指针停在日历格上可查看当天次数。开启挂载勋章后，点按菜单中的勋章可回到用量页。" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Hover over a day to see its count. When a medal is displayed in the menu, click it to open Usage." } } }
+    },
     "容量已满 · %@" : {
       "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "Capacity reached · %@" } } }
     },

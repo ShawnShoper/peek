@@ -268,6 +268,11 @@ struct SettingsView: View {
                 .tabItem { Label(Pane.appearance.title, systemImage: Pane.appearance.systemImage) }
                 .tag(Pane.appearance)
 
+            UsageSettingsView()
+                .onboardingGuideTarget(.usageActivity)
+                .tabItem { Label(Pane.usage.title, systemImage: Pane.usage.systemImage) }
+                .tag(Pane.usage)
+
             aboutPage
                 .tabItem { Label(Pane.about.title, systemImage: Pane.about.systemImage) }
                 .tag(Pane.about)
@@ -351,7 +356,7 @@ struct SettingsView: View {
             if showOnboardingGuide {
                 OnboardingGuideView(
                     targetAnchors: anchors,
-                    onNavigate: navigateOnboarding,
+                    onNavigate: navigate(to:),
                     onTargetChange: { onboardingTarget = $0 },
                     onAuthorizeDocuments: authorizeDocumentsFromOnboarding,
                     onComplete: completeOnboarding,
@@ -2312,21 +2317,6 @@ struct SettingsView: View {
         }
     }
 
-    private func navigateOnboarding(_ destination: OnboardingGuideDestination) {
-        switch destination {
-        case .general: selectedPane = .general
-        case .search:
-            selectedPane = .search
-            selectedSearchPane = .documents
-        case .clipboard: selectedPane = .clipboard
-        case .shortcuts: selectedPane = .shortcuts
-        case .translation: selectedPane = .translation
-        case .capture: selectedPane = .capture
-        case .appearance: selectedPane = .appearance
-        case .about: selectedPane = .about
-        }
-    }
-
     private func showDocumentSearchSettings() {
         selectedPane = .search
         selectedSearchPane = .documents
@@ -2549,6 +2539,7 @@ struct SettingsView: View {
         searchShowsPreview = true
         searchResultDensityRaw = SearchResultDensity.standard.rawValue
         appearanceModeRaw = PEEKAppearanceMode.system.rawValue
+        UserDefaults.standard.removeObject(forKey: PEEKPreferenceKey.showUsageMedal)
         appLanguageRaw = PEEKAppLanguage.system.rawValue
         PEEKAppLanguage.system.apply()
         automaticScrolling = true

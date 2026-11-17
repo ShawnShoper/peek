@@ -15,6 +15,7 @@ enum PEEKSettingsDestination: String, CaseIterable, Identifiable, Sendable {
     case translation
     case capture
     case appearance
+    case usage
     case about
 
     var id: String { rawValue }
@@ -28,6 +29,7 @@ enum PEEKSettingsDestination: String, CaseIterable, Identifiable, Sendable {
         case .translation: return L10n.tr("翻译")
         case .capture: return L10n.tr("截图")
         case .appearance: return L10n.tr("外观")
+        case .usage: return L10n.tr("用量")
         case .about: return L10n.tr("关于")
         }
     }
@@ -41,6 +43,7 @@ enum PEEKSettingsDestination: String, CaseIterable, Identifiable, Sendable {
         case .translation: return "character.book.closed"
         case .capture: return "viewfinder.circle"
         case .appearance: return "paintpalette"
+        case .usage: return "medal"
         case .about: return "info.circle"
         }
     }

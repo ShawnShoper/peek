@@ -49,6 +49,7 @@ private struct TranslationPanelAvailableView: View {
     @State private var configuration: TranslationSession.Configuration?
     @State private var pendingRequest: PendingRequest?
     @State private var translationGeneration = 0
+    @State private var lastCountedGeneration: Int?
     @State private var preparationTask: Task<Void, Never>?
     @State private var availabilityTimeoutTask: Task<Void, Never>?
     @State private var activationTimeoutTask: Task<Void, Never>?
@@ -894,7 +895,9 @@ private struct TranslationPanelAvailableView: View {
                           pendingRequest?.generation == request.generation,
                           sourceText == request.text else { continue }
                     switch result {
-                    case .success(let output): cloudPhases[provider] = .translated(output)
+                    case .success(let output):
+                        cloudPhases[provider] = .translated(output)
+                        recordSuccessfulTranslation(request)
                     case .failure(let error): cloudPhases[provider] = .failed(error.localizedDescription)
                     }
                 }
@@ -941,6 +944,7 @@ private struct TranslationPanelAvailableView: View {
                     responseIdentifier: response.targetLanguage.minimalIdentifier
                 )
                 phase = .translated
+                recordSuccessfulTranslation(request)
                 Self.logger.debug(
                     "Completed generation \(request.generation, privacy: .public)"
                 )
@@ -968,6 +972,13 @@ private struct TranslationPanelAvailableView: View {
                 )
             }
         }
+    }
+
+    private func recordSuccessfulTranslation(_ request: PendingRequest) {
+        // Apple and the configured cloud providers can all finish the same submission.
+        guard lastCountedGeneration != request.generation else { return }
+        lastCountedGeneration = request.generation
+        PEEKUsageStore.shared.recordUse()
     }
 
     private func isCurrentLocalRequest(_ request: PendingRequest) -> Bool {

@@ -1,47 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// The Settings destination that should be visible while a guide step is presented.
-///
-/// `SettingsView` owns its tab selection, so the guide reports destinations instead
-/// of mutating settings state or triggering any feature directly.
-enum OnboardingGuideDestination: String, Equatable, Sendable {
-    case general
-    case search
-    case clipboard
-    case shortcuts
-    case translation
-    case capture
-    case appearance
-    case about
-
-    var title: String {
-        switch self {
-        case .general: return L10n.tr("通用")
-        case .search: return L10n.tr("搜索")
-        case .clipboard: return L10n.tr("剪贴板")
-        case .shortcuts: return L10n.tr("快捷键")
-        case .translation: return L10n.tr("翻译")
-        case .capture: return L10n.tr("截图")
-        case .appearance: return L10n.tr("外观")
-        case .about: return L10n.tr("关于")
-        }
-    }
-
-    var systemImage: String {
-        switch self {
-        case .general: return "gearshape"
-        case .search: return "magnifyingglass"
-        case .clipboard: return "clipboard"
-        case .shortcuts: return "keyboard"
-        case .translation: return "character.book.closed"
-        case .capture: return "viewfinder.circle"
-        case .appearance: return "paintpalette"
-        case .about: return "info.circle"
-        }
-    }
-}
-
 /// A concrete control or section that the parent Settings view can highlight.
 enum OnboardingGuideTarget: String, Equatable, Hashable, Sendable {
     case settingsTabs
@@ -53,6 +12,7 @@ enum OnboardingGuideTarget: String, Equatable, Hashable, Sendable {
     case translationUsage
     case shortcutRecorder
     case appearanceTheme
+    case usageActivity
     case privacyPolicy
     case replayTutorial
 }
@@ -102,12 +62,13 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
         case translation
         case shortcuts
         case appearance
+        case usage
         case privacy
         case complete
 
         var id: Int { rawValue }
 
-        var destination: OnboardingGuideDestination {
+        var destination: PEEKSettingsDestination {
             switch self {
             case .welcome: return .general
             case .search: return .search
@@ -116,6 +77,7 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
             case .translation: return .translation
             case .shortcuts: return .shortcuts
             case .appearance: return .appearance
+            case .usage: return .usage
             case .privacy, .complete: return .about
             }
         }
@@ -131,6 +93,7 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
             case .translation: return .translationUsage
             case .shortcuts: return .shortcutRecorder
             case .appearance: return .appearanceTheme
+            case .usage: return .usageActivity
             case .privacy: return .privacyPolicy
             case .complete: return .replayTutorial
             }
@@ -147,6 +110,7 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
             case .translation: return "character.book.closed.fill"
             case .shortcuts: return "keyboard.fill"
             case .appearance: return "paintpalette.fill"
+            case .usage: return "medal"
             case .privacy: return "lock.shield.fill"
             case .complete: return "checkmark.seal.fill"
             }
@@ -163,6 +127,7 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
             case .translation: return .cyan
             case .shortcuts: return .orange
             case .appearance: return .pink
+            case .usage: return .blue
             case .privacy: return .green
             case .complete: return .green
             }
@@ -179,6 +144,7 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
             case .translation: return L10n.tr("使用渐进式翻译")
             case .shortcuts: return L10n.tr("设置顺手且不冲突的快捷键")
             case .appearance: return L10n.tr("调整外观与菜单栏使用方式")
+            case .usage: return L10n.tr("查看每日用量与勋章")
             case .privacy: return L10n.tr("了解权限与隐私边界")
             case .complete: return L10n.tr("PEEK 已准备就绪")
             }
@@ -204,6 +170,8 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
                 return L10n.tr("每项核心功能都可以单独录入快捷键。PEEK 会检查应用内部重复和可识别的系统冲突。")
             case .appearance:
                 return L10n.tr("界面可跟随系统深浅色，也能调整搜索窗口的透明度、结果密度和预览方式。")
+            case .usage:
+                return L10n.tr("PEEK 在本机按天累计成功操作的次数，达到里程碑时解锁勋章。")
             case .privacy:
                 return L10n.tr("文件索引、截图、OCR 和 Apple 本地翻译优先在本机处理；只有你启用的云翻译服务会接收主动提交的文本。")
             case .complete:
@@ -231,6 +199,8 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
                 return L10n.tr("指引：在“快捷键”页点击右侧按键框，再按下新组合；出现冲突提示时，请换用包含 Command、Option 或 Control 的组合。")
             case .appearance:
                 return L10n.tr("指引：在“外观”选择跟随系统、浅色或深色；在“通用”设置搜索窗口出现的屏幕和位置。日常入口都在菜单栏图标中。")
+            case .usage:
+                return L10n.tr("将指针停在日历格上可查看当天次数。开启挂载勋章后，点按菜单中的勋章可回到用量页。")
             case .privacy:
                 return L10n.tr("指引：在“关于”中打开内置隐私政策；需要目录、屏幕录制或辅助功能权限时，PEEK 会提供明确按钮，由你决定是否授权。")
             case .complete:
@@ -375,6 +345,8 @@ enum OnboardingGuideStep: Int, CaseIterable, Identifiable, Sendable {
                         detail: L10n.tr("可调整透明度、结果密度、预览区域和跨显示器位置。")
                     )
                 ]
+            case .usage:
+                return []
             case .privacy:
                 return [
                     OnboardingGuideTip(
@@ -434,7 +406,7 @@ private struct OnboardingGuidePlacement {
 /// explicit click from the user.
 struct OnboardingGuideView: View {
     private let targetAnchors: [OnboardingGuideTarget: Anchor<CGRect>]
-    private let onNavigate: (OnboardingGuideDestination) -> Void
+    private let onNavigate: (PEEKSettingsDestination) -> Void
     private let onTargetChange: (OnboardingGuideTarget) -> Void
     private let onAuthorizeDocuments: () -> Void
     private let onComplete: () -> Void
@@ -446,7 +418,7 @@ struct OnboardingGuideView: View {
     init(
         targetAnchors: [OnboardingGuideTarget: Anchor<CGRect>] = [:],
         initialStep: OnboardingGuideStep = .welcome,
-        onNavigate: @escaping (OnboardingGuideDestination) -> Void = { _ in },
+        onNavigate: @escaping (PEEKSettingsDestination) -> Void = { _ in },
         onTargetChange: @escaping (OnboardingGuideTarget) -> Void = { _ in },
         onAuthorizeDocuments: @escaping () -> Void = {},
         onComplete: @escaping () -> Void,

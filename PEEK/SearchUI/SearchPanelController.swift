@@ -327,6 +327,7 @@ final class SearchPanelController: NSObject, NSWindowDelegate {
             provider: provider,
             actionHandler: actionHandler
         )
+        viewModel.onSuccessfulResultAction = { PEEKUsageStore.shared.recordUse() }
         viewModel.onRequestClose = { [weak self] in
             self?.close()
         }

@@ -359,7 +359,9 @@ final class FileSearchTests: XCTestCase {
             ("scrolling screenshot", .peekScrollingCapture),
             ("ocr", .peekOCRCapture),
             ("kuaijiejian", .peekSettings(.shortcuts)),
-            ("appearance", .peekSettings(.appearance))
+            ("appearance", .peekSettings(.appearance)),
+            ("用量", .peekSettings(.usage)),
+            ("medals", .peekSettings(.usage))
         ]
 
         for testCase in cases {
@@ -3912,7 +3914,14 @@ final class SearchPanelViewModelTests: XCTestCase {
         model.moveSelection(by: 1)
         XCTAssertEqual(model.visibleActions, [.open])
         XCTAssertNil(model.unavailableActionMessage)
+
+        var recordedUses = 0
+        model.onSuccessfulResultAction = { recordedUses += 1 }
+        model.openResult(at: 1)
+        try await waitUntil { model.feedbackMessage == "ok" }
+        XCTAssertEqual(recordedUses, 0, "Opening an internal tool must leave counting to its actual action")
     }
+
     func testIndexStatusStaysVisibleThroughCountingWaitingAndFailureUntilFinished() async throws {
         let tracker = FileSearchInitialIndexProgressTracker()
         let model = SearchPanelViewModel(
@@ -4274,7 +4283,9 @@ final class SearchPanelViewModelTests: XCTestCase {
         )
         defer { viewModel.shutdown() }
         var didClose = false
+        var recordedUses = 0
         viewModel.onRequestClose = { didClose = true }
+        viewModel.onSuccessfulResultAction = { recordedUses += 1 }
 
         viewModel.start()
         try await waitUntil {
@@ -4286,12 +4297,20 @@ final class SearchPanelViewModelTests: XCTestCase {
         XCTAssertNil(store.usage(for: application.url))
         try await waitUntil { launcher.requestedURLs == [application.url] }
         XCTAssertTrue(viewModel.isPerformingAction)
+        XCTAssertEqual(recordedUses, 0)
 
-        launcher.finishSuccessfully()
+        launcher.finish(with: .failure(SearchPanelActionError.destinationCancelled))
+        try await waitUntil { !viewModel.isPerformingAction }
+        XCTAssertEqual(recordedUses, 0, "A cancelled action must not count")
+
+        viewModel.perform(.open)
+        try await waitUntil { launcher.requestedURLs.count == 2 }
+        launcher.finish(with: .success(()))
         try await waitUntil {
             !viewModel.isPerformingAction
                 && store.usage(for: application.url)?.openCount == 1
         }
+        XCTAssertEqual(recordedUses, 1)
     }
 
     func testAllCategoryGroupsApplicationsFirstAndArrowKeysFollowVisibleOrder() async throws {
@@ -4577,8 +4596,8 @@ private final class SearchPanelDeferredApplicationLauncher: SearchPanelApplicati
         }
     }
 
-    func finishSuccessfully() {
-        continuation?.resume()
+    func finish(with result: Result<Void, Error>) {
+        continuation?.resume(with: result)
         continuation = nil
     }
 }

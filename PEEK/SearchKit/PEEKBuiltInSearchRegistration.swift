@@ -108,6 +108,7 @@ enum PEEKBuiltInSearchRegistration {
             settingsDefinition(.translation, aliases: ["Translation Settings", "翻译设置", "fanyi shezhi"]), // localization:ignore - cross-language search aliases
             settingsDefinition(.capture, aliases: ["Screenshot Settings", "截图设置", "jietu shezhi"]), // localization:ignore - cross-language search aliases
             settingsDefinition(.appearance, aliases: ["Appearance", "Theme", "外观", "主题", "waiguan"]), // localization:ignore - cross-language search aliases
+            settingsDefinition(.usage, aliases: ["Usage", "Activity", "Medals", "用量", "勋章", "yongliang"]), // localization:ignore - cross-language search aliases
             settingsDefinition(.about, aliases: ["About PEEK", "Diagnostics", "关于", "诊断", "guanyu"]) // localization:ignore - cross-language search aliases
         ]
     }

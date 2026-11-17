@@ -51,6 +51,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published private(set) var isPanelActive = false
 
     var onRequestClose: (() -> Void)?
+    var onSuccessfulResultAction: (() -> Void)?
 
     private let provider: any SearchPanelProviding
     private let actionHandler: any SearchPanelActionHandling
@@ -409,6 +410,7 @@ final class SearchPanelViewModel: ObservableObject {
             errorMessage = L10n.tr("无法打开该系统设置项目")
             return
         }
+        onSuccessfulResultAction?()
         feedbackMessage = L10n.tr("已打开 %@", setting.title)
     }
 
@@ -462,6 +464,9 @@ final class SearchPanelViewModel: ObservableObject {
             }
             do {
                 let feedback = try await actionHandler.perform(action, item: item)
+                if !item.launchBehavior.isPEEKBuiltInTool {
+                    self?.onSuccessfulResultAction?()
+                }
                 var indexRefreshFailed = false
                 if let destinationURL = feedback.updatedURL {
                     do {
