@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import SQLite3
 import XCTest
 @testable import PEEK
 
@@ -77,6 +78,52 @@ final class ClipboardHistoryStoreTests: XCTestCase {
             XCTAssertEqual(error as? ClipboardHistoryError, .payloadMissing)
         }
         await store.close()
+    }
+
+    func testV040RichTextMetadataIsRepairedOnceWithoutRewritingPayload() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ClipboardHistoryStore(rootURL: root)
+        let html = Data("<p>旧记录 &amp; PEEK</p>".utf8)
+        let envelope = ClipboardPayloadEnvelope(representations: [
+            .init(type: NSPasteboard.PasteboardType.html.rawValue, data: html)
+        ])
+        let legacy = try await store.save(ClipboardHistoryCapture(
+            capturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            kind: .richText, title: "Rich Text", detail: "0 characters",
+            sourceApplicationName: "fixture", sourceBundleIdentifier: nil, payload: envelope
+        ))
+        await store.close()
+        var handle: OpaquePointer?
+        let databaseURL = root.appendingPathComponent("clipboard-history.sqlite3")
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &handle), SQLITE_OK)
+        let database = try XCTUnwrap(handle)
+        defer { sqlite3_close(database) }
+        XCTAssertEqual(sqlite3_exec(database, "PRAGMA user_version = 0", nil, nil, nil), SQLITE_OK)
+
+        let reopened = ClipboardHistoryStore(rootURL: root)
+        let rows = try await reopened.loadRecords()
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(row.id, legacy.id)
+        XCTAssertEqual(row.digest, legacy.digest)
+        XCTAssertEqual(row.payloadFilename, legacy.payloadFilename)
+        XCTAssertEqual(row.createdAt, legacy.createdAt)
+        XCTAssertEqual(row.sourceApplicationName, "fixture")
+        XCTAssertEqual(row.title, "旧记录 & PEEK")
+        XCTAssertEqual(row.detail, "\(row.title.count) characters")
+        let payload = try await reopened.payload(for: row)
+        XCTAssertEqual(payload, envelope)
+        await reopened.close()
+
+        // Simulate a matching row after the upgrade. Reopening must not scan
+        // its payload a second time.
+        XCTAssertEqual(sqlite3_exec(database,
+            "UPDATE clipboard_records SET title = '富文本', detail = '0 个字符'", nil, nil, nil), SQLITE_OK)
+        let afterUpgrade = ClipboardHistoryStore(rootURL: root)
+        let laterRows = try await afterUpgrade.loadRecords()
+        XCTAssertEqual(laterRows.first?.title, "富文本")
+        await afterUpgrade.close()
     }
 
     func testCancelledPayloadRequestStopsBeforeReadingFromDisk() async throws {
@@ -566,6 +613,24 @@ final class ClipboardHistoryCaptureTests: XCTestCase {
         await store.close()
     }
 
+    @MainActor
+    func testLargeFinderSelectionReportsHowManyFileURLsWereRetained() throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let limit = ClipboardHistoryLimits.maximumFileURLCount
+        let urls = (0...limit).map { URL(fileURLWithPath: "/tmp/PEEK-selection-\($0)") }
+        XCTAssertTrue(pasteboard.writeObjects(urls as [NSURL]))
+        let capture = try XCTUnwrap(ClipboardHistoryMonitor.capture(from: pasteboard, sourceApplication: nil))
+        XCTAssertEqual(capture.title, L10n.tr("共 %d 个文件，已保留 %d 个", urls.count, limit))
+        XCTAssertEqual(capture.payload.fileURLs, urls.prefix(limit).map(\.absoluteString))
+
+        pasteboard.clearContents()
+        XCTAssertTrue(pasteboard.writeObjects(Array(urls.prefix(limit)) as [NSURL]))
+        let exact = try XCTUnwrap(ClipboardHistoryMonitor.capture(from: pasteboard, sourceApplication: nil))
+        XCTAssertEqual(exact.title, L10n.tr("%d 个文件", limit))
+        XCTAssertEqual(exact.payload.fileURLs, capture.payload.fileURLs)
+    }
+
     func testClipboardShortcutUsesDedicatedNonConflictingDefault() {
         let shortcut = ScreenshotGlobalHotKeyAction.clipboardHistory.defaultShortcut
         XCTAssertEqual(shortcut.keyCode, UInt32(kVK_ANSI_V))
@@ -584,6 +649,67 @@ final class ClipboardHistoryCaptureTests: XCTestCase {
 }
 
 final class ClipboardHistoryPreviewLoaderTests: XCTestCase {
+    func testRichOnlyCapturesPreserveOriginalRepresentationsAndPreviewLegacyPayloads() throws {
+        let tail = String(repeating: "1234567890", count: 12)
+        let body = "你好 & PEEK\n" + tail
+        let rtf = try NSAttributedString(string: body).data(
+            from: NSRange(location: 0, length: (body as NSString).length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )
+        let html = Data("""
+            <html><head><title>Head title</title></head><body>
+            <script>hidden script text</script><style>.unused { color: red }</style>
+            <p>你好 &amp; <b>PEEK</b></p><p>\(tail)</p></body></html>
+            """.utf8)
+        for (type, bytes) in [(NSPasteboard.PasteboardType.rtf, rtf), (.html, html)] {
+            let capture = try XCTUnwrap(ClipboardHistoryMonitor.capture(
+                items: [ClipboardHistoryPasteboardItemSnapshot(values: [type.rawValue: bytes])],
+                sourceApplicationName: nil, sourceBundleIdentifier: nil
+            ))
+            XCTAssertEqual(capture.kind, .richText)
+            XCTAssertEqual(capture.title, String(body.replacingOccurrences(of: "\n", with: " ").prefix(89)) + "…")
+            XCTAssertEqual(capture.detail, L10n.tr("%d 个字符", body.count))
+            XCTAssertEqual(capture.payload.representations, [.init(type: type.rawValue, data: bytes)])
+
+            // v0.4.0 saved rich-only records without a plain-text representation.
+            let record = makeRecord(kind: .richText, title: "old title", byteCount: bytes.count)
+            guard case .text(let preview) = ClipboardHistoryPreviewLoader.payloadPreview(record: record, payload: capture.payload) else {
+                return XCTFail("Expected rich-text preview")
+            }
+            XCTAssertEqual(preview.text, body, type.rawValue)
+            XCTAssertFalse(preview.isTruncated)
+        }
+    }
+
+    func testLargeRichOnlyLegacyPreviewsBoundRTFAndHTMLInput() {
+        let limit = ClipboardHistoryPreviewLoader.maximumTextPreviewBytes
+        let body = "visible " + String(repeating: "a", count: limit * 2)
+        let inputs = [
+            (NSPasteboard.PasteboardType.rtf, Data((#"{\rtf1{\b "# + body + "}}").utf8)),
+            (.html, Data(("<p>" + body + "</p>").utf8))
+        ]
+        for (type, data) in inputs {
+            let record = makeRecord(kind: .richText, title: "old title", byteCount: data.count)
+            let payload = ClipboardPayloadEnvelope(representations: [.init(type: type.rawValue, data: data)])
+            guard case .text(let preview) = ClipboardHistoryPreviewLoader.payloadPreview(record: record, payload: payload) else {
+                return XCTFail("Expected a partial rich-text preview")
+            }
+            XCTAssertTrue(preview.isTruncated, type.rawValue)
+            XCTAssertEqual(preview.totalByteCount, data.count)
+            XCTAssertEqual(preview.loadedByteCount, limit)
+            XCTAssertTrue(preview.text.hasPrefix("visible "), type.rawValue)
+            XCTAssertLessThanOrEqual(preview.text.utf8.count, limit)
+        }
+    }
+
+    func testLegacyRichLinkUsesOriginalContentBeyondTruncatedTitle() {
+        let link = "https://example.com/" + String(repeating: "p", count: 120)
+        let data = Data(("<span>" + link + "</span>").utf8)
+        let payload = ClipboardPayloadEnvelope(representations: [.init(type: NSPasteboard.PasteboardType.html.rawValue, data: data)])
+        let record = makeRecord(kind: .link, title: String(link.prefix(89)) + "…", byteCount: data.count)
+        XCTAssertEqual(ClipboardHistoryPreviewLoader.linkURL(record: record, payload: payload)?.absoluteString, link)
+    }
+
     func testHTTPLinkCreatesOfflineLinkCard() throws {
         let value = "https://example.com/path?q=peek"
         let data = Data(value.utf8)
@@ -780,5 +906,99 @@ final class ClipboardHistoryPreviewLoaderTests: XCTestCase {
             byteCount: Int64(byteCount),
             digest: "test"
         )
+    }
+}
+
+extension ClipboardHistoryStoreTests {
+    func testWriterLockLeavesPayloadReadableAndDeleteCanBeRetried() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ClipboardHistoryStore(rootURL: root)
+        let item = capture(text: "locked row", date: Date())
+        let record = try await store.save(item)
+        let databaseURL = root.appendingPathComponent("clipboard-history.sqlite3")
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databaseURL.path, &connection), SQLITE_OK)
+        let writer = try XCTUnwrap(connection)
+        defer { sqlite3_close(writer) }
+        XCTAssertEqual(sqlite3_exec(writer, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
+        do {
+            try await store.delete(record)
+            XCTFail("A second writer cannot delete the record while the lock is held")
+        } catch ClipboardHistoryError.unavailable(_) {}
+
+        let payload = try await store.payload(for: record)
+        XCTAssertEqual(payload, item.payload)
+        let retained = try await store.loadRecords()
+        XCTAssertEqual(retained.map(\.id), [record.id])
+        XCTAssertEqual(sqlite3_exec(writer, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+        try await store.delete(record)
+        let remaining = try await store.loadRecords()
+        XCTAssertTrue(remaining.isEmpty)
+        await store.close()
+    }
+
+    func testDuplicatePayloadRefreshesReturnedAndPersistedDisplayMetadata() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ClipboardHistoryStore(rootURL: root)
+        let old = capture(text: "https://example.com", date: Date(timeIntervalSince1970: 1))
+        let first = try await store.save(old)
+        let latest = ClipboardHistoryCapture(
+            capturedAt: Date(timeIntervalSince1970: 2),
+            kind: .link, title: "Example", detail: "example.com",
+            sourceApplicationName: nil, sourceBundleIdentifier: nil,
+            payload: old.payload
+        )
+
+        let result = try await store.save(latest)
+        XCTAssertEqual(result.id, first.id)
+        XCTAssertEqual(result.kind, latest.kind)
+        XCTAssertEqual(result.title, latest.title)
+        XCTAssertEqual(result.detail, latest.detail)
+        let stored = try await store.loadRecords()
+        XCTAssertEqual(stored, [result])
+        await store.close()
+    }
+}
+
+@MainActor
+final class ClipboardHistoryPasteTests: XCTestCase {
+    func testFocusLostBeforeDeliverySuppressesPaste() async {
+        var checkedFocus = false
+        do {
+            try await ClipboardHistoryPanelController.deliverPaste(
+                to: 42,
+                activate: { true },
+                hasFocus: { checkedFocus = true; return false },
+                post: { _ in XCTFail("The original app lost focus before delivery") }
+            )
+            XCTFail("A failed delivery must be reported to the caller")
+        } catch {
+            XCTAssertTrue(checkedFocus)
+        }
+    }
+
+    func testRejectedActivationNeverSendsPaste() async {
+        do {
+            try await ClipboardHistoryPanelController.deliverPaste(
+                to: 42,
+                activate: { false },
+                hasFocus: { XCTFail("Activation was rejected"); return true },
+                post: { _ in XCTFail("The original app could not be activated") }
+            )
+            XCTFail("A rejected activation must be reported to the caller")
+        } catch {
+            XCTAssertTrue(error is ClipboardHistoryError)
+        }
+    }
+
+    func testConfirmedFocusRoutesPasteOnlyToOriginalProcess() async throws {
+        var recipients: [pid_t] = []
+        try await ClipboardHistoryPanelController.deliverPaste(
+            to: 42, activate: { true }, hasFocus: { true },
+            post: { recipients.append($0) }
+        )
+        XCTAssertEqual(recipients, [42])
     }
 }

@@ -64,12 +64,10 @@ final class ScreenshotService: ObservableObject {
     private let indexActivityController: any FileSearchIndexActivityControlling
     private let capturePreparationTimeoutNanoseconds: UInt64
     private var scrollSession: ScrollCaptureSession?
-    private var pendingScrollRect: CGRect?
     private var originalFrontmostApplication: NSRunningApplication?
     private var scrollTargetApplication: NSRunningApplication?
     private var scrollCaptureTarget: ScrollCaptureTarget?
     private var scrollWindowAnchor: ScrollCaptureWindowAnchor?
-    private var editorActionOccurred = false
     private var shouldReactivateOriginalApplication = true
     private var activeCaptureRequest: ScreenshotCaptureRequestToken?
     private var capturePreparationWatchdog: Task<Void, Never>?
@@ -103,37 +101,37 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard let captureRequest = beginCapture(
+        let scrollRect = await captureWithEditor(
             message: L10n.tr("拖动选择区域；可移动或缩放，双击或 Enter 后截图")
-        ) else { return }
-        defer { endCapture(request: captureRequest) }
+        ) { request in
+            await self.captureRegionWithEditor(
+                request: request, presentationDelayNanoseconds: presentationDelayNanoseconds
+            )
+        }
+        if let scrollRect {
+            await captureScrolling(initialSelectionRect: scrollRect)
+        }
+    }
 
+    private func captureRegionWithEditor(
+        request: ScreenshotCaptureRequestToken,
+        presentationDelayNanoseconds: UInt64
+    ) async {
         do {
-            editorActionOccurred = false
             guard try await captureCoordinator.captureRegionWithInlineEditor(
                 presentationDelayNanoseconds: presentationDelayNanoseconds,
-                requestToken: captureRequest,
+                requestToken: request,
                 onAction: { [weak self] action in
-                    self?.handleEditorAction(action)
+                    self?.handleEditorAction(action, request: request)
                 }
             ) != nil else {
-                guard !captureRequest.isCancelled else { return }
-                if let selectionRect = pendingScrollRect {
-                    pendingScrollRect = nil
-                    DispatchQueue.main.async { [weak self] in
-                        Task { @MainActor in
-                            await self?.captureScrolling(
-                                initialSelectionRect: selectionRect
-                            )
-                        }
-                    }
-                    return
-                }
-                if !editorActionOccurred {
+                guard ownsCapture(request) else { return }
+                if !request.editorActionOccurred {
                     lastMessage = L10n.tr("已取消截图")
                 }
                 return
             }
+            try checkCaptureCancellation(request)
             completeCapturePreparation()
 
             // Inline Done/double-click has already written the rendered image
@@ -141,6 +139,7 @@ final class ScreenshotService: ObservableObject {
             // the explicit Save toolbar action remains available when needed.
             lastMessage = L10n.tr("截图已复制到剪贴板")
         } catch {
+            guard ownsCapture(request) else { return }
             handleCaptureFailure(error, operation: L10n.tr("截图"))
         }
     }
@@ -151,13 +150,38 @@ final class ScreenshotService: ObservableObject {
         presentationDelayNanoseconds: UInt64 = ScreenshotCapturePresentationDelay
             .uiDismissalNanoseconds
     ) async {
-        guard let captureRequest = beginCapture(
-            message: L10n.tr("请选择要连续滚动的内容区域")
-        ) else {
-            return
-        }
-        defer { endCapture(request: captureRequest) }
+        var selectionRect = initialSelectionRect
+        repeat {
+            let currentRect = selectionRect
+            selectionRect = await captureWithEditor(message: L10n.tr("请选择要连续滚动的内容区域")) { request in
+                await self.captureScrollAttempt(
+                    initialSelectionRect: currentRect,
+                    presentationDelayNanoseconds: presentationDelayNanoseconds,
+                    captureRequest: request
+                )
+            }
+        } while selectionRect != nil
+    }
 
+    // Consume the editor's next selection after this request's windows close.
+    // Both the inline editor and the scroll-result editor use this handoff.
+    func captureWithEditor(
+        message: String,
+        operation: (ScreenshotCaptureRequestToken) async -> Void
+    ) async -> CGRect? {
+        guard let request = beginCapture(message: message) else { return nil }
+        defer { endCapture(request: request) }
+        await operation(request)
+        guard ownsCapture(request), !Task.isCancelled else { return nil }
+        return request.requestedScrollSelection
+    }
+
+    private func captureScrollAttempt(
+        initialSelectionRect: CGRect?,
+        presentationDelayNanoseconds: UInt64,
+        captureRequest: ScreenshotCaptureRequestToken
+    ) async {
+        guard ownsCapture(captureRequest) else { return }
         // A recovery retry can lower the scroll distance for one attempt
         // without rewriting the user's persistent pixel ceiling.
         let automaticAmountOverride = pendingScrollAmountOverride
@@ -181,7 +205,8 @@ final class ScreenshotService: ObservableObject {
                 try await performScrollCapture(
                     selectionRect: initialSelectionRect,
                     automaticAmountOverride: automaticAmountOverride,
-                    automaticModeOverride: automaticModeOverride
+                    automaticModeOverride: automaticModeOverride,
+                    request: captureRequest
                 )
                 return
             }
@@ -201,7 +226,7 @@ final class ScreenshotService: ObservableObject {
                     && target.wasPointerHitTested
                     && target.windowID != 0 ? target : nil
             }
-            try checkCaptureCancellation()
+            try checkCaptureCancellation(captureRequest)
             scrollCaptureTarget = detectedTarget
             scrollWindowAnchor = detectedWindowTarget.flatMap(Self.windowAnchor)
             if let detectedTarget {
@@ -241,12 +266,12 @@ final class ScreenshotService: ObservableObject {
                 automaticHoverSelectionRects: detectedWindowTarget?.hoverSelectionRects ?? [],
                 requestToken: captureRequest
             ) else {
-                guard !captureRequest.isCancelled else { return }
+                guard ownsCapture(captureRequest) else { return }
                 lastMessage = L10n.tr("已取消滚动截图")
                 return
             }
+            try checkCaptureCancellation(captureRequest)
             completeCapturePreparation()
-            try checkCaptureCancellation()
 
             if let detectedTarget,
                !capture.wasInitialSelectionModified,
@@ -278,12 +303,16 @@ final class ScreenshotService: ObservableObject {
             try await performScrollCapture(
                 selectionRect: capture.selectionRect,
                 automaticAmountOverride: automaticAmountOverride,
-                automaticModeOverride: automaticModeOverride
+                automaticModeOverride: automaticModeOverride,
+                request: captureRequest
             )
         } catch is CancellationError {
+            guard ownsCapture(captureRequest) else { return }
             lastMessage = L10n.tr("已取消滚动截图")
         } catch {
+            guard ownsCapture(captureRequest) else { return }
             let recoveryAction = handleScrollCaptureFailure(error)
+            guard ownsCapture(captureRequest) else { return }
             switch recoveryAction {
             case .savePartial(let result):
                 shouldReactivateOriginalApplication = true
@@ -296,9 +325,11 @@ final class ScreenshotService: ObservableObject {
                     }
                     try await editAndSavePartialScrollResult(
                         result,
-                        captureRect: captureRect
+                        captureRect: captureRect,
+                        request: captureRequest
                     )
                 } catch {
+                    guard ownsCapture(captureRequest) else { return }
                     handleCaptureFailure(error, operation: L10n.tr("保存部分滚动截图"))
                     presentCaptureAlert(
                         title: L10n.tr("部分滚动截图保存失败"),
@@ -307,7 +338,7 @@ final class ScreenshotService: ObservableObject {
                 }
             case .retryWithReducedStep, .reselect, .switchToManual:
                 shouldReactivateOriginalApplication = true
-                scheduleScrollRecovery(recoveryAction)
+                scheduleScrollRecovery(recoveryAction, request: captureRequest)
             case .cancel:
                 return
             }
@@ -331,14 +362,16 @@ final class ScreenshotService: ObservableObject {
                 presentationDelayNanoseconds: presentationDelayNanoseconds,
                 requestToken: captureRequest
             ) else {
-                guard !captureRequest.isCancelled else { return }
+                guard ownsCapture(captureRequest) else { return }
                 lastMessage = L10n.tr("已取消 OCR")
                 return
             }
+            try checkCaptureCancellation(captureRequest)
             completeCapturePreparation()
             shouldReactivateOriginalApplication = false
             await recognizeText(in: capture.image, title: L10n.tr("截图 OCR"))
         } catch {
+            guard ownsCapture(captureRequest) else { return }
             handleCaptureFailure(error, operation: L10n.tr("OCR 截图"))
         }
     }
@@ -531,15 +564,22 @@ final class ScreenshotService: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    private func edit(_ image: NSImage, sourceSelectionRect: CGRect) async -> NSImage? {
-        editorActionOccurred = false
+    private func edit(
+        _ image: NSImage, sourceSelectionRect: CGRect, request: ScreenshotCaptureRequestToken
+    ) async -> NSImage? {
+        guard ownsCapture(request) else { return nil }
         return await editorController.edit(image: image) { [weak self] action in
-            self?.handleEditorAction(action, sourceSelectionRect: sourceSelectionRect)
+            self?.handleEditorAction(action, request: request, sourceSelectionRect: sourceSelectionRect)
         }
     }
 
-    private func handleEditorAction(_ action: ScreenshotEditorAction, sourceSelectionRect: CGRect? = nil) {
-        editorActionOccurred = true
+    func handleEditorAction(
+        _ action: ScreenshotEditorAction,
+        request: ScreenshotCaptureRequestToken,
+        sourceSelectionRect: CGRect? = nil
+    ) {
+        guard ownsCapture(request) else { return }
+        request.editorActionOccurred = true
         switch action {
         case .pinRequested(let rendered):
             _ = PEEKPinboard.shared.pin(image: rendered)
@@ -556,9 +596,9 @@ final class ScreenshotService: ObservableObject {
                 await self?.recognizeQRCode(in: rendered)
             }
         case .scrollCaptureRequested:
-            if let sourceSelectionRect { pendingScrollRect = sourceSelectionRect }
+            request.requestedScrollSelection = sourceSelectionRect
         case .scrollCaptureRequestedInSelection(_, let selectionRect):
-            pendingScrollRect = selectionRect
+            request.requestedScrollSelection = selectionRect
         case .copied:
             PEEKUsageStore.shared.recordUse()
             lastMessage = L10n.tr("截图已复制到剪贴板")
@@ -571,8 +611,10 @@ final class ScreenshotService: ObservableObject {
     private func performScrollCapture(
         selectionRect: CGRect,
         automaticAmountOverride: Int?,
-        automaticModeOverride: Bool?
+        automaticModeOverride: Bool?,
+        request: ScreenshotCaptureRequestToken
     ) async throws {
+        try checkCaptureCancellation(request)
         completeCapturePreparation()
         lastMessage = L10n.tr("正在准备滚动截图…")
         let useAutomatic = ScrollCapturePreferenceResolver.automaticScrollingEnabled(
@@ -600,12 +642,13 @@ final class ScreenshotService: ObservableObject {
         }
         let preparedTarget = try await prepareScrollTarget(
             for: selectionRect,
-            automaticRequested: useAutomatic
+            automaticRequested: useAutomatic,
+            request: request
         )
-        try checkCaptureCancellation()
+        try checkCaptureCancellation(request)
         // 等选区遮罩或编辑器窗口完全离开 WindowServer，避免首帧残影。
         try await Task.sleep(nanoseconds: 240_000_000)
-        try checkCaptureCancellation()
+        try checkCaptureCancellation(request)
 
         let captureRect = preparedTarget.recognizedRegion?.captureRect ?? selectionRect
         guard Self.containingScreen(for: captureRect) != nil else {
@@ -653,16 +696,8 @@ final class ScreenshotService: ObservableObject {
                 selectionQuartzRect: captureQuartzRect
             )
         )
-        scrollSession = session
-        isScrolling = true
-        try checkCaptureCancellation()
-        let result = try await session.start { [weak self] progress in
-            Task { @MainActor in
-                self?.lastMessage = progress.message
-            }
-        }
-        isScrolling = false
-        scrollSession = nil
+        let result = try await runScrollSession(session, for: request)
+        try checkCaptureCancellation(request)
         if result.stopReason == .alignmentStopped {
             // A validated prefix is useful, but it is not the bottom of the
             // page. Route it through the existing explicit partial-result
@@ -676,13 +711,13 @@ final class ScreenshotService: ObservableObject {
             )
         }
         let image = NSImage(cgImage: result.image, size: .zero)
-        pendingScrollRect = nil
-        guard let edited = await edit(image, sourceSelectionRect: captureRect) else {
-            if !editorActionOccurred {
+        guard let edited = await edit(image, sourceSelectionRect: captureRect, request: request) else {
+            if ownsCapture(request) && !request.editorActionOccurred {
                 lastMessage = L10n.tr("滚动截图已生成，但已取消保存")
             }
             return
         }
+        try checkCaptureCancellation(request)
         guard copyToPasteboard(edited) else {
             throw ScreenshotCaptureError.imageRenderingFailed
         }
@@ -693,22 +728,43 @@ final class ScreenshotService: ObservableObject {
         }
     }
 
+    func runScrollSession(
+        _ session: ScrollCaptureSession, for request: ScreenshotCaptureRequestToken
+    ) async throws -> ScrollCaptureResult {
+        try checkCaptureCancellation(request)
+        scrollSession = session
+        isScrolling = true
+        defer {
+            if scrollSession === session {
+                scrollSession = nil
+                isScrolling = false
+            }
+        }
+        return try await session.start { [weak self] progress in
+            Task { @MainActor in
+                guard let self, self.ownsCapture(request), self.scrollSession === session else { return }
+                self.lastMessage = progress.message
+            }
+        }
+    }
+
     /// A partial result is never saved silently. It reaches this path only
     /// after the recovery alert explicitly offers the already validated prefix
     /// and the user chooses to keep it. The normal long-image editor remains in
     /// the loop so the user can inspect, annotate or cancel before persistence.
     private func editAndSavePartialScrollResult(
         _ result: ScrollCaptureResult,
-        captureRect: CGRect
+        captureRect: CGRect,
+        request: ScreenshotCaptureRequestToken
     ) async throws {
         let image = NSImage(cgImage: result.image, size: .zero)
-        pendingScrollRect = nil
-        guard let edited = await edit(image, sourceSelectionRect: captureRect) else {
-            if !editorActionOccurred {
+        guard let edited = await edit(image, sourceSelectionRect: captureRect, request: request) else {
+            if ownsCapture(request) && !request.editorActionOccurred {
                 lastMessage = L10n.tr("已放弃保存部分滚动截图")
             }
             return
         }
+        try checkCaptureCancellation(request)
         guard copyToPasteboard(edited) else {
             throw ScreenshotCaptureError.imageRenderingFailed
         }
@@ -832,7 +888,8 @@ final class ScreenshotService: ObservableObject {
 
     private func prepareScrollTarget(
         for selectionRect: CGRect,
-        automaticRequested: Bool
+        automaticRequested: Bool,
+        request: ScreenshotCaptureRequestToken
     ) async throws -> PreparedScrollTarget {
         let expectedRegion = scrollCaptureTarget
         let expectedAnchor = scrollWindowAnchor
@@ -855,7 +912,8 @@ final class ScreenshotService: ObservableObject {
             )
         }
 
-        try? await Task.sleep(nanoseconds: 220_000_000)
+        try await Task.sleep(nanoseconds: 220_000_000)
+        try checkCaptureCancellation(request)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier else {
             if automaticRequested || expectedRegion != nil {
                 throw ScrollCaptureError.invalidConfiguration(
@@ -899,7 +957,6 @@ final class ScreenshotService: ObservableObject {
                     L10n.tr("滚动内容区已发生变化，请重新选择后再开始")
                 )
             }
-            scrollCaptureTarget = live
             recognizedRegion = live
         }
 
@@ -938,8 +995,13 @@ final class ScreenshotService: ObservableObject {
         )
     }
 
-    private func checkCaptureCancellation() throws {
-        try activeCaptureRequest?.checkCancellation()
+    private func ownsCapture(_ request: ScreenshotCaptureRequestToken) -> Bool {
+        activeCaptureRequest === request && !request.isCancelled
+    }
+
+    private func checkCaptureCancellation(_ request: ScreenshotCaptureRequestToken) throws {
+        guard ownsCapture(request) else { throw CancellationError() }
+        try request.checkCancellation()
     }
 
     private var shouldAutoDetectScrollTarget: Bool {
@@ -1146,7 +1208,7 @@ final class ScreenshotService: ObservableObject {
             + "w=\(Int(standardized.width.rounded())), h=\(Int(standardized.height.rounded()))"
     }
 
-    private func scheduleScrollRecovery(_ action: ScrollRecoveryAction) {
+    private func scheduleScrollRecovery(_ action: ScrollRecoveryAction, request: ScreenshotCaptureRequestToken) {
         let reducedAmount: Int?
         if case .retryWithReducedStep = action,
            let currentAmount = scrollAttemptContext?.requestedScrollAmount {
@@ -1159,11 +1221,7 @@ final class ScreenshotService: ObservableObject {
         // and its defer has cleared isCapturing, avoiding recursive re-entry.
         Task { @MainActor [weak self] in
             await Task.yield()
-            guard let self else { return }
-            guard !self.isCapturing else {
-                self.lastMessage = L10n.tr("上一轮滚动截图仍在结束，请稍后重新发起")
-                return
-            }
+            guard let self, !request.isCancelled, !self.isCapturing else { return }
             switch action {
             case .retryWithReducedStep:
                 self.pendingScrollAmountOverride = reducedAmount

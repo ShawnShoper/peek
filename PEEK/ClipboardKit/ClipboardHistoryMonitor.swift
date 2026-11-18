@@ -21,6 +21,8 @@ enum ClipboardHistoryPreferenceKey {
 struct ClipboardHistoryPasteboardItemSnapshot: Sendable {
     private let values: [String: Data]
 
+    var hasFileURL: Bool { values[NSPasteboard.PasteboardType.fileURL.rawValue] != nil }
+
     var shouldExcludeFromHistory: Bool {
         !ClipboardHistoryPrivacy.excludedTypes.isDisjoint(with: values.keys)
     }
@@ -493,8 +495,9 @@ final class ClipboardHistoryMonitor: ObservableObject {
         // large provider-owned payloads on the main actor. Inspect type names
         // first, then request only the representations used by our parser.
         let items: [ClipboardHistoryPasteboardItemSnapshot]
-        if pasteboardItems.contains(where: { $0.types.contains(.fileURL) }) {
-            items = pasteboardItems
+        let fileItems = pasteboardItems.filter { $0.types.contains(.fileURL) }
+        if !fileItems.isEmpty {
+            items = fileItems
                 .prefix(ClipboardHistoryLimits.maximumFileURLCount)
                 .map {
                     ClipboardHistoryPasteboardItemSnapshot(item: $0, types: [.fileURL])
@@ -523,7 +526,8 @@ final class ClipboardHistoryMonitor: ObservableObject {
         return capture(
             items: items,
             sourceApplicationName: sourceApplicationName,
-            sourceBundleIdentifier: sourceBundleIdentifier
+            sourceBundleIdentifier: sourceBundleIdentifier,
+            sourceFileCount: fileItems.count
         )
     }
 
@@ -531,20 +535,27 @@ final class ClipboardHistoryMonitor: ObservableObject {
     nonisolated static func capture(
         items: [ClipboardHistoryPasteboardItemSnapshot],
         sourceApplicationName sourceName: String?,
-        sourceBundleIdentifier sourceIdentifier: String?
+        sourceBundleIdentifier sourceIdentifier: String?,
+        sourceFileCount: Int? = nil
     ) -> ClipboardHistoryCapture? {
         guard !items.isEmpty, !items.contains(where: \.shouldExcludeFromHistory) else { return nil }
 
-        let fileURLs = items
-            .prefix(ClipboardHistoryLimits.maximumFileURLCount)
-            .compactMap { item -> URL? in
-            guard let value = item.string(forType: .fileURL) else { return nil }
-            return URL(string: value)
+        let fileItems = items.filter(\.hasFileURL)
+        let fileCount = sourceFileCount ?? fileItems.count
+        let fileURLs = fileItems.prefix(ClipboardHistoryLimits.maximumFileURLCount).compactMap { item -> URL? in
+            guard let value = item.string(forType: .fileURL),
+                  let url = URL(string: value), url.isFileURL else { return nil }
+            return url
         }
         if !fileURLs.isEmpty {
-            let title = fileURLs.count == 1
-                ? fileURLs[0].lastPathComponent
-                : L10n.tr("%d 个文件", fileURLs.count)
+            let title: String
+            if fileCount > fileURLs.count {
+                title = L10n.tr("共 %d 个文件，已保留 %d 个", fileCount, fileURLs.count)
+            } else if fileURLs.count == 1 {
+                title = fileURLs[0].lastPathComponent
+            } else {
+                title = L10n.tr("%d 个文件", fileURLs.count)
+            }
             let detail = fileURLs.count == 1
                 ? fileURLs[0].deletingLastPathComponent().path
                 : fileURLs.prefix(3).map(\.lastPathComponent).joined(separator: "、")
@@ -578,45 +589,20 @@ final class ClipboardHistoryMonitor: ObservableObject {
             )
         }
 
-        let plainText = first.string(forType: .string)
-        let rtf = first.data(forType: .rtf)
-        let html = first.data(forType: .html)
-        if plainText != nil || rtf != nil || html != nil {
-            let resolvedText = plainText
-                ?? rtf.flatMap {
-                    NSAttributedString(
-                        rtf: $0,
-                        documentAttributes: nil
-                    )?.string
-                }
-                ?? ""
-            let trimmed = resolvedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            var representations: [ClipboardRepresentation] = []
-            if let plainText,
-               let data = plainText.data(using: .utf8) {
-                representations.append(.init(type: NSPasteboard.PasteboardType.string.rawValue, data: data))
-            }
-            if let rtf {
-                representations.append(.init(type: NSPasteboard.PasteboardType.rtf.rawValue, data: rtf))
-            }
-            if let html {
-                representations.append(.init(type: NSPasteboard.PasteboardType.html.rawValue, data: html))
-            }
-            guard !representations.isEmpty else { return nil }
-
-            let isLink = URL(string: trimmed).map {
-                ["http", "https"].contains($0.scheme?.lowercased() ?? "")
-            } ?? false
-            let kind: ClipboardHistoryKind = isLink
-                ? .link
-                : ((rtf != nil || html != nil) ? .richText : .text)
+        let textFormats: [NSPasteboard.PasteboardType] = [.string, .rtf, .html]
+        let representations = textFormats.compactMap { type in
+            first.data(forType: type).map { ClipboardRepresentation(type: type.rawValue, data: $0) }
+        }
+        if !representations.isEmpty {
+            let payload = ClipboardPayloadEnvelope(representations: representations)
+            let metadata = textMetadata(for: payload)
             return ClipboardHistoryCapture(
-                kind: kind,
-                title: summaryTitle(for: trimmed, fallback: kind.title),
-                detail: L10n.tr("%d 个字符", resolvedText.count),
+                kind: metadata.kind,
+                title: metadata.title,
+                detail: L10n.tr("%d 个字符", metadata.characterCount),
                 sourceApplicationName: sourceName,
                 sourceBundleIdentifier: sourceIdentifier,
-                payload: ClipboardPayloadEnvelope(representations: representations)
+                payload: payload
             )
         }
 
@@ -633,6 +619,23 @@ final class ClipboardHistoryMonitor: ObservableObject {
             )
         }
         return nil
+    }
+
+    nonisolated static func textMetadata(
+        for payload: ClipboardPayloadEnvelope
+    ) -> (kind: ClipboardHistoryKind, title: String, characterCount: Int) {
+        let text = ClipboardHistoryPreviewLoader.readableText(
+            payload: payload, byteLimit: Int(ClipboardHistoryLimits.standard.maximumItemBytes)
+        )?.text ?? ""
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isLink = URL(string: trimmed).map {
+            ["http", "https"].contains($0.scheme?.lowercased() ?? "")
+        } ?? false
+        let isRich = payload.representations.contains {
+            $0.type != NSPasteboard.PasteboardType.string.rawValue
+        }
+        let kind: ClipboardHistoryKind = isLink ? .link : (isRich ? .richText : .text)
+        return (kind, summaryTitle(for: trimmed, fallback: kind.title), text.count)
     }
 
     nonisolated private static func imageCapture(

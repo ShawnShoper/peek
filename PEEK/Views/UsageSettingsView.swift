@@ -110,12 +110,14 @@ struct UsageSettingsView: View {
     }
 
     private func summary(_ snapshot: PEEKUsageSnapshot, asOf date: Date) -> String {
-        guard let start = snapshot.firstUseDate else {
+        guard let usage = snapshot.lifetimeSummary(on: date) else {
             return L10n.tr("首次完成操作后，这里会显示累计次数和日均用量。")
         }
-        let startDate = start.formatted(Date.FormatStyle(date: .long, time: .omitted).locale(locale))
+        let startDate = usage.startDayUTC.formatted(
+            Date.FormatStyle(date: .long, time: .omitted, locale: locale, timeZone: .gmt)
+        )
         let total = snapshot.totalCount.formatted(.number.locale(locale))
-        let average = snapshot.dailyAverage(asOf: date)
+        let average = usage.average
             .formatted(.number.precision(.fractionLength(1)).locale(locale))
         return L10n.tr("自 %@ 起，PEEK 已为你完成 %@ 次操作，平均每天 %@ 次。", startDate, total, average)
     }

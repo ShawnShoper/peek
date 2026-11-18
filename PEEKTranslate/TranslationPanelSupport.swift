@@ -220,20 +220,17 @@ enum TranslationLanguagePresentation {
         for identifier: String,
         locale: Locale = .current
     ) -> String {
-        let lowercaseIdentifier = identifier.lowercased()
-        if lowercaseIdentifier == "zh"
-            || lowercaseIdentifier.contains("hans")
-            || lowercaseIdentifier.hasSuffix("-cn") {
-            return locale.localizedString(forIdentifier: "zh-Hans")
-                ?? L10n.tr("简体中文")
-        }
-        if lowercaseIdentifier.contains("hant")
-            || lowercaseIdentifier.hasSuffix("-tw")
-            || lowercaseIdentifier.hasSuffix("-hk") {
-            return locale.localizedString(forIdentifier: "zh-Hant")
-                ?? L10n.tr("繁体中文")
-        }
         let language = Locale.Language(identifier: identifier)
+        if language.languageCode?.identifier == "zh" {
+            switch language.script?.identifier {
+            case "Hans":
+                return locale.localizedString(forIdentifier: "zh-Hans") ?? L10n.tr("简体中文")
+            case "Hant":
+                return locale.localizedString(forIdentifier: "zh-Hant") ?? L10n.tr("繁体中文")
+            default:
+                break
+            }
+        }
         let normalizedIdentifier = language.minimalIdentifier
         if let name = locale.localizedString(forIdentifier: normalizedIdentifier) {
             return name
@@ -260,12 +257,6 @@ enum TranslationLanguagePresentation {
             .sorted {
                 $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
             }
-    }
-
-    static func baseLanguageCode(_ identifier: String) -> String {
-        Locale.Language(identifier: identifier).languageCode?.identifier
-            ?? identifier.split(separator: "-").first.map(String.init)
-            ?? identifier
     }
 
     private static func writingScript(for scalar: UnicodeScalar) -> WritingScript? {
@@ -455,24 +446,10 @@ enum TranslationResponseLanguagePolicy {
 enum TranslationLanguageEquivalencePolicy {
     static func areEquivalent(sourceIdentifier: String?, targetIdentifier: String) -> Bool {
         guard let sourceIdentifier else { return false }
-        let sourceBase = TranslationLanguagePresentation.baseLanguageCode(sourceIdentifier)
-            .lowercased()
-        let targetBase = TranslationLanguagePresentation.baseLanguageCode(targetIdentifier)
-            .lowercased()
-        guard sourceBase == targetBase else { return false }
-        guard sourceBase == "zh" else { return true }
-
-        return chineseScript(for: sourceIdentifier) == chineseScript(for: targetIdentifier)
-    }
-
-    private static func chineseScript(for identifier: String) -> String {
-        let normalized = identifier.lowercased()
-        if normalized.contains("hant")
-            || normalized.hasSuffix("-tw")
-            || normalized.hasSuffix("-hk") {
-            return "traditional"
-        }
-        return "simplified"
+        let source = Locale.Language(identifier: sourceIdentifier)
+        let target = Locale.Language(identifier: targetIdentifier)
+        guard let languageCode = source.languageCode, languageCode == target.languageCode else { return false }
+        return languageCode.identifier != "zh" || source.script == target.script
     }
 }
 

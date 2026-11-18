@@ -192,6 +192,119 @@ final class ScreenshotKitTests: XCTestCase {
     }
 
     @MainActor
+    func testScrollHandoffUsesEachEditorsSelectionAndLeavesNextEscapeIdle() async {
+        let indexActivity = RecordingCaptureIndexActivityController()
+        let service = ScreenshotService(indexActivityController: indexActivity)
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        let inlineRect = CGRect(x: 12, y: 34, width: 64, height: 40)
+        let resultRect = CGRect(x: 120, y: 340, width: 160, height: 80)
+
+        let inlineNext = await service.captureWithEditor(message: "inline") { request in
+            service.handleEditorAction(.scrollCaptureRequestedInSelection(image, inlineRect), request: request)
+        }
+        XCTAssertEqual(inlineNext, inlineRect)
+        XCTAssertFalse(service.isCapturing)
+
+        let resultNext = await service.captureWithEditor(message: "scroll result") { request in
+            service.handleEditorAction(.scrollCaptureRequested(image), request: request, sourceSelectionRect: resultRect)
+        }
+        XCTAssertEqual(resultNext, resultRect)
+
+        // Escape closes the overlay without firing an editor action.
+        let escapedNext = await service.captureWithEditor(message: "new region") { _ in }
+        XCTAssertNil(escapedNext)
+        XCTAssertEqual(indexActivity.beginCaptureCount, 3)
+        XCTAssertEqual(indexActivity.endCaptureCount, 3)
+    }
+
+    @MainActor
+    func testCancelDropsEditorScrollRequestAndIgnoresLateActionInNewCapture() async {
+        let service = ScreenshotService(indexActivityController: RecordingCaptureIndexActivityController())
+        let image = NSImage(size: NSSize(width: 16, height: 16))
+        let rect = CGRect(x: 12, y: 34, width: 64, height: 40)
+        let cancelledNext = await service.captureWithEditor(message: "scroll result") { previous in
+            service.handleEditorAction(.scrollCaptureRequested(image), request: previous, sourceSelectionRect: rect)
+            service.cancelActiveCapture()
+
+            let next = await service.captureWithEditor(message: "fresh selection") { current in
+                service.handleEditorAction(.scrollCaptureRequestedInSelection(image, rect), request: previous)
+                XCTAssertFalse(current.editorActionOccurred)
+            }
+            XCTAssertNil(next)
+        }
+        XCTAssertNil(cancelledNext)
+        XCTAssertFalse(service.isCapturing)
+    }
+
+    @MainActor
+    func testCancelledPreparationCannotStartScrollingWhileIdleOrInANewCapture() async {
+        let service = ScreenshotService(indexActivityController: RecordingCaptureIndexActivityController())
+        let frames = CountingScrollFrameCapturer()
+        let session = ScrollCaptureSession(
+            configuration: .init(captureRect: CGRect(x: 0, y: 0, width: 100, height: 100)),
+            capturer: frames
+        )
+        func assertCannotStart(_ request: ScreenshotCaptureRequestToken) async {
+            do {
+                _ = try await service.runScrollSession(session, for: request)
+                XCTFail("Cancelled preparation must not start a frame capture")
+            } catch is CancellationError {
+                // The obsolete request is rejected before the first frame.
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertFalse(service.isScrolling)
+        }
+
+        _ = await service.captureWithEditor(message: "old selection") { old in
+            service.cancelActiveCapture()
+            await assertCannotStart(old)
+            _ = await service.captureWithEditor(message: "new selection") { _ in
+                await assertCannotStart(old)
+                XCTAssertTrue(service.isCapturing)
+                XCTAssertEqual(service.lastMessage, "new selection")
+            }
+        }
+        let count = await frames.captureCount
+        XCTAssertEqual(count, 0)
+    }
+
+    @MainActor
+    func testFinishingACancelledScrollSessionPreservesItsActiveReplacement() async {
+        let service = ScreenshotService(indexActivityController: RecordingCaptureIndexActivityController())
+        let config = ScrollCaptureConfiguration(captureRect: CGRect(x: 0, y: 0, width: 100, height: 100))
+        func startSession(_ name: String) -> (XCTestExpectation, AsyncStream<Void>.Continuation, Task<Void, Never>) {
+            let started = expectation(description: name)
+            let gate = AsyncStream<Void>.makeStream()
+            let frames = PausedScrollFrameCapturer(started: started, gate: gate.stream)
+            let session = ScrollCaptureSession(configuration: config, capturer: frames)
+            let task = Task { @MainActor in
+                _ = await service.captureWithEditor(message: name) { request in
+                    _ = try? await service.runScrollSession(session, for: request)
+                }
+            }
+            return (started, gate.continuation, task)
+        }
+
+        let (oldStarted, releaseOld, oldTask) = startSession("old scroll")
+        await fulfillment(of: [oldStarted], timeout: 3)
+        service.cancelActiveCapture()
+        let (newStarted, releaseNew, newTask) = startSession("new scroll")
+        await fulfillment(of: [newStarted], timeout: 3)
+
+        releaseOld.finish()
+        await oldTask.value
+        XCTAssertTrue(service.isScrolling)
+        XCTAssertTrue(service.isCapturing)
+
+        service.cancelActiveCapture()
+        releaseNew.finish()
+        await newTask.value
+        XCTAssertFalse(service.isScrolling)
+        XCTAssertFalse(service.isCapturing)
+    }
+
+    @MainActor
     func testScreenshotCoordinatorRejectsPreCancelledRequestBeforeOverlayPreparation() async throws {
         let coordinator = ScreenshotCaptureCoordinator()
         let request = ScreenshotCaptureRequestToken()
@@ -1814,6 +1927,48 @@ final class ScreenshotKitTests: XCTestCase {
                 isSource: true
             )
         )
+    }
+
+    func testRegionalSystemLanguagesKeepTheirLanguageInLabelsAndCloudRequests() {
+        let displayLocale = Locale(identifier: "en")
+        let cases = [("en-HK", "en", "en"), ("en-TW", "en", "en"),
+                     ("en-CN", "en", "en"), ("ja-HK", "ja", "jp")]
+        for (identifier, googleCode, baiduCode) in cases {
+            let target = TranslationLanguagePresentation.preferredSystemTargetIdentifier(from: [identifier])
+            XCTAssertEqual(
+                TranslationLanguagePresentation.localizedName(for: target, locale: displayLocale),
+                displayLocale.localizedString(forIdentifier: Locale.Language(identifier: identifier).minimalIdentifier),
+                identifier
+            )
+            XCTAssertEqual(TranslationCloudLanguageMapper.code(for: target, provider: .google, isSource: false), googleCode, identifier)
+            XCTAssertEqual(TranslationCloudLanguageMapper.code(for: target, provider: .baidu, isSource: true), baiduCode, identifier)
+        }
+    }
+
+    func testChineseScriptPrecedesRegionForLabelsCloudRequestsAndEquivalence() {
+        let displayLocale = Locale(identifier: "en")
+        let cases = [
+            ("zh", "zh-Hans"), ("zh-CN", "zh-Hans"), ("zh-Hans-HK", "zh-Hans"),
+            ("zh-Hant-CN", "zh-Hant"), ("zh-TW", "zh-Hant"), ("zh_HK", "zh-Hant"),
+            ("zh-MO", "zh-Hant")
+        ]
+        for (identifier, expectedScript) in cases {
+            let traditional = expectedScript == "zh-Hant"
+            XCTAssertEqual(
+                TranslationLanguagePresentation.localizedName(for: identifier, locale: displayLocale),
+                displayLocale.localizedString(forIdentifier: expectedScript), identifier
+            )
+            XCTAssertEqual(TranslationCloudLanguageMapper.code(for: identifier, provider: .google, isSource: false),
+                           traditional ? "zh-TW" : "zh-CN", identifier)
+            XCTAssertEqual(TranslationCloudLanguageMapper.code(for: identifier, provider: .baidu, isSource: false),
+                           traditional ? "cht" : "zh", identifier)
+            XCTAssertTrue(TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: identifier, targetIdentifier: expectedScript
+            ), identifier)
+            XCTAssertFalse(TranslationLanguageEquivalencePolicy.areEquivalent(
+                sourceIdentifier: identifier, targetIdentifier: traditional ? "zh-Hans" : "zh-Hant"
+            ), identifier)
+        }
     }
 
     func testBaiduSignatureUsesExpectedMD5Digest() {
@@ -7098,6 +7253,17 @@ private actor CountingScrollFrameCapturer: ScrollFrameCapturing {
     func capture(rect: CGRect) async throws -> CGImage {
         captureCount += 1
         throw ScrollCaptureError.captureFailed
+    }
+}
+
+private struct PausedScrollFrameCapturer: ScrollFrameCapturing {
+    let started: XCTestExpectation
+    let gate: AsyncStream<Void>
+
+    func capture(rect: CGRect) async throws -> CGImage {
+        started.fulfill()
+        for await _ in gate {}
+        throw CancellationError()
     }
 }
 

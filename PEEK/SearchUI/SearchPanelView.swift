@@ -130,6 +130,9 @@ struct SearchPanelView: View {
             guard !expanded, viewModel.isPanelActive else { return }
             DispatchQueue.main.async { searchFieldFocused = true }
         }
+        .onChange(of: showsPreview) { _ in
+            viewModel.loadPreview()
+        }
         .onChange(of: showsIndexProgress) { isVisible in
             onIndexProgressVisibilityChanged(isVisible)
         }
@@ -835,6 +838,9 @@ struct SearchPanelView: View {
                     .foregroundStyle(.green)
                 Text(feedbackMessage)
                     .foregroundStyle(.secondary)
+            } else if viewModel.isQueryPartial, !viewModel.results.isEmpty {
+                Text(partialSearchMessage)
+                    .foregroundStyle(.secondary)
             } else if let unavailableActionMessage = viewModel.unavailableActionMessage {
                 Image(systemName: "info.circle")
                     .foregroundStyle(.secondary)
@@ -854,9 +860,14 @@ struct SearchPanelView: View {
     }
 
     private var emptyResultMessage: String {
-        viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if viewModel.isQueryPartial { return partialSearchMessage }
+        return viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? L10n.tr("输入关键词开始查找应用、文件或文件夹")
             : L10n.tr("没有找到匹配结果；尚未完成索引的项目暂时不可见")
+    }
+
+    private var partialSearchMessage: String {
+        L10n.tr("搜索结果可能不完整，请输入名称开头缩小范围")
     }
 }
 

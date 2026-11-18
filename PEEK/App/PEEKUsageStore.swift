@@ -55,18 +55,31 @@ struct PEEKUsageSnapshot {
         dailyCounts[dayFormat.format(date), default: 0]
     }
 
+    /// The overview includes every recorded use, even when travelling west
+    /// makes a previously observed local date later than today's date.
+    func lifetimeSummary(on date: Date) -> (startDayUTC: Date, average: Double)? {
+        let lastDay = dayFormat.format(date)
+        guard let firstDay = dailyCounts.keys.min(),
+              let span = calendarDaySpan(from: min(firstDay, lastDay), through: lastDay) else { return nil }
+        return (span.startDayUTC, Double(totalCount) / span.days)
+    }
+
     func dailyAverage(asOf date: Date) -> Double {
         let lastDay = dayFormat.format(date)
         guard let firstDay = dailyCounts.keys.min(), firstDay <= lastDay,
-              let start = try? Self.utcDayFormat.parse(firstDay),
-              let end = try? Self.utcDayFormat.parse(lastDay) else { return 0 }
-        // Compare the calendar labels at UTC midnight, including inactive days.
-        // Local midnight can be missing in zones that advance clocks at midnight.
-        let numberOfDays = end.timeIntervalSince(start) / 86_400 + 1
+              let span = calendarDaySpan(from: firstDay, through: lastDay) else { return 0 }
         let uses = dailyCounts.reduce(0.0) { total, entry in
             entry.key <= lastDay ? total + Double(entry.value) : total
         }
-        return uses / numberOfDays
+        return uses / span.days
+    }
+
+    private func calendarDaySpan(from first: String, through last: String) -> (startDayUTC: Date, days: Double)? {
+        // A stored date may never have existed in the viewer's current zone.
+        // Use UTC for both counting and displaying these calendar labels.
+        guard let start = try? Self.utcDayFormat.parse(first),
+              let end = try? Self.utcDayFormat.parse(last) else { return nil }
+        return (start, end.timeIntervalSince(start) / 86_400 + 1)
     }
 
     fileprivate mutating func recordUse(at date: Date) {

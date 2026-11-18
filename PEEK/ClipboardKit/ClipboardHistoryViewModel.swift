@@ -38,7 +38,7 @@ final class ClipboardHistoryViewModel: ObservableObject {
     @Published private(set) var isBusy = false
 
     var onRequestClose: (() -> Void)?
-    var onRequestPaste: (() throws -> Void)?
+    var onRequestPaste: (() async throws -> Void)?
 
     private let monitor: ClipboardHistoryMonitor
     private var cancellables: Set<AnyCancellable> = []
@@ -137,26 +137,26 @@ final class ClipboardHistoryViewModel: ObservableObject {
         guard let record = selectedRecord, !isBusy else { return }
         isBusy = true
         statusMessage = nil
+        // The panel can reopen for another app while the payload is being read.
+        let paste = onRequestPaste
         Task { [weak self, monitor] in
+            guard let self else { return }
+            defer { self.isBusy = false }
             do {
                 try await monitor.restore(record)
                 PEEKUsageStore.shared.recordUse()
-                try await MainActor.run {
-                    guard let self else { return }
-                    if andPaste {
-                        try self.onRequestPaste?()
-                        self.statusMessage = L10n.tr("已粘贴")
-                    } else {
-                        self.statusMessage = L10n.tr("已复制回剪贴板")
+                if andPaste {
+                    guard let paste else {
+                        throw ClipboardHistoryError.unavailable(L10n.tr("未能粘贴到原应用，内容已保留在剪贴板中"))
                     }
-                    self.isBusy = false
+                    try await paste()
+                    self.statusMessage = L10n.tr("已向原应用发送粘贴请求")
+                } else {
+                    self.statusMessage = L10n.tr("已复制回剪贴板")
                 }
             } catch {
-                await MainActor.run {
-                    self?.statusMessage = error.localizedDescription
-                    self?.isBusy = false
-                    NSSound.beep()
-                }
+                self.statusMessage = error.localizedDescription
+                NSSound.beep()
             }
         }
     }

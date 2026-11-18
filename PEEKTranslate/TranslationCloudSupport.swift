@@ -227,14 +227,14 @@ enum TranslationCloudLanguageMapper {
         isSource: Bool
     ) -> String? {
         guard let identifier else { return isSource ? (provider == .baidu ? "auto" : nil) : nil }
-        let normalized = identifier.lowercased()
-        let base = TranslationLanguagePresentation.baseLanguageCode(identifier).lowercased()
-
-        if normalized.contains("hant") || normalized.hasSuffix("-tw") || normalized.hasSuffix("-hk") {
-            return provider == .baidu ? "cht" : "zh-TW"
-        }
+        let language = Locale.Language(identifier: identifier)
+        guard let base = language.languageCode?.identifier else { return nil }
         if base == "zh" {
-            return provider == .baidu ? "zh" : "zh-CN"
+            switch language.script?.identifier {
+            case "Hant": return provider == .baidu ? "cht" : "zh-TW"
+            case "Hans": return provider == .baidu ? "zh" : "zh-CN"
+            default: return nil
+            }
         }
 
         let common: [String: String] = [

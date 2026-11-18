@@ -13,6 +13,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published var query = "" {
         didSet {
             guard query != oldValue else { return }
+            resetResultsForNewRequest()
             scheduleSearch()
         }
     }
@@ -20,6 +21,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published var selectedCategory: SearchPanelCategory = .all {
         didSet {
             guard selectedCategory != oldValue else { return }
+            resetResultsForNewRequest()
             scheduleSearch(immediately: true)
         }
     }
@@ -27,6 +29,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published var includesHiddenFiles = false {
         didSet {
             guard includesHiddenFiles != oldValue else { return }
+            resetResultsForNewRequest()
             scheduleSearch(immediately: true)
         }
     }
@@ -47,6 +50,7 @@ final class SearchPanelViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var feedbackMessage: String?
     @Published private(set) var indexStatusMessage: String?
+    @Published private(set) var isQueryPartial = false
     @Published private(set) var initialIndexProgress: FileSearchInitialIndexProgressSnapshot?
     @Published private(set) var isPanelActive = false
 
@@ -68,6 +72,8 @@ final class SearchPanelViewModel: ObservableObject {
     private var previewAccess: FileSearchSecurityScopedAccess?
     private var previewGeneration = 0
     private var actionCapabilities: [SearchPanelFileAction: SearchPanelActionCapability] = [:]
+    private var pendingOpenIndex: Int?
+    private var panelSession = 0
     private var searchGeneration = 0
     private var lastAppliedSearchGeneration: Int?
 
@@ -219,6 +225,10 @@ final class SearchPanelViewModel: ObservableObject {
             query = initialQuery
         }
         let wasActive = isPanelActive
+        if !wasActive {
+            panelSession &+= 1
+            feedbackMessage = nil
+        }
         isPanelActive = true
         startInitialIndexProgressUpdates()
         if selectedItemID == nil {
@@ -234,6 +244,7 @@ final class SearchPanelViewModel: ObservableObject {
     func pauseForPanel() {
         guard isPanelActive else { return }
         isPanelActive = false
+        pendingOpenIndex = nil
         stopInitialIndexProgressUpdates()
         persistQueryPreference()
         searchGeneration &+= 1
@@ -258,6 +269,7 @@ final class SearchPanelViewModel: ObservableObject {
 
     func shutdown() {
         isPanelActive = false
+        pendingOpenIndex = nil
         stopInitialIndexProgressUpdates()
         persistQueryPreference()
         searchGeneration &+= 1
@@ -357,6 +369,10 @@ final class SearchPanelViewModel: ObservableObject {
     }
 
     func openSelection() {
+        if selectedItem == nil, isSearching {
+            pendingOpenIndex = 0
+            return
+        }
         perform(.open)
     }
 
@@ -432,6 +448,10 @@ final class SearchPanelViewModel: ObservableObject {
     /// preview/capability work triggered by selection changes.
     func openResult(at index: Int) {
         let items = orderedResults
+        if items.isEmpty, isSearching, index >= 0 {
+            pendingOpenIndex = index
+            return
+        }
         guard items.indices.contains(index), !isPerformingAction else { return }
         let item = items[index]
         selectedItemID = item.id
@@ -443,9 +463,10 @@ final class SearchPanelViewModel: ObservableObject {
         isPerformingAction = true
         errorMessage = nil
         feedbackMessage = nil
-        if action == .open,
-           item.category == .applications,
-           item.launchBehavior == .fileURL {
+        pendingOpenIndex = nil
+        let session = panelSession
+        let closesImmediately = action == .open && item.category == .applications && item.launchBehavior == .fileURL
+        if closesImmediately {
             // Match Spotlight-style launch behavior: hide immediately so a
             // cold application launch never makes the search panel feel stuck.
             onRequestClose?()
@@ -487,17 +508,26 @@ final class SearchPanelViewModel: ObservableObject {
                 }
                 guard !Task.isCancelled, let self else { return }
                 self.finishAction(action, item: item, feedback: feedback)
+                guard self.panelSession == session else { return }
+                self.feedbackMessage = feedback.message
+                if action == .open, !closesImmediately, self.isPanelActive {
+                    self.onRequestClose?()
+                }
                 if indexRefreshFailed {
                     self.errorMessage = L10n.tr(
                         "本地搜索索引暂时不可用，请稍后重试或在设置中重新构建索引"
                     )
                 }
-            } catch SearchPanelActionError.destinationCancelled {
-                guard !Task.isCancelled, let self else { return }
-                self.finishActionWithCancellation()
             } catch {
                 guard !Task.isCancelled, let self else { return }
-                self.finishActionWithError(error)
+                self.isPerformingAction = false
+                self.actionTask = nil
+                guard self.panelSession == session else { return }
+                if case SearchPanelActionError.destinationCancelled = error {
+                    self.feedbackMessage = L10n.tr("已取消")
+                } else {
+                    self.errorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -513,7 +543,6 @@ final class SearchPanelViewModel: ObservableObject {
     ) {
         isPerformingAction = false
         actionTask = nil
-        feedbackMessage = feedback.message
         if feedback.fileSystemMutation == .moved {
             results.removeAll { $0.id == item.id }
             selectedItemID = results.first?.id
@@ -521,25 +550,16 @@ final class SearchPanelViewModel: ObservableObject {
         } else if feedback.fileSystemMutation == .copied {
             scheduleSearch(immediately: true)
         }
-        if action == .open {
-            if item.category == .applications,
-               item.launchBehavior == .fileURL {
-                applicationUsageTracker.recordOpen(for: item.url)
-            }
-            onRequestClose?()
+        if action == .open, item.category == .applications, item.launchBehavior == .fileURL {
+            applicationUsageTracker.recordOpen(for: item.url)
         }
     }
 
-    private func finishActionWithCancellation() {
-        isPerformingAction = false
-        actionTask = nil
-        feedbackMessage = L10n.tr("已取消")
-    }
-
-    private func finishActionWithError(_ error: Error) {
-        isPerformingAction = false
-        actionTask = nil
-        errorMessage = error.localizedDescription
+    private func resetResultsForNewRequest() {
+        isQueryPartial = false
+        pendingOpenIndex = nil
+        results = []
+        selectedItemID = nil
     }
 
     private func scheduleSearch(
@@ -569,7 +589,7 @@ final class SearchPanelViewModel: ObservableObject {
                 )
                 for try await response in updates {
                     try Task.checkCancellation()
-                    guard let self else { return }
+                    guard let self, generation == self.searchGeneration else { return }
                     self.applySearchUpdate(
                         response.items,
                         query: requestedQuery,
@@ -578,6 +598,7 @@ final class SearchPanelViewModel: ObservableObject {
                         generation: generation
                     )
                     self.indexStatusMessage = response.statusMessage
+                    self.isQueryPartial = response.isQueryPartial
                 }
                 guard !Task.isCancelled, let self else { return }
                 self.finishSearch(generation: generation)
@@ -621,18 +642,21 @@ final class SearchPanelViewModel: ObservableObject {
         guard generation == searchGeneration else { return }
         isSearching = false
         searchTask = nil
+        if let index = pendingOpenIndex {
+            pendingOpenIndex = nil
+            openResult(at: index)
+        }
     }
 
     private func finishSearchWithError(_ error: Error, generation: Int) {
         guard generation == searchGeneration else { return }
         isSearching = false
         searchTask = nil
-        results = []
-        selectedItemID = nil
+        resetResultsForNewRequest()
         errorMessage = error.localizedDescription
     }
 
-    private func loadPreview() {
+    func loadPreview() {
         if let previewRequest {
             QLThumbnailGenerator.shared.cancel(previewRequest)
         }

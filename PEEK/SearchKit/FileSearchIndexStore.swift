@@ -78,6 +78,7 @@ struct FileSearchPreservedEntryBatch: Sendable {
 struct FileSearchIndexQueryResult: Sendable {
     let results: [FileSearchResult]
     let metadata: FileSearchIndexMetadata
+    let isQueryPartial: Bool
 }
 
 enum FileSearchIndexStoreError: LocalizedError {
@@ -414,7 +415,7 @@ actor FileSearchIndexStore {
             try Task.checkCancellation()
             let metadata = try metadata(on: queryDatabase)
             guard metadata.committedRootCount > 0 else {
-                return FileSearchIndexQueryResult(results: [], metadata: metadata)
+                return FileSearchIndexQueryResult(results: [], metadata: metadata, isQueryPartial: false)
             }
 
             let normalized = FileSearchMatcher.normalize(request.query)
@@ -430,7 +431,20 @@ actor FileSearchIndexStore {
             queryBudget.activateDeadline()
             var candidates: [FileSearchPreparedItem] = []
             let candidateLimit = min(max(request.limit * 16, 256), 2_048)
-            for kind in kinds {
+            // A sorted fuzzy scan can time out before SQLite emits its first
+            // row. Seek visible name matches in every requested kind first.
+            if !normalized.isEmpty {
+                for kind in kinds where !queryBudget.didExceedDeadline {
+                    candidates.append(contentsOf: try queryNamePrefix(
+                        kind: kind,
+                        normalizedQuery: normalized,
+                        request: request,
+                        database: queryDatabase,
+                        budget: queryBudget
+                    ))
+                }
+            }
+            for kind in kinds where !queryBudget.didExceedDeadline {
                 try Task.checkCancellation()
                 if Self.shouldUseBoundedPrefixQuery(compactQuery: compact) {
                     candidates.append(contentsOf: try queryPrefixCandidates(
@@ -451,11 +465,16 @@ actor FileSearchIndexStore {
                         budget: queryBudget
                     ))
                 }
-                if queryBudget.didExceedDeadline { break }
             }
+            try Task.checkCancellation()
+            var seenPaths = Set<String>()
             return FileSearchIndexQueryResult(
-                results: FileSearchMatcher.rank(candidates, request: request),
-                metadata: metadata
+                results: FileSearchMatcher.rank(
+                    candidates.lazy.filter { seenPaths.insert($0.item.id).inserted },
+                    request: request
+                ),
+                metadata: metadata,
+                isQueryPartial: queryBudget.didExceedDeadline
             )
         }
     }
@@ -875,15 +894,7 @@ actor FileSearchIndexStore {
         }
     }
 
-    private func queryCandidates(
-        kind: FileSearchItemKind,
-        normalizedQuery: String,
-        compactQuery: String,
-        limit: Int,
-        database: OpaquePointer,
-        budget: FileSearchSQLiteQueryBudget
-    ) throws -> [FileSearchPreparedItem] {
-        let baseSelect = """
+    private static let candidateSelect = """
         SELECT
             e.path, e.display_name, e.kind, e.type_description, e.is_hidden,
             e.file_size, e.created_at, e.modified_at, e.last_opened_at,
@@ -895,11 +906,48 @@ actor FileSearchIndexStore {
         JOIN roots r ON r.root_path = e.root_path
             AND r.active_generation = e.generation
         WHERE e.kind = ?1
+
         """
+
+    private func queryNamePrefix(
+        kind: FileSearchItemKind,
+        normalizedQuery: String,
+        request: FileSearchRequest,
+        database: OpaquePointer,
+        budget: FileSearchSQLiteQueryBudget
+    ) throws -> [FileSearchPreparedItem] {
+        // entries_name(kind, normalized_name) serves both the range and the
+        // ordering. Exact names precede longer prefixes without a sort.
+        let sql = Self.candidateSelect + """
+            AND e.normalized_name >= ?2 AND e.normalized_name < ?3
+            AND (?4 OR e.is_hidden = 0)
+            ORDER BY e.normalized_name
+            LIMIT ?5
+            """
+        let statement = try prepare(sql, database: database)
+        defer { sqlite3_finalize(statement) }
+        try bind([
+            .int64(Int64(kind.rawValue)),
+            .text(normalizedQuery),
+            .text(prefixUpperBound(for: normalizedQuery)),
+            .int64(request.includeHidden ? 1 : 0),
+            .int64(Int64(request.limit))
+        ], to: statement)
+        return try preparedItems(from: statement, database: database, budget: budget)
+    }
+
+    private func queryCandidates(
+        kind: FileSearchItemKind,
+        normalizedQuery: String,
+        compactQuery: String,
+        limit: Int,
+        database: OpaquePointer,
+        budget: FileSearchSQLiteQueryBudget
+    ) throws -> [FileSearchPreparedItem] {
         let sql: String
         var bindings: [SQLiteBinding] = [.int64(Int64(kind.rawValue))]
         if normalizedQuery.isEmpty {
-            sql = baseSelect + """
+            sql = Self.candidateSelect + """
             GROUP BY e.path
             ORDER BY e.normalized_name COLLATE NOCASE, e.path COLLATE NOCASE
             LIMIT ?2
@@ -909,7 +957,7 @@ actor FileSearchIndexStore {
             let containsName = "%\(escapeLike(normalizedQuery))%"
             let containsCompact = "%\(escapeLike(compactQuery))%"
             let subsequence = subsequenceLikePattern(compactQuery)
-            sql = baseSelect + """
+            sql = Self.candidateSelect + """
             AND (
                 e.normalized_name LIKE ?2 ESCAPE '\\'
                 OR replace(e.normalized_name, ' ', '') LIKE ?3 ESCAPE '\\'
@@ -984,18 +1032,7 @@ actor FileSearchIndexStore {
     ) throws -> [FileSearchPreparedItem] {
         let normalizedUpperBound = prefixUpperBound(for: normalizedQuery)
         let compactUpperBound = prefixUpperBound(for: compactQuery)
-        let sql = """
-        SELECT
-            e.path, e.display_name, e.kind, e.type_description, e.is_hidden,
-            e.file_size, e.created_at, e.modified_at, e.last_opened_at,
-            e.application_version, e.normalized_name, e.normalized_path,
-            e.compact_pinyin, e.pinyin_initials, e.word_initials,
-            e.normalized_aliases, e.compact_alias_pinyin,
-            e.alias_pinyin_initials, e.alias_word_initials
-        FROM entries e
-        JOIN roots r ON r.root_path = e.root_path
-            AND r.active_generation = e.generation
-        WHERE e.kind = ?1
+        let sql = Self.candidateSelect + """
           AND (
               (e.normalized_name >= ?2 AND e.normalized_name < ?3)
               OR (e.compact_pinyin >= ?4 AND e.compact_pinyin < ?5)
