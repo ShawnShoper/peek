@@ -3,8 +3,8 @@ import OSLog
 
 /// Query facade and the only mutation surface shared by the foreground UI and
 /// background indexer. Searching never starts a scan and never enumerates a
-/// filesystem location; it reads the last committed SQLite generations once
-/// and finishes the stream immediately.
+/// filesystem location. A bounded second read can complete a partial search
+/// without occupying the foreground reader or the index writer.
 actor FileSearchService {
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.shawnshoper.peek",
@@ -12,63 +12,60 @@ actor FileSearchService {
     )
 
     private let store: FileSearchIndexStore
+    private let extendedSearchStore: FileSearchIndexStore
 
-    init(store: FileSearchIndexStore = FileSearchIndexStore()) {
+    init(store: FileSearchIndexStore = FileSearchIndexStore(), extendedQueryTimeLimit: TimeInterval = 1) {
         self.store = store
+        self.extendedSearchStore = FileSearchIndexStore(
+            databaseURL: store.databaseURL,
+            queryTimeLimit: extendedQueryTimeLimit
+        )
     }
 
     /// Drains pending service work and deterministically releases SQLite file handles.
     func shutdown() async {
         await store.close()
+        await extendedSearchStore.close()
     }
 
     func search(_ request: FileSearchRequest) -> AsyncStream<FileSearchSnapshot> {
-        let store = self.store
-        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+        let stores = [store, extendedSearchStore]
+        return AsyncStream(bufferingPolicy: .bufferingNewest(2)) { continuation in
             let task = Task(priority: .userInitiated) {
-                let snapshot: FileSearchSnapshot
-                do {
-                    let queryResult = try await store.query(request)
-                    snapshot = FileSearchSnapshot(
-                        request: request,
-                        results: queryResult.results,
-                        phase: queryResult.metadata.phase,
-                        statistics: queryResult.metadata.statistics
-                    )
-                } catch {
-                    let failure = FileSearchFailure.indexUnavailable(
-                        error.localizedDescription
-                    )
-                    Self.logger.error(
-                        "SQLite query failed: \(failure.diagnosticMessage, privacy: .private)"
-                    )
-                    snapshot = FileSearchSnapshot(
-                        request: request,
-                        results: [],
-                        phase: .idle,
-                        statistics: FileSearchStatistics(),
-                        failure: failure
-                    )
+                defer { continuation.finish() }
+                for (index, store) in stores.enumerated() {
+                    guard !Task.isCancelled else { return }
+                    let snapshot = await Self.snapshot(for: request, using: store)
+                    guard !Task.isCancelled else { return }
+                    // Keep the foreground result if the second reader fails.
+                    if index == 1, snapshot.failure != nil { return }
+                    continuation.yield(snapshot)
+                    if !snapshot.isQueryPartial { return }
                 }
-                guard !Task.isCancelled else {
-                    continuation.finish()
-                    return
-                }
-                continuation.yield(snapshot)
-                continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
         }
     }
 
     func currentSnapshot(for request: FileSearchRequest) async -> FileSearchSnapshot {
+        let first = await Self.snapshot(for: request, using: store)
+        guard first.isQueryPartial, !Task.isCancelled else { return first }
+        let second = await Self.snapshot(for: request, using: extendedSearchStore)
+        return second.failure == nil ? second : first
+    }
+
+    private static func snapshot(
+        for request: FileSearchRequest,
+        using store: FileSearchIndexStore
+    ) async -> FileSearchSnapshot {
         do {
             let queryResult = try await store.query(request)
             return FileSearchSnapshot(
                 request: request,
                 results: queryResult.results,
                 phase: queryResult.metadata.phase,
-                statistics: queryResult.metadata.statistics
+                statistics: queryResult.metadata.statistics,
+                isQueryPartial: queryResult.isQueryPartial
             )
         } catch {
             let failure = FileSearchFailure.indexUnavailable(error.localizedDescription)

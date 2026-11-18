@@ -28,6 +28,28 @@ final class PEEKUsageStoreTests: XCTestCase {
         XCTAssertEqual(restored.firstUseDate, iso.date(from: "2024-03-09T08:00:00Z"))
         XCTAssertEqual(restored.dailyAverage(asOf: thirdDay), 1)
         XCTAssertEqual(restored.dailyAverage(asOf: first), 2)
+        XCTAssertEqual(restored.lifetimeSummary(on: thirdDay)?.average, 1)
+    }
+
+    @MainActor
+    func testLifetimeSummaryIncludesAlreadyRecordedUsesAfterTravellingWest() throws {
+        let suite = "PEEKTests.Usage.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let tokyo = try XCTUnwrap(TimeZone(identifier: "Asia/Tokyo"))
+        let losAngeles = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-17T15:30:00Z"))
+        PEEKUsageStore(defaults: defaults, timeZone: tokyo).recordUse(at: instant)
+        let store = PEEKUsageStore(defaults: defaults, timeZone: losAngeles)
+        let summary = try XCTUnwrap(store.snapshot.lifetimeSummary(on: instant))
+        XCTAssertEqual(summary.startDayUTC, ISO8601DateFormatter().date(from: "2026-11-17T00:00:00Z"))
+        XCTAssertEqual(summary.average, 1)
+        store.recordUse(at: instant)
+        XCTAssertEqual(store.snapshot.lifetimeSummary(on: instant)?.average, 2)
+        let tomorrow = instant.addingTimeInterval(86_400)
+        XCTAssertEqual(store.snapshot.lifetimeSummary(on: tomorrow)?.average, 1)
+        XCTAssertEqual(store.snapshot.count(on: instant), 1)
+        XCTAssertEqual(store.snapshot.count(on: tomorrow), 1)
     }
 
     @MainActor
@@ -42,6 +64,24 @@ final class PEEKUsageStoreTests: XCTestCase {
         store.recordUse(at: try XCTUnwrap(iso.date(from: "2024-04-25T22:00:00Z")))
         let nextMidnight = try XCTUnwrap(iso.date(from: "2024-04-26T21:00:00Z"))
         XCTAssertEqual(store.snapshot.dailyAverage(asOf: nextMidnight), 0.5)
+        XCTAssertEqual(store.snapshot.lifetimeSummary(on: nextMidnight)?.average, 0.5)
+    }
+
+    @MainActor
+    func testLifetimeSummaryPreservesFirstDateSkippedInViewersTimeZone() throws {
+        let suite = "PEEKTests.Usage.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Apia crossed the date line from December 29 directly to December 31.
+        let zone = try XCTUnwrap(TimeZone(identifier: "Pacific/Apia"))
+        defaults.set(["2011-12-30": 3], forKey: "usage.dailyCounts.v1")
+        let snapshot = PEEKUsageStore(defaults: defaults, timeZone: zone).snapshot
+        let iso = ISO8601DateFormatter()
+        let asOf = try XCTUnwrap(iso.date(from: "2011-12-31T00:00:00Z"))
+        let summary = try XCTUnwrap(snapshot.lifetimeSummary(on: asOf))
+        XCTAssertEqual(summary.startDayUTC, iso.date(from: "2011-12-30T00:00:00Z"))
+        XCTAssertEqual(summary.average, 1.5)
+        XCTAssertEqual(snapshot.dailyAverage(asOf: asOf), summary.average)
     }
 
     @MainActor

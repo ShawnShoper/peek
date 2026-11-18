@@ -122,6 +122,7 @@ struct FileSearchSnapshot: Equatable, Sendable {
     let results: [FileSearchResult]
     let phase: FileSearchIndexPhase
     let statistics: FileSearchStatistics
+    let isQueryPartial: Bool
     let failure: FileSearchFailure?
 
     init(
@@ -129,16 +130,18 @@ struct FileSearchSnapshot: Equatable, Sendable {
         results: [FileSearchResult],
         phase: FileSearchIndexPhase,
         statistics: FileSearchStatistics,
+        isQueryPartial: Bool = false,
         failure: FileSearchFailure? = nil
     ) {
         self.request = request
         self.results = results
         self.phase = phase
         self.statistics = statistics
+        self.isQueryPartial = isQueryPartial
         self.failure = failure
     }
 
-    var isComplete: Bool { phase.isComplete }
+    var isComplete: Bool { phase.isComplete && !isQueryPartial }
 }
 
 enum FileSearchFailure: LocalizedError, Equatable, Sendable {

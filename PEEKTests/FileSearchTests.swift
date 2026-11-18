@@ -1090,6 +1090,57 @@ final class FileSearchTests: XCTestCase {
         )
     }
 
+    func testLargeIndexKeepsNameMatchesWhenFuzzyScanTimesOut() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        _ = try await context.service.indexMetadata()
+        try seedLargeCommittedIndex(at: context.databaseURL, itemCount: 40_000)
+        let store = FileSearchIndexStore(databaseURL: context.databaseURL, queryTimeLimit: 0.02)
+
+        for category in [FileSearchCategory.files, .all] {
+            let exact = try await store.query(FileSearchRequest(
+                query: "DOCUMENT-040000.TXT", category: category
+            ))
+            XCTAssertEqual(exact.results.map(\.item.displayName), ["document-040000.txt"])
+        }
+
+        let prefix = try await store.query(FileSearchRequest(query: "document-03999", category: .files))
+        let expected = (39_990...39_999).map { String(format: "document-%06d.txt", $0) }
+        XCTAssertTrue(Set(expected).isSubset(of: prefix.results.map(\.item.displayName)))
+        XCTAssertEqual(Set(prefix.results.map(\.id)).count, prefix.results.count)
+        await store.close()
+    }
+
+    @MainActor
+    func testPartialSearchRetriesOnceAndPreservesIncompleteStateWhenBothReadsTimeOut() async throws {
+        let context = makeContext()
+        defer { try? FileManager.default.removeItem(at: context.directory) }
+        _ = try await context.service.indexMetadata()
+        try seedLargeCommittedIndex(at: context.databaseURL, itemCount: 40_000)
+        let store = FileSearchIndexStore(databaseURL: context.databaseURL, queryTimeLimit: 0.02)
+        let service = FileSearchService(store: store)
+        let provider = FileSearchPanelProvider(service: service)
+        var middle: [SearchPanelSearchUpdate] = []
+        for try await frame in provider.search(query: "039997", category: .files, includeHidden: false) {
+            middle.append(frame)
+        }
+        XCTAssertEqual(middle.map(\.isQueryPartial), [true, false])
+        XCTAssertEqual(middle.last?.items.map(\.displayName), ["document-039997.txt"])
+        await service.shutdown()
+
+        let cappedService = FileSearchService(store: store, extendedQueryTimeLimit: 0.02)
+        let cappedProvider = FileSearchPanelProvider(service: cappedService)
+        for name in ["missing-search-term", "document-040000.txt"] {
+            var frames: [SearchPanelSearchUpdate] = []
+            for try await frame in cappedProvider.search(query: name, category: .files, includeHidden: false) {
+                frames.append(frame)
+            }
+            XCTAssertEqual(frames.map(\.isQueryPartial), [true, true])
+            XCTAssertEqual(frames.last?.items.map(\.displayName), name == "missing-search-term" ? [] : [name])
+        }
+        await cappedService.shutdown()
+    }
+
     func testSQLiteQueryFailureIsExplicitInsteadOfLookingLikeEmptyIndex() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "PEEK-BrokenIndex-\(UUID().uuidString)",
@@ -3896,6 +3947,83 @@ final class SearchPanelLayoutTests: XCTestCase {
 
 @MainActor
 final class SearchPanelViewModelTests: XCTestCase {
+    func testPartialSearchStateIsIndependentOfIndexReadinessAndResetsForNextQuery() async throws {
+        let provider = AnySearchPanelProvider { query, _, _ in
+            AsyncThrowingStream { continuation in
+                continuation.yield(SearchPanelSearchUpdate(
+                    items: [], statusMessage: "ready", isQueryPartial: query == "partial"
+                ))
+                continuation.finish()
+            }
+        }
+        let model = SearchPanelViewModel(provider: provider)
+        defer { model.shutdown() }
+        model.activateForPanel(initialQuery: "partial")
+        try await waitUntil { model.isQueryPartial && !model.isSearching }
+        XCTAssertEqual(model.indexStatusMessage, "ready")
+
+        model.query = "complete"
+        XCTAssertFalse(model.isQueryPartial)
+        try await waitUntil { !model.isSearching }
+        XCTAssertFalse(model.isQueryPartial)
+        XCTAssertEqual(model.indexStatusMessage, "ready")
+    }
+
+    func testQuickOpenWaitsForCurrentQueryAndDiscardsSupersededShortcuts() async throws {
+        let calculator = panelItem(path: "/Applications/Calculator.app", name: "Calculator", category: .applications)
+        let calendar = panelItem(path: "/Applications/Calendar.app", name: "Calendar", category: .applications)
+        let provider = AnySearchPanelProvider { query, _, _ in
+            AsyncThrowingStream { stream in
+                let items = query == "Calendar" ? [calendar, calculator] : [calculator]
+                stream.yield(.init(items: items))
+                stream.finish()
+            }
+        }
+        let handler = SearchPanelRecordingActionHandler()
+        let model = SearchPanelViewModel(provider: provider, actionHandler: handler)
+        defer { model.shutdown() }
+        model.activateForPanel(initialQuery: "Calculator")
+        try await waitUntil { model.selectedItemID == calculator.id }
+        model.query = "Calendar"
+        model.openSelection()
+        XCTAssertNil(model.selectedItem)
+        XCTAssertTrue(handler.performedItemIDs.isEmpty)
+        try await waitUntil { handler.performedItemIDs == [calendar.id] }
+
+        model.query = "Intermediate"
+        model.openSelection()
+        model.query = "Calendar"
+        try await waitUntil { !model.isSearching }
+        XCTAssertEqual(handler.performedItemIDs, [calendar.id])
+
+        model.query = "Calculator"
+        model.query = "Calendar"
+        model.openResult(at: 1)
+        try await waitUntil { handler.performedItemIDs == [calendar.id, calculator.id] }
+    }
+
+    func testShowingPreviewLoadsTheCurrentSelectionWithoutReselecting() async throws {
+        let key = PEEKPreferenceKey.searchShowsPreview
+        let previous = UserDefaults.standard.object(forKey: key)
+        UserDefaults.standard.set(false, forKey: key)
+        defer { UserDefaults.standard.set(previous, forKey: key) }
+        let item = panelItem(path: "/Applications/Calendar.app", name: "Calendar", category: .applications)
+        let model = SearchPanelViewModel(provider: AnySearchPanelProvider { _, _, _ in
+            AsyncThrowingStream { stream in
+                stream.yield(.init(items: [item]))
+                stream.finish()
+            }
+        })
+        defer { model.shutdown() }
+        model.start()
+        try await waitUntil { model.selectedItemID == item.id }
+        XCTAssertEqual(model.previewKind, .loading)
+        UserDefaults.standard.set(true, forKey: key)
+        model.loadPreview()
+        try await waitUntil { model.previewKind != .loading }
+        XCTAssertEqual(model.selectedItemID, item.id)
+    }
+
     func testInstalledApplicationPrecedesBuiltInToolsAndToolsHideInvalidActions() async throws {
         let application = panelItem(path: "/Applications/PEEK.app", name: "PEEK", category: .applications)
         let tool = try XCTUnwrap(PEEKTranslateSearchRegistration.item(matching: "翻译", category: .all))
@@ -4282,9 +4410,9 @@ final class SearchPanelViewModelTests: XCTestCase {
             applicationUsageTracker: store
         )
         defer { viewModel.shutdown() }
-        var didClose = false
+        var closeCount = 0
         var recordedUses = 0
-        viewModel.onRequestClose = { didClose = true }
+        viewModel.onRequestClose = { closeCount += 1 }
         viewModel.onSuccessfulResultAction = { recordedUses += 1 }
 
         viewModel.start()
@@ -4293,7 +4421,7 @@ final class SearchPanelViewModelTests: XCTestCase {
                 && viewModel.capability(for: .open).isEnabled
         }
         viewModel.perform(.open)
-        XCTAssertTrue(didClose)
+        XCTAssertEqual(closeCount, 1)
         XCTAssertNil(store.usage(for: application.url))
         try await waitUntil { launcher.requestedURLs == [application.url] }
         XCTAssertTrue(viewModel.isPerformingAction)
@@ -4305,12 +4433,16 @@ final class SearchPanelViewModelTests: XCTestCase {
 
         viewModel.perform(.open)
         try await waitUntil { launcher.requestedURLs.count == 2 }
+        viewModel.pauseForPanel()
+        viewModel.activateForPanel(initialQuery: "Safari")
         launcher.finish(with: .success(()))
         try await waitUntil {
             !viewModel.isPerformingAction
                 && store.usage(for: application.url)?.openCount == 1
         }
         XCTAssertEqual(recordedUses, 1)
+        XCTAssertEqual(closeCount, 2, "Launch completion must leave the reopened panel visible")
+        XCTAssertNil(viewModel.feedbackMessage, "The previous session must not replace the new panel’s feedback")
     }
 
     func testAllCategoryGroupsApplicationsFirstAndArrowKeysFollowVisibleOrder() async throws {

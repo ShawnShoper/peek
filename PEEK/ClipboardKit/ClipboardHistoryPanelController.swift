@@ -43,13 +43,18 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
     private var panel: ClipboardHistoryPanel?
     private var viewModel: ClipboardHistoryViewModel?
     private var hostingController: NSHostingController<ClipboardHistoryPanelView>?
-    private weak var previousApplication: NSRunningApplication?
+    private var presentationID = UUID()
 
     func show() {
         let (panel, viewModel) = ensurePanel()
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-            != Bundle.main.bundleIdentifier {
-            previousApplication = NSWorkspace.shared.frontmostApplication
+        if !panel.isVisible || !panel.isKeyWindow {
+            let id = UUID()
+            presentationID = id
+            let target = NSWorkspace.shared.frontmostApplication
+            viewModel.onRequestPaste = { [weak self] in
+                guard let self else { throw Self.pasteUnavailable }
+                try await self.paste(into: target, presentationID: id)
+            }
         }
         viewModel.activate()
         position(panel)
@@ -76,9 +81,6 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
 
         let viewModel = ClipboardHistoryViewModel()
         viewModel.onRequestClose = { [weak self] in self?.close() }
-        viewModel.onRequestPaste = { [weak self] in
-            try self?.pasteIntoPreviousApplication()
-        }
         let hosting = NSHostingController(
             rootView: ClipboardHistoryPanelView(viewModel: viewModel)
         )
@@ -126,26 +128,59 @@ final class ClipboardHistoryPanelController: NSObject, NSWindowDelegate {
         ))
     }
 
-    private func pasteIntoPreviousApplication() throws {
+    private static var pasteUnavailable: ClipboardHistoryError {
+        .unavailable(L10n.tr("未能粘贴到原应用，内容已保留在剪贴板中"))
+    }
+
+    private func paste(into target: NSRunningApplication?, presentationID: UUID) async throws {
         guard AXIsProcessTrusted() else {
             throw ClipboardHistoryError.accessibilityRequired
         }
-        guard let previousApplication,
-              !previousApplication.isTerminated else {
+        guard self.presentationID == presentationID, NSRunningApplication.current.isActive,
+              panel?.isKeyWindow == true, let target, !target.isEqual(NSRunningApplication.current) else {
+            throw Self.pasteUnavailable
+        }
+        guard !target.isTerminated else {
             throw ClipboardHistoryError.unavailable(L10n.tr("原应用已经关闭，内容已保留在剪贴板中"))
         }
 
-        close()
-        previousApplication.activate(options: [.activateIgnoringOtherApps])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
-            guard
-                let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
-                let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false)
-            else { return }
-            keyDown.flags = .maskCommand
-            keyUp.flags = .maskCommand
-            keyDown.post(tap: .cghidEventTap)
-            keyUp.post(tap: .cghidEventTap)
+        try await Self.deliverPaste(to: target.processIdentifier, activate: {
+            let activated: Bool
+            if #available(macOS 14.0, *) {
+                NSApp.yieldActivation(to: target)
+                activated = target.activate(from: .current, options: [])
+            } else {
+                activated = target.activate(options: [.activateIgnoringOtherApps])
+            }
+            if activated { self.close() }
+            return activated
+        }, hasFocus: {
+            self.presentationID == presentationID &&
+                !target.isTerminated &&
+                target.isEqual(NSWorkspace.shared.frontmostApplication)
+        }, post: Self.postPasteEvents)
+    }
+
+    static func deliverPaste(
+        to processID: pid_t,
+        activate: () -> Bool,
+        hasFocus: () -> Bool,
+        post: (pid_t) throws -> Void
+    ) async throws {
+        guard processID > 0, activate() else { throw pasteUnavailable }
+        try await Task.sleep(nanoseconds: 140_000_000)
+        guard hasFocus() else { throw pasteUnavailable }
+        try post(processID)
+    }
+
+    private static func postPasteEvents(to processID: pid_t) throws {
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 9, keyDown: false) else {
+            throw pasteUnavailable
         }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.postToPid(processID)
+        keyUp.postToPid(processID)
     }
 }

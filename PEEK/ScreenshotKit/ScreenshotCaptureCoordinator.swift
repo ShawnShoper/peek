@@ -119,6 +119,8 @@ enum ScreenshotCaptureDiagnostics {
 final class ScreenshotCaptureRequestToken {
     let id: UUID
     private(set) var isCancelled = false
+    var editorActionOccurred = false
+    var requestedScrollSelection: CGRect?
 
     init(id: UUID = UUID()) {
         self.id = id

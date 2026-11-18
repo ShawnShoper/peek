@@ -67,7 +67,8 @@ final class FileSearchPanelProvider: SearchPanelProviding {
                             statusMessage: Self.statusMessage(
                                 snapshot,
                                 initialProgress: initialProgress
-                            )
+                            ),
+                            isQueryPartial: snapshot.isQueryPartial
                         ))
                     }
                     continuation.finish()

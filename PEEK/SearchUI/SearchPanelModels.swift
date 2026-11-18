@@ -291,10 +291,12 @@ protocol SearchPanelProviding: AnyObject {
 struct SearchPanelSearchUpdate: Sendable {
     let items: [SearchPanelItem]
     let statusMessage: String?
+    let isQueryPartial: Bool
 
-    init(items: [SearchPanelItem], statusMessage: String? = nil) {
+    init(items: [SearchPanelItem], statusMessage: String? = nil, isQueryPartial: Bool = false) {
         self.items = items
         self.statusMessage = statusMessage
+        self.isQueryPartial = isQueryPartial
     }
 }
 

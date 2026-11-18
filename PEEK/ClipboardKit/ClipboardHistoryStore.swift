@@ -95,11 +95,15 @@ actor ClipboardHistoryStore {
             try execute(
                 """
                 UPDATE clipboard_records
-                SET created_at = ?, source_app = ?, source_bundle_id = ?
+                SET created_at = ?, kind = ?, title = ?, detail = ?,
+                    source_app = ?, source_bundle_id = ?
                 WHERE id = ?;
                 """,
                 bindings: [
                     .double(now.timeIntervalSince1970),
+                    .text(capture.kind.rawValue),
+                    .text(capture.title),
+                    .text(capture.detail),
                     capture.sourceApplicationName.map(SQLiteValue.text) ?? .null,
                     capture.sourceBundleIdentifier.map(SQLiteValue.text) ?? .null,
                     .text(latest.id.uuidString),
@@ -108,9 +112,9 @@ actor ClipboardHistoryStore {
             return ClipboardHistoryRecord(
                 id: latest.id,
                 createdAt: now,
-                kind: latest.kind,
-                title: latest.title,
-                detail: latest.detail,
+                kind: capture.kind,
+                title: capture.title,
+                detail: capture.detail,
                 sourceApplicationName: capture.sourceApplicationName,
                 sourceBundleIdentifier: capture.sourceBundleIdentifier,
                 payloadFilename: latest.payloadFilename,
@@ -308,9 +312,54 @@ actor ClipboardHistoryStore {
             // policy. Keep readable items where possible while bringing count
             // and total storage under the new safety budget.
             try pruneIfNeeded()
+            try repairLegacyRichTextMetadata()
         } catch {
             sqlite3_close(handle)
             database = nil
+            throw error
+        }
+    }
+
+    /// v0.4.0 stored zero-character metadata for HTML without plain text.
+    /// The payload is already correct. Repair only the affected rows once.
+    private func repairLegacyRichTextMetadata() throws {
+        guard let database else { return }
+        var versionQuery: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA user_version", -1, &versionQuery, nil) == SQLITE_OK,
+              let versionQuery else { throw currentDatabaseError() }
+        let status = sqlite3_step(versionQuery)
+        let version = sqlite3_column_int(versionQuery, 0)
+        sqlite3_finalize(versionQuery)
+        guard status == SQLITE_ROW else { throw currentDatabaseError() }
+        guard version == 0 else { return }
+
+        try execute("BEGIN IMMEDIATE;")
+        do {
+            let records = try queryRecords()
+            for record in records where record.kind == .richText
+                && ["富文本", "Rich Text"].contains(record.title) // localization:ignore v0.4.0 persisted titles
+                && ["0 个字符", "0 characters"].contains(record.detail) // localization:ignore v0.4.0 persisted counts
+                && record.byteCount <= ClipboardHistoryLimits.standard.maximumItemBytes {
+                let envelope: ClipboardPayloadEnvelope
+                do {
+                    envelope = try payload(for: record)
+                } catch ClipboardHistoryError.payloadMissing {
+                    continue
+                }
+                let metadata = ClipboardHistoryMonitor.textMetadata(for: envelope)
+                guard metadata.characterCount > 0 else { continue }
+                // Keep the original metadata language as well as the record identity.
+                let detail = String(metadata.characterCount) + record.detail.dropFirst()
+                try execute(
+                    "UPDATE clipboard_records SET kind = ?, title = ?, detail = ? WHERE id = ?;",
+                    bindings: [.text(metadata.kind.rawValue), .text(metadata.title), .text(detail), .text(record.id.uuidString)]
+                )
+            }
+            try Task.checkCancellation()
+            try execute("PRAGMA user_version = 1;")
+            try execute("COMMIT;")
+        } catch {
+            try? execute("ROLLBACK;")
             throw error
         }
     }
@@ -348,9 +397,10 @@ actor ClipboardHistoryStore {
     /// after the commit, startup reconciliation removes the staged files.
     private func delete(records: [ClipboardHistoryRecord]) throws {
         guard !records.isEmpty else { return }
-        let stagedPayloads = try stagePayloadsForDeletion(records)
         try execute("BEGIN IMMEDIATE;")
+        var stagedPayloads: [StagedPayloadDeletion] = []
         do {
+            stagedPayloads = try stagePayloadsForDeletion(records)
             for record in records {
                 try execute(
                     "DELETE FROM clipboard_records WHERE id = ?;",
@@ -359,8 +409,8 @@ actor ClipboardHistoryStore {
             }
             try execute("COMMIT;")
         } catch {
-            try? execute("ROLLBACK;")
             restoreStagedPayloads(stagedPayloads)
+            try? execute("ROLLBACK;")
             throw error
         }
         finalizeStagedPayloads(stagedPayloads)

@@ -143,10 +143,9 @@ enum ClipboardHistoryPreviewLoader {
         record: ClipboardHistoryRecord,
         payload: ClipboardPayloadEnvelope
     ) -> URL? {
-        let value = payload.data(
-            forType: NSPasteboard.PasteboardType.string.rawValue
-        ).flatMap { String(data: $0, encoding: .utf8) }
-            ?? record.title
+        let preview = readableText(payload: payload, byteLimit: maximumTextPreviewBytes)
+        guard preview?.isTruncated != true else { return nil }
+        let value = preview?.text ?? record.title
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.utf8.count <= 8_192,
               let url = URL(string: trimmed),
@@ -214,26 +213,107 @@ enum ClipboardHistoryPreviewLoader {
         payload: ClipboardPayloadEnvelope,
         fallback: String
     ) -> ClipboardHistoryTextPreview {
-        guard let data = payload.data(
-            forType: NSPasteboard.PasteboardType.string.rawValue
-        ) else {
-            let bytes = fallback.utf8.count
-            return ClipboardHistoryTextPreview(
-                text: fallback,
-                loadedByteCount: bytes,
-                totalByteCount: bytes
-            )
+        if let preview = readableText(payload: payload, byteLimit: maximumTextPreviewBytes) {
+            return preview
         }
-        let boundedData = data.prefix(maximumTextPreviewBytes)
-        let decoded = decodeText(Data(boundedData)) ?? fallback
-        return ClipboardHistoryTextPreview(
-            text: decoded,
-            loadedByteCount: boundedData.count,
-            totalByteCount: data.count
-        )
+        let bytes = fallback.utf8.count
+        return ClipboardHistoryTextPreview(text: fallback, loadedByteCount: bytes, totalByteCount: bytes)
+    }
+
+    // Counts and titles use the complete storable representation. Opening an
+    // old or new record reads only a preview-sized prefix into the decoder.
+    static func readableText(payload: ClipboardPayloadEnvelope, byteLimit: Int) -> ClipboardHistoryTextPreview? {
+        var emptyPreview: ClipboardHistoryTextPreview?
+        for type: NSPasteboard.PasteboardType in [.string, .rtf, .html] {
+            guard let data = payload.data(forType: type.rawValue) else { continue }
+            let prefix = Data(data.prefix(byteLimit))
+            let decoded: String?
+            switch type {
+            case .rtf:
+                decoded = rtfText(prefix, isTruncated: prefix.count < data.count)
+            case .html:
+                decoded = htmlText(prefix)
+            default:
+                decoded = decodeText(prefix)
+            }
+            guard let decoded else { continue }
+            let preview = ClipboardHistoryTextPreview(text: decoded, loadedByteCount: prefix.count, totalByteCount: data.count)
+            if !decoded.isEmpty { return preview }
+            emptyPreview = preview
+        }
+        return emptyPreview
+    }
+
+    private static func rtfText(_ prefix: Data, isTruncated: Bool) -> String? {
+        if !isTruncated {
+            return NSAttributedString(rtf: prefix, documentAttributes: nil)?.string
+        }
+        // The AppKit importer needs balanced groups, even for a text preview.
+        // Closing a copy of the prefix keeps the original rich data intact.
+        var boundedRTF = prefix
+        var depth = 0
+        var escaped = false
+        for byte in prefix {
+            if escaped { escaped = false; continue }
+            switch byte {
+            case 0x5C: escaped = true
+            case 0x7B: depth += 1
+            case 0x7D: depth = max(0, depth - 1)
+            default: break
+            }
+        }
+        if escaped { boundedRTF.removeLast() }
+        boundedRTF.append(Data(repeating: 0x7D, count: depth))
+        return NSAttributedString(rtf: boundedRTF, documentAttributes: nil)?.string
+    }
+
+    private static let htmlBlocks: Set<String> = [
+        "address", "article", "aside", "blockquote", "dd", "div", "dl", "dt", "figure",
+        "figcaption", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr",
+        "li", "main", "nav", "ol", "p", "pre", "section", "table", "tr", "ul"
+    ]
+    private static let excludedHTML: Set<String> = ["head", "script", "style", "noscript", "iframe", "template", "object"]
+
+    private static func htmlText(_ data: Data) -> String? {
+        let options: XMLNode.Options = [.documentTidyHTML, .nodeLoadExternalEntitiesNever]
+        let document: XMLDocument?
+        if let utf8 = decodeUTF8Prefix(data) {
+            document = try? XMLDocument(xmlString: utf8, options: options)
+        } else {
+            document = try? XMLDocument(data: data, options: options)
+        }
+        guard let root = document?.rootElement() else { return nil }
+        var text = ""
+        func collect(_ node: XMLNode) {
+            if node.kind == .text {
+                if let value = node.stringValue {
+                    text += value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                }
+                return
+            }
+            guard let element = node as? XMLElement else { return }
+            let tag = element.localName?.lowercased() ?? ""
+            guard !excludedHTML.contains(tag), element.attribute(forName: "hidden") == nil else { return }
+            if tag == "br" { text += "\n"; return }
+            let isBlock = htmlBlocks.contains(tag)
+            if isBlock { text += "\n" }
+            for child in element.children ?? [] { collect(child) }
+            if isBlock { text += "\n" }
+            if tag == "td" || tag == "th" { text += " " }
+        }
+        collect(root)
+        return text
+            .replacingOccurrences(of: #" *\n[ \n]*"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #" {2,}"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func decodeText(_ data: Data) -> String? {
+        decodeUTF8Prefix(data) ?? String(data: data, encoding: .utf16)
+            ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    private static func decodeUTF8Prefix(_ data: Data) -> String? {
         if let text = String(data: data, encoding: .utf8) { return text }
         // The byte limit can split a UTF-8 scalar. Only remove the incomplete
         // suffix; do not fall back to an encoding that would produce mojibake.
@@ -245,8 +325,7 @@ enum ClipboardHistoryPreviewLoader {
                 return text
             }
         }
-        return String(data: data, encoding: .utf16)
-            ?? String(data: data, encoding: .isoLatin1)
+        return nil
     }
 
     private static func imagePreview(data: Data) -> ClipboardHistoryPreviewBitmap? {
